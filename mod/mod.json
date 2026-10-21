@@ -1,0 +1,11 @@
+{
+  "id": "ragdoll",
+  "name": "Ragdolls: physical bodies for the dead and the knocked down (Jolt Physics)",
+  "version": "0.1.0",
+  "type": "native",
+  "entry": "ragdoll.dll",
+  "enabled": true,
+  "builds": ["1.2", "1.0"],
+  "load_order": 200,
+  "depends": []
+}

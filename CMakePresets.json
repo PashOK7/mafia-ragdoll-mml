@@ -1,0 +1,16 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "x86",
+      "displayName": "32-bit: the ragdoll mod",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/x86"
+    }
+  ],
+  "buildPresets": [
+    { "name": "x86-release", "configurePreset": "x86", "configuration": "RelWithDebInfo" },
+    { "name": "x86-debug", "configurePreset": "x86", "configuration": "Debug" }
+  ]
+}
