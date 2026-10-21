@@ -132,15 +132,30 @@ int TypeOf(void *a) {
 
 } // namespace
 
-void ListVehicles(const V3 &at, float radius, std::vector<void *> &out) {
-    out.clear();
+// The vehicles that may be near, asked of the loader four times a second (world_near walks and sorts every actor:
+// asked twice a tick for cars and trams, it was a tenth of the mod's time): a car at 50 m/s goes 12 m between two
+// askings, inside the 20 m the candidates reach past the radius, and each list is made from where they are now. A
+// destroyed one goes at once (Forget: the loader tells every actor's destruction).
+namespace {
+std::vector<void *> g_candidates;
+V3 g_candAt{};
+float g_candRadius = -1;
+unsigned long g_candTick;
+void Candidates(const V3 &at, float radius) {
+    unsigned long now = GetTickCount();
+    if (g_candRadius >= radius + Len(at - g_candAt) && now - g_candTick < 250) return;
+    g_candidates.clear();
+    g_candAt = at;
+    g_candRadius = std::max(radius, 80.0f) + 20.0f;
+    g_candTick = now;
     void *found[256];
     const float p[3] = {at.x, at.y, at.z};
     for (int type : {kCar, kTram}) {
-        int n = H->world_near(M, p, radius, type, found, 256);
-        for (int i = 0; i < n && i < 256; i++) out.push_back(found[i]);
+        int n = H->world_near(M, p, g_candRadius, type, found, 256);
+        for (int i = 0; i < n && i < 256; i++) g_candidates.push_back(found[i]);
     }
 }
+} // namespace
 
 void GatherVehicles(const V3 &lo, const V3 &hi, std::vector<smoke::Mover> &out) {
     out.clear();
@@ -175,8 +190,20 @@ void GatherVehicles(const V3 &lo, const V3 &hi, std::vector<smoke::Mover> &out) 
     }
 }
 
-void Clear() { g_bodies.clear(); }
-void Forget(void *car) { g_bodies.erase(car); }
+void ListVehicles(const V3 &at, float radius, std::vector<void *> &out) {
+    out.clear();
+    Candidates(at, radius);
+    for (void *car : g_candidates) {
+        V3 t, ax[3];
+        if (Pose(car, &t, ax) && Len(t - at) <= radius) out.push_back(car);
+    }
+}
+
+void Clear() { g_bodies.clear(); g_candidates.clear(); g_candRadius = -1; }
+void Forget(void *car) {
+    g_bodies.erase(car);
+    g_candidates.erase(std::remove(g_candidates.begin(), g_candidates.end(), car), g_candidates.end());
+}
 
 bool Pose(void *car, V3 *origin, V3 axes[3]) {
     bool ok = false;

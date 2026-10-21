@@ -1,4 +1,5 @@
 // knock: bodies knock living people over (see knock.h).
+#include "fmt.h"
 #include "knock.h"
 #include <cmath>
 #include <cstdarg>
@@ -9,9 +10,6 @@
 namespace knock {
 namespace {
 
-std::string Fmt(const char *fmt, ...) {
-    char b[1024]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap); return b;
-}
 
 // ---- settings (`knock set`, the effects panel's "Knocked over by bodies" tab)
 enum Tune { kOn, kSpeed, kMass, kWindow, kTunes };

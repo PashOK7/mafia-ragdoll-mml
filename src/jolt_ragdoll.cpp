@@ -1,4 +1,5 @@
 // Ragdolls on Jolt Physics (see jolt_ragdoll.h).
+#include "fmt.h"
 #include "jolt_ragdoll.h"
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -41,9 +42,6 @@ namespace {
 LogFn g_log;
 #define RLOG(...) (g_log ? g_log(__VA_ARGS__) : (void)0)
 
-std::string Fmt(const char *fmt, ...) {
-    char b[1024]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap); return b;
-}
 
 constexpr float kDeg = 0.0174533f;
 

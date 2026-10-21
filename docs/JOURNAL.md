@@ -32,3 +32,19 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
 - **Seen** (both labs, after the fixes): a person shot dead becomes a ragdoll and lies with his pelvis 17 cm over the
   pavement, in 1.2 and in 1.0; the scenery's sets stay put while nothing changes.
 
+- **Measured** (six corpses in each lab, `profile {focus: "mod_ragdoll"}`): 0.84 ms a frame, then 0.30 in both builds.
+  The loader's part went first (bone_set's model lookup, the scene walk: MafiaModLoader's journal). The mod's own:
+  - a corpse at rest was written every tick and every frame: a body asleep whose bones nobody turned since our write
+    (0.1 degrees) is written twice more and then left be (AtRest), until it wakes or the engine writes them;
+  - the corpses at the feet of people standing never slept (the Jolt step 0.99 ms): each living person's capsules were
+    moved every step by his idle sway of millimetres, and a kinematic body moved stays awake and wakes what it
+    touches. A part within a centimetre and a degree of where it is stays there, its velocity zeroed once, and
+    sleeps (the step 0.16 to 0.34 ms, with five living men standing in the pile);
+  - the vehicles near were asked of the loader four times a tick (world_near sorts every actor): candidates four
+    times a second, 20 m past the radius, filtered by where they are now; a destroyed one goes at once;
+  - `ragdoll.state` with seven ragdolls passed its 1024-byte buffer and came back cut, as a string: one Fmt of any
+    length (src/fmt.h) for the four copies. Each ragdoll says its `fastest_part` (m/s).
+  What is left: the poses of the people near kept every tick (2 % of the frame, what makes a death start moving as
+  he moved), the people's list, the Jolt step, the hits' shapes.
+- **Learnt**: `human.hit` with `part` 1 to 4 (the limbs) takes 0.3 of the damage from the health (C_human::Hit
+  0x5762A0): 300 on a leg leaves 10 of Paulie's 100. A test that means a death gives part 0 or a damage of 1000.

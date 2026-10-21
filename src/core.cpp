@@ -16,6 +16,7 @@
 // drawn), frame_watch (frame_life: the frames LS3D frees), scene_pieces (the scenery), actor_meshes (the cars' bodies),
 // hook (the dodge fix: the pedestrians' car sweep). The trams, the people dying seated in cars, the cars feeling the
 // bodies are mafia-ragdoll's as they were.
+#include "fmt.h"
 #include "core.h"
 #include <windows.h>
 #include <intrin.h>
@@ -44,14 +45,6 @@ using namespace mod;
 namespace core {
 namespace {
 
-std::string Fmt(const char *fmt, ...) {
-    char b[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(b, sizeof b, fmt, ap);
-    va_end(ap);
-    return b;
-}
 #define LOG(...) mod::Log(__VA_ARGS__)
 
 // ---- settings (config.json; the game's Options > Mods)
@@ -524,6 +517,22 @@ bool SafeApply(Ragdoll *r) {
     auto f = [&] { r->Apply(); };
     return Guarded(f);
 }
+// The bones' worst turn since our last write (degrees): the engine's animation played on the model meanwhile.
+float SafeOverwritten(Ragdoll *r) {
+    const char *bone = "";
+    float ow = 0;
+    auto f = [&] { ow = r->Overwritten(&bone); };
+    return Guarded(f) ? ow : 180.0f;
+}
+// A body at rest whose bones nobody turned since our write keeps the pose as it stands: written twice at rest (the
+// tick's and the frame's, so the model's update has the last of its motion), then left be until it wakes or the
+// engine writes them (0.1 degrees: a write read back differs by float rounding, an animation's frame by far more).
+bool AtRest(Ragdoll *r, float overwritten) {
+    if (!r->sleeping || overwritten > 0.1f) { r->restWrites = 0; return false; }
+    if (r->restWrites >= 2) return true;
+    r->restWrites++;
+    return false;
+}
 
 // ---- every tick: the poses of the people near the player remembered, and the deaths caught (people die through
 // many paths: a hit, a fall, a script, the water; a ragdoll starts whenever the alive flag drops, a hit only adds its
@@ -670,6 +679,7 @@ void TickBody(float dt) {
     if (joltOk) KnockByBodies(dt);
     for (size_t i = 0; i < g_ragdolls.size();) {
         Ragdoll *rd = g_ragdolls[i].get();
+        if (AtRest(rd, SafeOverwritten(rd))) { i++; continue; }
         if (SafeApply(rd)) {
             // the game's idea of where the body is: the actor's position or the element's, in the model's parent's space
             game::at<V3>(rd->actor, rd->pedestrian ? kPedPos : game::kActorPos) = game::ToParentPoint(rd->Model(), rd->rootPos);
@@ -824,12 +834,9 @@ void Render() {
         // the game brought him back since our tick: the game's (the tick drops the ragdoll)
         if (SafeAliveAgain(r.get())) continue;
         // the engine played the model's animation (a death animation) since our write: the muscles' next target
-        const char *bone = "";
-        float ow = 0;
-        auto f = [&] { ow = r->Overwritten(&bone); };
-        Guarded(f);
+        float ow = SafeOverwritten(r.get());
         if (ow > 0.5f && jolt_ragdoll::Has(r.get()) && SafeSnapshotNow(r.get())) r->animSerial++;
-        SafeApply(r.get());
+        if (!AtRest(r.get(), ow)) SafeApply(r.get());
     }
     if (g_cfg.draw)
         for (auto &r : g_ragdolls)
@@ -987,9 +994,12 @@ std::string State() {
     std::string list;
     for (auto &r : g_ragdolls) {
         V3 p = r->BodyPos(Ragdoll::B_PELVIS);
-        list += Fmt("%s{\"actor\":\"0x%08X\",\"pedestrian\":%s,\"knockdown\":%s,\"puppet\":%s,\"sleeping\":%s,\"age\":%.2f,\"pelvis\":[%.3f,%.3f,%.3f]}",
+        float fastest = 0;
+        for (int b = 0; b < Ragdoll::BodyCount(); b++) fastest = std::max(fastest, Len(r->BodyVel(b)));
+        list += Fmt("%s{\"actor\":\"0x%08X\",\"pedestrian\":%s,\"knockdown\":%s,\"puppet\":%s,\"sleeping\":%s,\"age\":%.2f,"
+                    "\"pelvis\":[%.3f,%.3f,%.3f],\"fastest_part\":%.4f}",
                     list.empty() ? "" : ",", (unsigned)(uintptr_t)r->actor, r->pedestrian ? "true" : "false", r->knockdown ? "true" : "false",
-                    r->puppet ? "true" : "false", r->sleeping ? "true" : "false", r->age, p.x, p.y, p.z);
+                    r->puppet ? "true" : "false", r->sleeping ? "true" : "false", r->age, p.x, p.y, p.z, fastest);
     }
     return Fmt("{\"enabled\":%s,\"ragdolls\":[%s],\"tracked\":%u,\"pedestrians\":%u,\"world\":%s,\"corpse_hits\":%u,\"dodge_fixes\":%u,"
                "\"car_stops\":%u,\"scenery\":\"%s\"}",

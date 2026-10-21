@@ -1,4 +1,5 @@
 // The mod's rigid-body world on Jolt Physics (see jolt_world.h).
+#include "fmt.h"
 #include "jolt_world.h"
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
@@ -36,9 +37,6 @@ namespace {
 LogFn g_log;
 #define JLOG(...) (g_log ? g_log(__VA_ARGS__) : (void)0)
 
-std::string Fmt(const char *fmt, ...) {
-    char b[1024]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap); return b;
-}
 
 double Now() {
     LARGE_INTEGER f, t;
@@ -370,6 +368,7 @@ struct Kinematic {
     JPH::BodyID body; unsigned version = 0, seen = 0; V3 pos{};
     JPH::Quat rot = JPH::Quat::sIdentity();
     bool dynamic = false;
+    bool still = false;   // a kinematic part left where it is (ApplyKinematics): its velocity zeroed once
     JPH::Vec3 vSet = JPH::Vec3::sZero(), wSet = JPH::Vec3::sZero();
 };
 std::unordered_map<const void *, Kinematic> g_kinematic;   // by mover key
@@ -505,8 +504,19 @@ void ApplyKinematics(float dt, const std::vector<smoke::Mover> &movers) {
             k.wSet = w;
         } else if (jump) {
             bi.SetPositionAndRotation(k.body, J(pos), rot, JPH::EActivation::Activate);
+            k.still = false;
+        } else if (Len(pos - k.pos) < 0.01f && std::fabs(rot.Dot(k.rot)) > 0.99996f) {
+            // Within a centimetre and a degree of where the part is (a person standing: his idle sway is
+            // millimetres): left there. A part moved every step stays awake, and so does every body it touches: the
+            // corpses at a standing man's feet never slept. Its velocity is zeroed once (a kinematic body keeps
+            // moving at the last one) and it sleeps; it is moved again once the pose has gone further.
+            if (!k.still) bi.SetLinearAndAngularVelocity(k.body, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+            k.still = true;
+            k.seen = g_tick;
+            continue;   // (k.pos, k.rot: where the body is)
         } else {
             bi.MoveKinematic(k.body, J(pos), rot, dt);
+            k.still = false;
         }
         k.pos = pos;
         k.rot = rot;
@@ -1099,11 +1109,13 @@ void MovingBounds(float cx, float cz, float reach, std::vector<Bounds> &out) {
 
 std::string Describe() {
     if (!g_w) return "jolt: off";
-    unsigned cars = (unsigned)g_carOfBody.size(), people = (unsigned)g_kinematic.size() - cars;
-    return Fmt("jolt: origin %.0f %.0f %.0f; %u bodies (%u static pieces, %u meshes, %u waiting; %u car and %u body-part "
-               "kinematics); step %.2f ms; scenery %.1f ms",
-               g_w->origin.x, g_w->origin.y, g_w->origin.z, g_w->system->GetNumBodies(), (unsigned)g_statics.size(),
-               (unsigned)g_meshes.size(), g_staticsPending, cars, people, g_stepMs, g_sceneryMs) +
+    unsigned cars = (unsigned)g_carOfBody.size(), people = (unsigned)g_kinematic.size() - cars, still = 0;
+    for (const auto &kv : g_kinematic) still += kv.second.still;
+    return Fmt("jolt: origin %.0f %.0f %.0f; %u bodies, %u awake (%u static pieces, %u meshes, %u waiting; %u car and %u "
+               "body-part kinematics, %u of them still); step %.2f ms; scenery %.1f ms",
+               g_w->origin.x, g_w->origin.y, g_w->origin.z, g_w->system->GetNumBodies(),
+               g_w->system->GetNumActiveBodies(JPH::EBodyType::RigidBody), (unsigned)g_statics.size(),
+               (unsigned)g_meshes.size(), g_staticsPending, cars, people, still, g_stepMs, g_sceneryMs) +
            Fmt("; %u floating bodies, %u in water%s", (unsigned)g_floats.size(), g_inWater, g_water ? "" : " (no water known)");
 }
 
