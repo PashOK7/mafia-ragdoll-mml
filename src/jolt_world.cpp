@@ -890,9 +890,13 @@ void ApplyPersonPushes(float dt) {
         float closing = (bi.GetPointVelocity(t.person, t.point) - bi.GetPointVelocity(t.body, t.point)).Dot(t.n);
         float depth = std::min(std::max(t.depth, 0.0f), 0.1f);
         float impact = g_personMass > 0 && closing > 0 ? closing / (w + 1.0f / g_personMass) : 0.0f;   // N s
-        // the blow into the person: the same impact with the body's own approach only (t.n points at the body)
-        float approach = -bi.GetPointVelocity(t.body, t.point).Dot(t.n);
-        if (g_personMass > 0 && approach > 0 && g_personBlows.size() < 256) {
+        // the blow into the person: the same impact with the body's own approach only (t.n points at the body), from a
+        // body that moves as a thrown one does (1.5 m/s and more where it touches): a body lying in a walker's way is
+        // shoved slowly by his own feet and bounces back at him (seen 2026-10-22: two of five people walking past
+        // corpses fell over them, 487 such blows in four minutes)
+        JPH::Vec3 bodyV = bi.GetPointVelocity(t.body, t.point);
+        float approach = -bodyV.Dot(t.n);
+        if (g_personMass > 0 && approach > 0 && bodyV.LengthSq() > 1.5f * 1.5f && g_personBlows.size() < 256) {
             float Jin = approach / (w + 1.0f / g_personMass);
             g_personBlows.push_back(PersonBlow{t.who, F(-t.n * Jin), F(JPH::Vec3(t.point)) + g_w->origin,
                                                t.body.GetIndexAndSequenceNumber()});
