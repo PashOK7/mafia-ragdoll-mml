@@ -4,8 +4,9 @@
     python tools/deploy.py --game 1.0   # one lab
 
 The build's output (build/x86/out/mml/mods/ragdoll/: ragdoll.dll, its PDB, mod.json, config.json) is copied into
-<lab>/mml/mods/ragdoll/; the lab's own mod.json "enabled" and config.json are kept once they exist (settings changed
-in the game stay). The loader loads a mod from a copy of its own (mml\\live), so the lab's DLL is never locked; a
+<lab>/mml/mods/ragdoll/; the lab's own mod.json "enabled" is kept once it exists. config.json is the settings'
+defaults and goes as built: what was changed in the game is kept in <lab>/mml/data/ragdoll/config.json, which a
+deploy leaves alone. The loader loads a mod from a copy of its own (mml/live), so the lab's DLL is never locked; a
 running game of that lab then reloads it (MafiaModLoader's MCP server through its tools/mcp_call.py).
 """
 import argparse
@@ -39,8 +40,6 @@ def deploy(build, folder):
         src, dst = os.path.join(OUT, name), os.path.join(dest, name)
         if os.path.isdir(src) or name.lower().endswith(('.ilk', '.exp', '.lib')):
             continue
-        if name == 'config.json' and os.path.exists(dst):
-            continue   # (the lab's settings stay)
         data = open(src, 'rb').read()
         if name == 'mod.json' and os.path.exists(dst):
             keep = enabled_of(open(dst, encoding='utf-8').read())

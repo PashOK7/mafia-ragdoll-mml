@@ -1,4 +1,14 @@
 {
   "enabled": true,
-  "debug_draw": false
+  "car_knockdown": true,
+  "car_feel": true,
+  "bullets": true,
+  "debug_draw": false,
+  "car_push": 0.7,
+  "bullet_kick": 1.0,
+  "bullet_whole": 0.6,
+  "bullet_radius": 0.3,
+  "bullet_max_part": 8.0,
+  "bullet_remember": 0.3,
+  "track_radius": 60.0
 }

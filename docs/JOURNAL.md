@@ -48,3 +48,11 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   he moved), the people's list, the Jolt step, the hits' shapes.
 - **Learnt**: `human.hit` with `part` 1 to 4 (the limbs) takes 0.3 of the damage from the health (C_human::Hit
   0x5762A0): 300 on a leg leaves 10 of Paulie's 100. A test that means a death gives part 0 or a damage of 1000.
+- **Made**: the settings page (Options > Mods > Ragdolls): two tabs, Bodies (ragdolls, cars knocking down, cars
+  feeling bodies, bullets pushing bodies, how far people are watched, the bodies drawn) and Forces (a car's push, a
+  bullet's push, its whole-body share and spread, the fastest a blow makes a part, how long a living man's last shots
+  are kept for his body); every default in config.json. `tools/check_settings.py` lays it out in a running lab
+  (panel.layout) and judges it with the loader's own offline check: ALL PASSED. deploy.py had kept a lab's
+  config.json, the defaults (what the game changed is in mml/data/ragdoll/): it goes as built now.
+- **Seen** (both labs): the page with the game's controls (1.0's in French around it); "Bodies drawn" ticked there
+  reached the mod at once (the capsules over the six corpses, the sleeping ones violet).

@@ -7,5 +7,32 @@
   "enabled": true,
   "builds": ["1.2", "1.0"],
   "load_order": 200,
-  "depends": []
+  "depends": [],
+  "settings": {
+    "title": "Ragdolls",
+    "sections": [
+      {
+        "title": "Bodies",
+        "controls": [
+          {"key": "enabled", "label": "Ragdolls"},
+          {"key": "car_knockdown", "label": "Cars knock down"},
+          {"key": "car_feel", "label": "Cars feel bodies"},
+          {"key": "bullets", "label": "Bullets push bodies"},
+          {"key": "track_radius", "label": "Watched within", "min": 20, "max": 150, "step": 10, "unit": "m"},
+          {"key": "debug_draw", "label": "Bodies drawn"}
+        ]
+      },
+      {
+        "title": "Forces",
+        "controls": [
+          {"key": "car_push", "label": "Car's push", "min": 0, "max": 1.5, "step": 0.05, "show": "value"},
+          {"key": "bullet_kick", "label": "Bullet's push", "min": 0, "max": 4, "step": 0.1, "show": "value"},
+          {"key": "bullet_whole", "label": "Whole body share", "min": 0, "max": 1, "step": 0.05, "show": "value"},
+          {"key": "bullet_radius", "label": "Spread of a blow", "min": 0, "max": 1, "step": 0.05, "unit": "m"},
+          {"key": "bullet_max_part", "label": "Fastest part", "min": 1, "max": 20, "step": 0.5, "unit": "m/s"},
+          {"key": "bullet_remember", "label": "Last shots kept", "min": 0, "max": 1, "step": 0.05, "unit": "s"}
+        ]
+      }
+    ]
+  }
 }
