@@ -346,6 +346,26 @@ void OnCabinGone(const void *car) {
     for (auto &kv : g_entries) if (kv.second.car == car) Unseat(kv.second);
 }
 
+// The car jumped (a teleport): the bodies seated in it go with it, each part where it was in the car, at rest (left
+// behind, the seat's spring dragged the body after its car through the street and the floor).
+void OnCabinJump(const void *car, const JPH::Vec3 &fromPos, const JPH::Quat &fromRot, const JPH::Vec3 &toPos, const JPH::Quat &toRot) {
+    JPH::BodyInterface &bi = jolt_world::Bodies();
+    JPH::Quat turn = (toRot * fromRot.Conjugated()).Normalized();
+    for (auto &kv : g_entries) {
+        Entry &e = kv.second;
+        if (e.car != car || !e.ragdoll) continue;
+        for (int b = 0; b < BODIES; b++) {
+            JPH::BodyID id = e.ragdoll->GetBodyID(b);
+            JPH::RVec3 p;
+            JPH::Quat q;
+            bi.GetPositionAndRotation(id, p, q);
+            bi.SetPositionAndRotation(id, toPos + turn * (p - fromPos), (turn * q).Normalized(), JPH::EActivation::Activate);
+            bi.SetLinearAndAngularVelocity(id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+        }
+        RLOG("ragdoll %p carried with its car %p's jump", kv.first, car);
+    }
+}
+
 // The pelvis held where it sits: 5 cm of play each way and 15 degrees about every axis (a body on a seat with
 // nothing to hold it but friction and the seat's shape; the cabin's triangles do the rest).
 void Seat(Entry &e) {
@@ -439,6 +459,7 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn) {
     V3 rorigin = JoltBridge::Origin(r);
     if (!jolt_world::Running() && !jolt_world::Start(g_log, rorigin, err)) return false;
     jolt_world::SetCabinGoneListener(OnCabinGone);
+    jolt_world::SetCabinJumpListener(OnCabinJump);
     V3 shift = rorigin - jolt_world::Origin();   // the ragdoll's local frame -> Jolt space
     const V3 *P = JoltBridge::Points(r);         // the start pose (world)
     V3 fwd = JoltBridge::Facing(r);

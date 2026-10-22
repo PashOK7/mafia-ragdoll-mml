@@ -537,6 +537,7 @@ void ApplyKinematics(float dt, const std::vector<smoke::Mover> &movers) {
 std::unordered_map<const void *, Kinematic> g_cabins;
 std::unordered_set<const void *> g_cabinWanted;
 CabinGoneFn g_cabinGone;
+CabinJumpFn g_cabinJump;
 
 void DropCabin(std::unordered_map<const void *, Kinematic>::iterator it) {
     if (g_cabinGone) g_cabinGone(it->first);
@@ -585,8 +586,12 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
         }
         Kinematic &k = it->second;
         if (dt <= 0 || Len(pos - k.pos) > 30.0f * dt + 2.0f) {
-            JLOG("jolt: car %p's cabin jumped %.2f m (dt %.3f)", m.key, Len(pos - k.pos), dt);
+            JPH::RVec3 fromPos;
+            JPH::Quat fromRot;
+            bi.GetPositionAndRotation(k.body, fromPos, fromRot);
             bi.SetPositionAndRotation(k.body, J(pos), rot, JPH::EActivation::Activate);
+            JLOG("jolt: car %p's cabin jumped %.2f m (dt %.3f): its seated carried with it", m.key, Len(pos - k.pos), dt);
+            if (g_cabinJump) g_cabinJump(m.key, fromPos, fromRot, JPH::Vec3(J(pos)), rot);
         } else {
             bi.MoveKinematic(k.body, J(pos), rot, dt);
         }
@@ -1056,6 +1061,7 @@ JPH::BodyID CabinBody(const void *car) {
     return it != g_cabins.end() ? it->second.body : JPH::BodyID();
 }
 void SetCabinGoneListener(CabinGoneFn fn) { g_cabinGone = fn; }
+void SetCabinJumpListener(CabinJumpFn fn) { g_cabinJump = fn; }
 
 const std::vector<Push> &CarPushes() { return g_pushes; }
 const std::vector<CarKick> &CarKicks() { return g_carKicks; }

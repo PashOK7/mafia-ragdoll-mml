@@ -16,7 +16,7 @@
 #include "mathx.h"
 #include "smoke.h"
 
-namespace JPH { class PhysicsSystem; class BodyInterface; class BodyID; }
+namespace JPH { class PhysicsSystem; class BodyInterface; class BodyID; class Vec3; class Quat; }
 
 namespace jolt_world {
 using LogFn = void (*)(const char *fmt, ...);
@@ -85,6 +85,11 @@ JPH::BodyID CabinBody(const void *car);   // invalid while there is none
 // Told before a cabin's body goes (the car left the world, or nobody asks for it): constraints to it must go first.
 using CabinGoneFn = void (*)(const void *car);
 void SetCabinGoneListener(CabinGoneFn fn);
+// Told when a cabin jumped (the car teleported: a script, a respawn) from one pose to another (Jolt's space), after
+// its body was put there: whatever sits in it is to be carried the same way.
+using CabinJumpFn = void (*)(const void *car, const JPH::Vec3 &fromPos, const JPH::Quat &fromRot, const JPH::Vec3 &toPos,
+                             const JPH::Quat &toRot);
+void SetCabinJumpListener(CabinJumpFn fn);
 
 // Impulse (N s, world) the dynamic bodies gave each car during the last step, estimated from the contacts.
 struct Push { const void *car; V3 impulse; };

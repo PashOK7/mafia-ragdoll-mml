@@ -66,3 +66,7 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   driver is type 5, a car's), got up after 4 s under his own car, still seated, and died there. Someone alive in a
   car's seat is never knocked down now (the loader's human_get_up refuses such a man too). Seen in both labs: the same
   crash, Tommy alive in his seat with the game's own damage (169 of 200), the dead passenger still beside him.
+- **Fixed**: a car teleported with a dead man in it (a script, `teleport`) left the body behind: the seat's spring
+  dragged it 35 m after the car, through the street, and it arrived on the floor at 3 m/s. A cabin's jump now tells
+  jolt_ragdoll, which carries every body seated in it by the same move and turn, at rest. Seen in both labs: a car
+  teleported 32 m and turned 90 degrees, the passenger's pelvis at the same place in his seat to the centimetre.
