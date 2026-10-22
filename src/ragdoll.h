@@ -38,6 +38,7 @@ public:
     bool knockdown = false;    // a living human knocked over by a car: handed back to the game once it lies still
     bool sleeping = false;     // at rest (Jolt's sleep)
     int restWrites = 0;        // the pose written at rest so far (core's AtRest: after two, the bones are left be)
+    bool shapeAtRest = false;  // its capsules given to the loader's bullets while asleep (kept there: not again)
     float sleepTimer = 0;
     float age = 0;
 

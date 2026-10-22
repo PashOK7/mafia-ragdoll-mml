@@ -107,3 +107,7 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   panics and goes under ("x panika leh dolu", "!plachteni"), and he sinks to -137 m before it drops: no ragdoll then
   (he is far out of reach). The AGENTS.md place "the embankment" is the pavement beside it: the open water is 5 m on
   along +x (-1591.1, -33.8).
+- **Measured** (1.2, 22 corpses near the player, 13 people tracked): 0.82 ms a frame; the bodies' capsules given to
+  the loader's bullets every tick were 3 % of the frame. The loader keeps them until they are given again: a body
+  asleep gives them once now (0.58 ms a frame). A sleeping corpse shot afterwards: two bullets on its capsules, taken.
+  A restore point loaded with corpses lying: the game's own load brought them back and the mod adopted them again.

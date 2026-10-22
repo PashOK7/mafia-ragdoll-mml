@@ -347,7 +347,9 @@ void KeptTick() {
 void GiveShapes() {
     MmlCapsule caps[Ragdoll::BCOUNT];
     for (auto &r : g_ragdolls) {
-        if (!g_cfg.bullets) { Unshape(r->actor); continue; }
+        if (!g_cfg.bullets) { Unshape(r->actor); r->shapeAtRest = false; continue; }
+        // the loader keeps the capsules until they are given again: a body asleep gives them once
+        if (r->sleeping && r->shapeAtRest) continue;
         for (int b = 0; b < Ragdoll::BodyCount(); b++) {
             V3 a, e;
             float rad;
@@ -355,6 +357,7 @@ void GiveShapes() {
             caps[b] = {{a.x, a.y, a.z}, {e.x, e.y, e.z}, rad};
         }
         if (H->bullet_shape(M, r->actor, caps, Ragdoll::BodyCount())) g_shapesGiven++;
+        r->shapeAtRest = r->sleeping;
     }
 }
 
