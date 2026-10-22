@@ -32,6 +32,10 @@ the function is in `build/x86/ragdoll.map` (the linker's map).
 | `src/scenery.cpp` | the static world from the loader's `scene_pieces` (water faces left out) |
 | `src/vehicles.cpp` | the cars' bodies from the loader's `actor_meshes` |
 | `src/knock.cpp` | bodies knocking living people over |
+| `src/ragcam.cpp` | the ragdoll camera: the player's body circled by the mouse while he lies and gets up (`camera_override`) |
+| `src/fmt.h` | printf into a string of any length |
+| `mod/mod.json`, `mod/config.json` | the manifest with the settings page (Options > Mods: Bodies, Forces, Camera); the defaults |
+| `tools/deploy.py`, `tools/check_settings.py` | into the labs; the settings page laid out and judged by the loader's own check |
 
 ## Rules
 
