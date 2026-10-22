@@ -96,3 +96,14 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   1000 N s and threw a body 12 m.
 - **Seen** (both labs, the scripts' `explosion 6, 400`): two corpses 2 m from it thrown 4.6 to 7.3 m, a man 3 m away
   killed by it and thrown, a man 5 m away (67 of damage, alive) knocked 2.4 m and up again 2.5 s later.
+- **Fixed**: bodies never floated ("no water known"): the port had not given jolt_world its water. It is the loader's
+  world_water now, asked from just over each body (and from 12 m over for one sunk deeper) and taken only where no
+  static face is between (the city's river is one plane under the whole city: asked from high up, every street had
+  water under it), kept in cells of 2 m by 1 m for the mission. WaterFn takes the body's height.
+- **Seen** (both labs, the city's embankment by Little Italy's bridge): a man by the parapet killed by a blast behind
+  him flew over it into the river and floats there, his back and the back of his head at the surface (-9.99; the
+  pelvis 0.6 to 0.8 m under, the parts' buoyancies as mafia-ragdoll had them: a body is hardly lighter than water).
+- **Learnt**: the game drowns a person in deep water its own way: his health 0 at once, his alive flag kept while he
+  panics and goes under ("x panika leh dolu", "!plachteni"), and he sinks to -137 m before it drops: no ragdoll then
+  (he is far out of reach). The AGENTS.md place "the embankment" is the pavement beside it: the open water is 5 m on
+  along +x (-1591.1, -33.8).

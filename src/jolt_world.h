@@ -120,11 +120,12 @@ void AddFocus(const V3 &lo, const V3 &hi);
 using ImpactFn = void (*)(const JPH::BodyID &body, float speed, const V3 &point, const V3 &normal);
 void SetImpactListener(ImpactFn fn);
 
-// Water: the surface over a point (world): its height, its normal (up), the water's flow (m/s); false where there is
-// no water. Given by the game's water (game_water); none: nothing floats.
-using WaterFn = bool (*)(float x, float z, float *surfaceY, V3 *normal, V3 *flow);
+// Water: the surface under or over a point (world; y the body's: a street over the city's river plane is no water for
+// what lies on it): its height, its normal (up), the water's flow (m/s); false where there is no open water. Given
+// by the mod (core: the loader's world_water); none: nothing floats.
+using WaterFn = bool (*)(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow);
 void SetWaterQuery(WaterFn fn);
-bool WaterAt(float x, float z, float *surfaceY, V3 *normal, V3 *flow);
+bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow);
 // A dynamic body in water: buoyancy 1 is neutral, below sinks, above floats; Jolt's drag factors (linear ~0.5,
 // angular ~0.01). Applied before every step while the body exists.
 void SetFloat(const JPH::BodyID &id, float buoyancy, float linearDrag, float angularDrag);

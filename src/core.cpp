@@ -22,6 +22,7 @@
 #include <intrin.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -570,7 +571,7 @@ void TrackPoses(float dt) {
         if (!alive && g_cfg.enabled && !Find(h) && !g_failed.count(h)) {
             std::string err;
             if (Start(h, false, &err)) LOG("dead body %p adopted", h);
-            else g_failed.insert(h);
+            else { LOG("dead body %p not adopted: %s", h, err.c_str()); g_failed.insert(h); }
         }
         if (Find(h)) continue;
         Ragdoll::PoseSnap snap;
@@ -989,6 +990,39 @@ void OnActorDestroyed(void *actor) {
     g_carTracks.erase(actor);
 }
 
+// ---- the water the bodies float in (jolt_world's buoyancy): the loader's world_water from just over the body, as the
+// game asks it under a person, and only open water (a street, a pier, a bridge's deck between: none; the city's river
+// is one plane under the whole city, under every street). Kept in cells of 2 m across and 1 m high for the mission
+// (the game's water does not move, and every part of every body near water asks each tick). The flow: none.
+std::unordered_map<uint64_t, float> g_waterCells;   // the surface's height; NaN: no open water there
+bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
+    int32_t cx = static_cast<int32_t>(std::floor(x * 0.5f)), cz = static_cast<int32_t>(std::floor(z * 0.5f));
+    int32_t cy = static_cast<int32_t>(std::floor(y));
+    uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(cx) & 0x1FFFFF) << 43) |
+                   (static_cast<uint64_t>(static_cast<uint32_t>(cy) & 0x3FFFFF) << 21) | (static_cast<uint32_t>(cz) & 0x1FFFFF);
+    auto it = g_waterCells.find(key);
+    if (it == g_waterCells.end()) {
+        if (g_waterCells.size() > 200000) g_waterCells.clear();
+        MmlWater w{};
+        w.size = sizeof w;
+        // from 3 m over the cell (the host looks from 2 m over `at`), then, for a body sunk deeper, from 12 m: water
+        // found with something of the static world between is not open
+        float at[3] = {cx * 2.0f + 1.0f, cy + 1.0f, cz * 2.0f + 1.0f};
+        bool found = H->world_water(M, at, &w) != 0;
+        if (!found) {
+            at[1] = cy + 10.0f;
+            found = H->world_water(M, at, &w) != 0 && w.height > cy;
+        }
+        bool open = found && !w.covered;
+        it = g_waterCells.emplace(key, open ? w.height : std::numeric_limits<float>::quiet_NaN()).first;
+    }
+    if (std::isnan(it->second)) return false;
+    *surfaceY = it->second;
+    *normal = {0, 1, 0};
+    *flow = {0, 0, 0};
+    return true;
+}
+
 void OnMissionClose() {
     ragcam::Stop();
     g_playerRisingUntil = 0;
@@ -998,6 +1032,7 @@ void OnMissionClose() {
     jolt_ragdoll::Clear();
     jolt_world::Stop();   // (the next mission's world is made around the player)
     scenery::Clear();
+    g_waterCells.clear();   // (the next mission's water)
     vehicles::Clear();
     knock::Clear();
     g_gettingUpInTram.clear();
@@ -1045,6 +1080,7 @@ void Settings() {
 }
 
 void Start() {
+    jolt_world::SetWaterQuery(WaterAt);
     jolt_ragdoll::Init(mod::Log);
     knock::Init(mod::Log);
     Settings();
@@ -1066,10 +1102,12 @@ std::string State() {
         V3 p = r->BodyPos(Ragdoll::B_PELVIS);
         float fastest = 0;
         for (int b = 0; b < Ragdoll::BodyCount(); b++) fastest = std::max(fastest, Len(r->BodyVel(b)));
+        V3 ch = r->BodyPos(Ragdoll::B_CHEST), hd = r->BodyPos(Ragdoll::B_HEAD);
         list += Fmt("%s{\"actor\":\"0x%08X\",\"pedestrian\":%s,\"knockdown\":%s,\"puppet\":%s,\"sleeping\":%s,\"age\":%.2f,"
-                    "\"pelvis\":[%.3f,%.3f,%.3f],\"fastest_part\":%.4f}",
+                    "\"pelvis\":[%.3f,%.3f,%.3f],\"chest\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f],\"fastest_part\":%.4f}",
                     list.empty() ? "" : ",", (unsigned)(uintptr_t)r->actor, r->pedestrian ? "true" : "false", r->knockdown ? "true" : "false",
-                    r->puppet ? "true" : "false", r->sleeping ? "true" : "false", r->age, p.x, p.y, p.z, fastest);
+                    r->puppet ? "true" : "false", r->sleeping ? "true" : "false", r->age, p.x, p.y, p.z, ch.x, ch.y, ch.z,
+                    hd.x, hd.y, hd.z, fastest);
     }
     return Fmt("{\"enabled\":%s,\"ragdolls\":[%s],\"tracked\":%u,\"pedestrians\":%u,\"world\":%s,\"corpse_hits\":%u,\"dodge_fixes\":%u,"
                "\"car_stops\":%u,\"scenery\":\"%s\"}",

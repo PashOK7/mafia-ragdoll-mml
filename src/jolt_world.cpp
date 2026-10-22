@@ -809,7 +809,7 @@ void CarsInWater(float dt) {
         now[kv.first] = c;
         float y;
         V3 n, flow;
-        if (!g_water(c.x, c.z, &y, &n, &flow)) continue;
+        if (!g_water(c.x, c.y, c.z, &y, &n, &flow)) continue;
         float lo = box.mMin.GetY() + g_w->origin.y, hi = box.mMax.GetY() + g_w->origin.y;
         if (!(lo < y && hi > y - 0.2f)) continue;
         wet.insert(kv.first);
@@ -849,7 +849,7 @@ void ApplyWater(float dt) {
         V3 n, flow;
         Float &f = it->second;
         bool wet = false;
-        if (g_water(c.x, c.z, &y, &n, &flow)) {
+        if (g_water(c.x, c.y, c.z, &y, &n, &flow)) {
             JPH::AABox box = bi.GetTransformedShape(id).GetWorldSpaceBounds();
             float lo = box.mMin.GetY() + g_w->origin.y, hi = box.mMax.GetY() + g_w->origin.y;
             if (lo < y) {
@@ -1088,9 +1088,9 @@ const void *VehicleAround(const V3 &at, float down, float up) {
 }
 
 void SetWaterQuery(WaterFn fn) { g_water = fn; }
-bool WaterAt(float x, float z, float *surfaceY, V3 *normal, V3 *flow) {
+bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
     V3 n{0, 1, 0}, f{};
-    return g_water && g_water(x, z, surfaceY, normal ? normal : &n, flow ? flow : &f);
+    return g_water && g_water(x, y, z, surfaceY, normal ? normal : &n, flow ? flow : &f);
 }
 void SetFloat(const JPH::BodyID &id, float buoyancy, float linearDrag, float angularDrag) {
     if (!id.IsInvalid()) g_floats[id.GetIndexAndSequenceNumber()] = Float{buoyancy, linearDrag, angularDrag};
