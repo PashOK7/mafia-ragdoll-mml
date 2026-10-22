@@ -13,6 +13,8 @@ The physics is [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 5.6, the on
   from the pose he had a tick before the game reacted, moving as his animation moved, pushed by what killed him: a
   bullet where it struck, a car at its speed, an explosion. The game's death animation, while it plays, is the
   muscles' target for a moment; then the body goes limp.
+- **Explosions.** A grenade, a car blowing up or a mission's explosion throws every body within its reach away from
+  it, each part by its own distance, so a body turns over as it flies; the living near it are knocked down.
 - **Knock-downs.** A car (at about 7 m/s or more) knocks a living man over as a ragdoll; once he lies still he gets
   up with the game's own get-up, from the back or the front, blended from the pose his body was left in. A body
   thrown at someone knocks him over the same way. Nobody alive in a car's seat is knocked down: the game keeps him
@@ -32,7 +34,7 @@ The physics is [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 5.6, the on
 ## Install
 
 1. Install MafiaModLoader (its release archive) into the game's folder.
-2. Copy the `ragdoll` folder of this mod's archive into `<game>\mml\mods\`.
+2. Unpack this mod's archive into the game's folder (it holds `mml\mods\ragdoll\`).
 3. Start the game. The mod is on by default; its settings are in the game's **Options > Mods > Ragdolls**.
 
 ## Settings (Options > Mods > Ragdolls)
@@ -43,11 +45,14 @@ The physics is [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 5.6, the on
 | | Cars knock down | cars knock living people over as ragdolls (the player too) |
 | | Cars feel bodies | cars are slowed by the bodies they push |
 | | Bullets push bodies | bullets strike the bodies on the ground |
+| | Blasts knock down | an explosion knocks the living near it over as ragdolls |
 | | Watched within | how far from the player people's poses are kept (a death starts from them) |
 | | Bodies drawn | the bodies' capsules drawn over the world (to see what the physics sees) |
 | Forces | Car's push | the share of a car's speed given to a body where it strikes it |
 | | Bullet's push, Whole body share, Spread of a blow, Fastest part | how hard a bullet pushes, how much of it moves the whole body, how far around the hit it spreads, the fastest it makes one part |
+| | Strongest shot | the most momentum one hit gives a body (a script's huge damage stays a shot) |
 | | Last shots kept | a living man's last bullets given to his body when he dies within this time |
+| | Blast's push | how hard an explosion throws the bodies within its reach |
 | Camera | Camera on the body | the ragdoll camera on or off |
 | | Mouse turn, Nearest, Furthest, Softness, Back to the game's, Starts further by | how it turns, how near and far the wheel brings it, how softly it follows, how long it blends back, where it starts |
 
@@ -69,7 +74,8 @@ cmake --build --preset x86-release
 ```
 
 The mod is in `build\x86\out\mml\mods\ragdoll\`. `python tools\deploy.py` copies it into the labs named in
-MafiaModLoader's `mml.config.json` and reloads it in a running game. Agents: read `AGENTS.md`.
+MafiaModLoader's `mml.config.json` and reloads it in a running game; `python tools\pack.py` makes the players'
+archive (`build\dist\mafia-ragdoll-<version>-<date>.zip`). Agents: read `AGENTS.md`.
 
 ## Credits
 

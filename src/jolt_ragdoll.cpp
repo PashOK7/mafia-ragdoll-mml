@@ -691,9 +691,8 @@ bool SetTune(const char *name, float value, std::string *out) {
 std::string Describe() {
     unsigned active = 0;
     for (auto &kv : g_entries) active += kv.second.ragdoll && kv.second.ragdoll->IsActive(false);
-    return Fmt("jolt ragdolls: %s, %u (%u moving); ", Enabled() ? "on" : "off (the settings table is out of order)",
-               (unsigned)g_entries.size(), active) +
-           jolt_world::Describe();
+    return Fmt("jolt ragdolls: %s, %u (%u moving)", Enabled() ? "on" : "off (the settings table is out of order)",
+               (unsigned)g_entries.size(), active);   // (the world's own: jolt_world::Describe, beside it in `jolt`)
 }
 
 // `jolt body <actor>`: one ragdoll's parts as Jolt has them: speed, spin, and what each part overlaps now (the
