@@ -61,8 +61,8 @@ The same keys are in `mod\ragdoll\config.json` (the defaults); what is changed i
 
 ## Cost
 
-About 0.3 ms a frame with six bodies lying near the player and a dozen people around (measured in both builds with
-MafiaModLoader's `profile`); bodies at rest sleep and cost almost nothing.
+About 0.3 ms a frame with six bodies lying near the player and a dozen people around, 0.6 ms with twenty-two
+(measured with MafiaModLoader's `profile`); bodies at rest sleep and cost little.
 
 ## Building
 

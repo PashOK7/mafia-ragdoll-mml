@@ -80,8 +80,9 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   second turned it 80 to 95 degrees round him while his facing stayed; it stayed on him the 2 s of the get-up, blended
   back in 0.6 s and gave the camera back. In 1.0 his body lay behind a car and the camera looked into its wheel: the
   test against walls only took the static world; with the cars too it stops in front of the car (100 frames kept out).
-- **Not measured**: the wheel's value in the actions (a notch taken as 120 counts, an action's 1.0 as 400): the
-  loader injects the wheel only into the menus, so it wants a real mouse.
+- **Measured** (1.2 lab, the loader's `input.mouse {wheel: 2}` while the camera was on the body): two notches read
+  0.6 of Cycle Up (0.3 a notch: 120 counts of an action's 400) and brought the camera from 2.98 to 2.26 m (0.87
+  squared). (Written first as "not measured: the wheel reaches only the menus": it reaches the game everywhere.)
 - **Seen** (1.0 lab): the player driving a Bolt-Thrower into Paulie at 11.1 m/s: a knock-down ragdoll (the game's
   type 8, 35 of damage), thrown 5 m, then killed by the car's next hits as in 1.2; his body 20 cm over the street. A
   traffic pedestrian shot dead lies on the kerb, his pelvis 14 cm over it. (A car the player was seated in by

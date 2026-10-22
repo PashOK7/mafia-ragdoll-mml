@@ -14,7 +14,7 @@ namespace {
 constexpr float kRad = 0.01745329f;
 constexpr float kNotch = 0.87f;          // the distance times this per wheel notch forward (nearer)
 constexpr float kCountsPerAim = 400.0f;  // an "Aim X" of 1.0 for a frame is 400 of the mouse's counts
-constexpr float kCountsPerNotch = 120;   // a wheel notch: 120 counts on the mouse's z axis
+constexpr float kCountsPerNotch = 120;   // a wheel notch: 120 counts on the mouse's z axis (read 0.3 of Cycle Up a notch)
 
 struct Config {
     bool on = true;
