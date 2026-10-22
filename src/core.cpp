@@ -35,6 +35,7 @@
 #include "jolt_ragdoll.h"
 #include "jolt_world.h"
 #include "knock.h"
+#include "ragcam.h"
 #include "mod.h"
 #include "ragdoll.h"
 #include "scenery.h"
@@ -65,6 +66,7 @@ struct Config {
 
 std::vector<std::unique_ptr<Ragdoll>> g_ragdolls;
 unsigned g_tick;
+DWORD g_playerRisingUntil;   // the player gets up (human_get_up) until then, or 0
 float g_lastDt = 1.0f / 60.0f;
 
 // The last two poses of every person near the player: a ragdoll starts from the pose before the game reacted, with
@@ -628,6 +630,40 @@ void KnockByBodies(float dt) {
     }
 }
 
+// A living man whose ragdoll was taken off gets up the game's way (the loader blends from the pose last drawn); the
+// player's camera stays on his body meanwhile.
+void GetUp(void *actor) {
+    if (H->human_get_up(M, actor, 600)) {
+        LOG("%p gets up", actor);
+        if (actor == H->human_player(M)) g_playerRisingUntil = GetTickCount() + 5000;
+    } else {
+        LOG("%p could not get up the game's way: handed back as he lies", actor);
+    }
+}
+
+// What the ragdoll camera circles (ragcam.h): the player's body while it is a ragdoll (its pelvis, a little up), and
+// while he gets up (his action queue, state 6, then the get-up's own track, state 4 with the game's get-up from the
+// back, 111, or the front, 338: both builds; 5 s the most) his lower back; else nothing.
+constexpr int kGetUpBack = 111, kGetUpFront = 338;
+bool PlayerBodyPoint(V3 *p) {
+    void *pl = H->human_player(M);
+    if (!pl) return false;
+    if (Ragdoll *rd = Find(pl)) { *p = rd->BodyPos(Ragdoll::B_PELVIS) + V3{0, 0.25f, 0}; return true; }
+    if (!g_playerRisingUntil) return false;
+    MmlHumanAnim a{};
+    a.size = sizeof a;
+    MmlBone b[MML_BONE_COUNT];
+    bool rising = H->human_anim_state(M, pl, &a) &&
+                  (a.state == 6 || (a.state == 4 && (a.playing == kGetUpBack || a.playing == kGetUpFront)));
+    if (static_cast<int>(GetTickCount() - g_playerRisingUntil) >= 0 || !rising ||
+        H->human_skeleton(M, pl, b, MML_BONE_COUNT) < MML_BONE_COUNT || !b[MML_BONE_BACK1].frame) {
+        g_playerRisingUntil = 0;   // up: the game's camera
+        return false;
+    }
+    *p = V3{b[MML_BONE_BACK1].world[12], b[MML_BONE_BACK1].world[13], b[MML_BONE_BACK1].world[14]};
+    return true;
+}
+
 void TickBody(float dt) {
     g_tick++;
     Purge();
@@ -650,8 +686,7 @@ void TickBody(float dt) {
             bool ped = rd->pedestrian;
             V3 pelvis = rd->BodyPos(Ragdoll::B_PELVIS);
             EraseAt(i);   // (no more of our writes: the get-up blends from the pose last drawn)
-            if (H->human_get_up(M, actor, 600)) LOG("%p gets up", actor);
-            else LOG("%p could not get up the game's way: handed back as he lies", actor);
+            GetUp(actor);
             if (!ped) EnterTramUnder(actor, pelvis);
             continue;
         }
@@ -692,6 +727,8 @@ void TickBody(float dt) {
     GiveShapes();
     TrackPoses(dt);
     SafeTrackCars(dt);
+    V3 body;
+    ragcam::Follow(PlayerBodyPoint(&body) ? &body : nullptr);
     g_lastDt = dt;
 }
 
@@ -929,6 +966,8 @@ void OnActorDestroyed(void *actor) {
 }
 
 void OnMissionClose() {
+    ragcam::Stop();
+    g_playerRisingUntil = 0;
     if (!g_ragdolls.empty()) LOG("mission close: dropping %u ragdolls", (unsigned)g_ragdolls.size());
     for (auto &r : g_ragdolls) Unshape(r->actor);
     g_ragdolls.clear();
@@ -964,6 +1003,7 @@ void Settings() {
     g_cfg.maxPart = num("bullet_max_part", d.maxPart);
     g_cfg.remember = num("bullet_remember", d.remember);
     g_cfg.draw = flag("debug_draw", d.draw);
+    ragcam::Settings();
     // the physics' own tables (jolt_ragdoll's muscles and joints, knock's thresholds): "jolt.<name>", "knock.<name>"
     for (auto [prefix, list, set] : {std::make_tuple("jolt.", &jolt_ragdoll::Tunes, &jolt_ragdoll::SetTune),
                                      std::make_tuple("knock.", &knock::Tunes, &knock::SetTune)}) {
@@ -986,6 +1026,7 @@ void Start() {
 }
 
 void Stop() {
+    ragcam::Stop();
     for (auto &r : g_ragdolls) Unshape(r->actor);
     g_ragdolls.clear();
     jolt_ragdoll::Clear();
@@ -1027,7 +1068,7 @@ std::string Exec(const std::string &cmd, const std::string &args, bool *ok) {
         if (!Find(who)) { *ok = false; return "drop: no ragdoll on that one"; }
         bool getup = Find(who)->puppet || Find(who)->knockdown;
         Drop(who);
-        if (getup) H->human_get_up(M, who, 600);
+        if (getup) GetUp(who);
         return "{\"dropped\":true}";
     }
     if (cmd == "jolt") return jolt_world::Describe() + "\n" + jolt_ragdoll::Describe();

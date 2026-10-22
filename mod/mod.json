@@ -32,6 +32,18 @@
           {"key": "bullet_max_part", "label": "Fastest part", "min": 1, "max": 20, "step": 0.5, "unit": "m/s"},
           {"key": "bullet_remember", "label": "Last shots kept", "min": 0, "max": 1, "step": 0.05, "unit": "s"}
         ]
+      },
+      {
+        "title": "Camera",
+        "controls": [
+          {"key": "ragcam.on", "label": "Camera on the body"},
+          {"key": "ragcam.look", "label": "Mouse turn", "min": 0.02, "max": 0.5, "step": 0.02, "unit": "deg"},
+          {"key": "ragcam.near", "label": "Nearest", "min": 0.5, "max": 5, "step": 0.1, "unit": "m"},
+          {"key": "ragcam.far", "label": "Furthest", "min": 3, "max": 40, "step": 1, "unit": "m"},
+          {"key": "ragcam.follow", "label": "Softness", "min": 0, "max": 0.5, "step": 0.02, "unit": "s"},
+          {"key": "ragcam.blend", "label": "Back to the game's", "min": 0, "max": 2, "step": 0.1, "unit": "s"},
+          {"key": "ragcam.start", "label": "Starts further by", "min": -5, "max": 10, "step": 1, "show": "value"}
+        ]
       }
     ]
   }

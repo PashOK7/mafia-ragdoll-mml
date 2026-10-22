@@ -70,3 +70,15 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   dragged it 35 m after the car, through the street, and it arrived on the floor at 3 m/s. A cabin's jump now tells
   jolt_ragdoll, which carries every body seated in it by the same move and turn, at rest. Seen in both labs: a car
   teleported 32 m and turned 90 degrees, the passenger's pelvis at the same place in his seat to the centimetre.
+- **Made**: the ragdoll camera (src/ragcam.cpp, mafia-ragdoll's ragcam on the loader): while the player is a ragdoll
+  and while he gets up (his get-up's own track: state 4 with the game's 111 or 338; 5 s the most) the frame is drawn
+  from a camera circling his body (camera_override, taken only then and given back after a 0.6 s blend into the
+  game's camera), turned by the mouse (Aim X, Aim Y) and brought nearer by the wheel (Cycle Up, Cycle Down), those
+  actions kept from the game meanwhile (action_capture: Tommy neither turns nor cycles his weapons), kept out of
+  walls and cars (the game's collision but people). Its settings on a third tab, Camera; `ragdoll.camera`.
+- **Seen** (both labs, `ragdoll.start` on the player then `drop`): the camera on his body at once; 0.01 of Aim X for a
+  second turned it 80 to 95 degrees round him while his facing stayed; it stayed on him the 2 s of the get-up, blended
+  back in 0.6 s and gave the camera back. In 1.0 his body lay behind a car and the camera looked into its wheel: the
+  test against walls only took the static world; with the cars too it stops in front of the car (100 frames kept out).
+- **Not measured**: the wheel's value in the actions (a notch taken as 120 counts, an action's 1.0 as 400): the
+  loader injects the wheel only into the menus, so it wants a real mouse.

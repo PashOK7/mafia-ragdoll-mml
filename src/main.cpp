@@ -3,12 +3,14 @@
 // Events: MISSION_TICK (the ragdolls' tick, after the game's world moved), RENDER_BEGIN (the bones written over the
 // game's animation), HUMAN_HIT and PEDESTRIAN_HIT (a death, a knock-down, a bullet's push), ACTOR_DESTROYED,
 // MISSION_CLOSE, CONFIG_CHANGED (the settings, from config.json or the game's Options > Mods).
-// Commands (the bridge's `ragdoll.<name>`): state, start {actor | pedestrian}, drop {actor | pedestrian}, jolt, knock.
+// Commands (the bridge's `ragdoll.<name>`): state, start {actor | pedestrian}, drop {actor | pedestrian}, jolt, knock,
+// camera.
 #include <windows.h>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
 #include "core.h"
+#include "ragcam.h"
 #include "game_build.h"
 #include "mml/mml.h"
 #include "mod.h"
@@ -65,6 +67,7 @@ std::string Address(const char *args) {
 int Command(const char *args, MmlReply *r, void *user) {
     const char *name = static_cast<const char *>(user);
     if (!strcmp(name, "state")) { Reply(r, core::State()); return 0; }
+    if (!strcmp(name, "camera")) { Reply(r, ragcam::State()); return 0; }
     bool ok = false;
     std::string out = core::Exec(name, !strcmp(name, "start") || !strcmp(name, "drop") ? Address(args) : std::string(args ? args : ""), &ok);
     if (!ok) { H->reply_error(r, out.c_str()); return 1; }
@@ -98,6 +101,7 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
         {"drop", "the ragdoll taken off someone (a living one gets up): {\"actor\": \"0x...\"}"},
         {"jolt", "the rigid-body world and the ragdolls' bodies, described"},
         {"knock", "the knock-downs by bodies: the last decisions"},
+        {"camera", "the ragdoll camera: following the player's body or not, its orbit, the frames drawn from it"},
     };
     for (auto &c : kCommands) H->command(M, c[0], c[1], Command, const_cast<char *>(c[0]));
     core::Start();
