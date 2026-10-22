@@ -62,3 +62,7 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   `vehicle.move` (no physics of the game's) the body stays seated too; the one that left the car had been carried
   through a shop's wall by it (the wall pushed it out) and once more when the car, given back to the game's physics,
   rolled into a shop front. A cabin's jump (a car teleported) is logged now ("cabin jumped"): none seen yet.
+- **Fixed**: the player driving into a lamp post at 12 m/s was made a knock-down ragdoll (the game's crash hit on the
+  driver is type 5, a car's), got up after 4 s under his own car, still seated, and died there. Someone alive in a
+  car's seat is never knocked down now (the loader's human_get_up refuses such a man too). Seen in both labs: the same
+  crash, Tommy alive in his seat with the game's own damage (169 of 200), the dead passenger still beside him.

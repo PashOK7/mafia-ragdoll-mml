@@ -877,7 +877,9 @@ void OnHit(const MmlEvent &ev) {
     Ragdoll *rd = Find(human);
     if (!rd) {
         bool died = wasAlive && !alive;
-        bool knocked = alive && ((car && g_cfg.carKnockdown) || body);
+        // (someone alive in a car's seat is the game's: a crash's hit on its driver, type 5, made him a ragdoll that
+        // got up on the street under his own car, still seated, and died there)
+        bool knocked = alive && ((car && g_cfg.carKnockdown) || body) && (IsPed(human) || !SeatCarOf(human));
         if (!died && !knocked) {
             if (type != 3 && !car) Remember(human, dir, hasPos ? &pos : nullptr, dmg);   // (a shotgun's pellets)
             return;
