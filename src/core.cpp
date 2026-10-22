@@ -60,8 +60,11 @@ struct Config {
     float whole = 0.6f;           // the share of a blow that moves the whole body
     float radius = 0.3f;          // m: the parts this close to a blow share the rest
     float maxPart = 8.0f;         // m/s: the most one blow speeds up a single part
+    float most = 120.0f;          // N s: the most one hit gives (1.5 m/s to the whole of an 80 kg body)
     float remember = 0.3f;        // s: bullets in someone alive given to his body if he dies within this
     bool draw = false;            // the bodies drawn (debug)
+    bool blastKnockdown = true;   // an explosion knocks the living near it over as ragdolls
+    float blast = 1.0f;           // the blast's push times this (a grenade's 400 of force: 12 m/s at its centre)
 } g_cfg;
 
 std::vector<std::unique_ptr<Ragdoll>> g_ragdolls;
@@ -313,14 +316,17 @@ struct Kept { void *actor; V3 J, at; bool hasAt; DWORD tick; };
 std::vector<Kept> g_kept;
 unsigned g_corpseHits, g_shapesGiven;
 
+// A hit's momentum (N s): the game's damage times the kick, held to the strongest one shot gives (a script's or a
+// test's damage of 1000 threw a body 12 m; a shotgun's pellets are each a hit of their own)
+float Momentum(float damage) { return std::min(damage * g_cfg.kick, g_cfg.most); }
 void Kick(Ragdoll *rd, const V3 &dir, const V3 &at, float damage) {
     if (!rd || damage <= 0 || Len(dir) < 1e-4f) return;
-    rd->Kick(Norm(dir) * (damage * g_cfg.kick), at, g_cfg.whole, g_cfg.radius, g_cfg.maxPart);
+    rd->Kick(Norm(dir) * Momentum(damage), at, g_cfg.whole, g_cfg.radius, g_cfg.maxPart);
 }
 void Remember(void *actor, const V3 &dir, const V3 *at, float damage) {
     if (!actor || damage <= 0 || Len(dir) < 1e-4f || g_cfg.remember <= 0) return;
     if (g_kept.size() >= 256) g_kept.erase(g_kept.begin());
-    g_kept.push_back({actor, Norm(dir) * (damage * g_cfg.kick), at ? *at : V3{0, 0, 0}, at != nullptr, GetTickCount()});
+    g_kept.push_back({actor, Norm(dir) * Momentum(damage), at ? *at : V3{0, 0, 0}, at != nullptr, GetTickCount()});
 }
 void TakeRemembered(void *actor, Ragdoll *rd) {
     DWORD now = GetTickCount(), keep = (DWORD)(g_cfg.remember * 1000.0f);
@@ -824,7 +830,7 @@ int __fastcall hkSphereSweep(void *self, void *edx, V3 *start, V3 *delta, float 
 // pedestrian's element would be woken and cry out)
 int HitFilter(void *person, int, MmlHumanHit *hit, void *) {
     Ragdoll *rd = Find(person);
-    if (!rd || !g_cfg.enabled || hit->was_alive || hit->type == 3) return MML_HIT_GAME;
+    if (!rd || !g_cfg.enabled || hit->was_alive || hit->type == 2 || hit->type == 3) return MML_HIT_GAME;   // (a blast: OnExplosion)
     if (hit->shape || hit->type == 0) {
         V3 d{hit->dir.x, hit->dir.y, hit->dir.z}, at{hit->pos.x, hit->pos.y, hit->pos.z};
         if (Len(at) < 1e-3f) at = rd->Center();
@@ -906,6 +912,9 @@ void OnHit(const MmlEvent &ev) {
     // relative velocity as dir; a body's blow (KnockByBodies) comes through the game's car hit with no car: not a car's
     const bool body = human == g_bodyKnock;
     bool car = !body && (type == 5 || ((type == 8 || type == 2) && IsVehicle(attacker)));
+    // an explosion: C_game::NewExplosion (0x5AAE10) hits every actor near it with type 2, its centre as the place
+    // (seen: a grenade's 400 gave 67 of damage at 5 m); 3 is kept for what else may call it so
+    const bool blast = !body && !car && (type == 2 || type == 3);
     V3 carVel = car && attacker ? CarVelocity(attacker) : V3{0, 0, 0};
     if (!g_cfg.enabled) return;
     ListPeople();   // (a hit between ticks: the pedestrians as they are)
@@ -916,9 +925,10 @@ void OnHit(const MmlEvent &ev) {
         bool died = wasAlive && !alive;
         // (someone alive in a car's seat is the game's: a crash's hit on its driver, type 5, made him a ragdoll that
         // got up on the street under his own car, still seated, and died there)
-        bool knocked = alive && ((car && g_cfg.carKnockdown) || body) && (IsPed(human) || !SeatCarOf(human));
+        bool knocked = alive && ((car && g_cfg.carKnockdown) || body || (blast && g_cfg.blastKnockdown)) &&
+                       (IsPed(human) || !SeatCarOf(human));
         if (!died && !knocked) {
-            if (type != 3 && !car) Remember(human, dir, hasPos ? &pos : nullptr, dmg);   // (a shotgun's pellets)
+            if (!blast && !car) Remember(human, dir, hasPos ? &pos : nullptr, dmg);   // (a shotgun's pellets)
             return;
         }
         std::string err;
@@ -948,8 +958,22 @@ void OnHit(const MmlEvent &ev) {
         rd->Impulse(push + V3{0, 0.3f, 0}, at, sp * g_cfg.carPush, 0.7f, 0.6f);
         return;
     }
-    if (type == 3) { rd->Impulse(dir + V3{0, 0.6f, 0}, at, 7.0f, 0, 1.0f); return; }   // an explosion: no blast yet
+    if (blast) return;   // an explosion: its blast throws every body near it (OnExplosion, the event after the hits)
     if (bullet || dmg > 0) Kick(rd, dir, at, dmg);
+}
+
+// An explosion (the game's NewExplosion, after its damage: those it killed or knocked over are ragdolls already):
+// every body within its radius and a half thrown away from it. The speed at its centre grows with the root of its
+// force (a grenade's 400: 12 m/s, a car's larger one more), at most 25 m/s; a third of it upwards.
+void OnExplosion(const MmlExplosion &x) {
+    if (!g_cfg.enabled || g_cfg.blast <= 0) return;
+    V3 c{x.pos.x, x.pos.y, x.pos.z};
+    float reach = std::max(x.radius, 1.0f) * 1.5f;
+    float speed = std::min(12.0f * std::sqrt(std::max(x.damage, 0.0f) / 400.0f), 25.0f) * g_cfg.blast;
+    unsigned thrown = 0;
+    for (auto &r : g_ragdolls) thrown += r->Blast(c, reach, speed, 0.35f) ? 1 : 0;
+    LOG("explosion at %.1f %.1f %.1f (radius %.1f, force %.0f): %u bodies thrown, %.1f m/s at its centre", c.x, c.y, c.z,
+        x.radius, x.damage, thrown, speed);
 }
 
 void OnActorDestroyed(void *actor) {
@@ -1001,8 +1025,11 @@ void Settings() {
     g_cfg.whole = num("bullet_whole", d.whole);
     g_cfg.radius = num("bullet_radius", d.radius);
     g_cfg.maxPart = num("bullet_max_part", d.maxPart);
+    g_cfg.most = num("bullet_most", d.most);
     g_cfg.remember = num("bullet_remember", d.remember);
     g_cfg.draw = flag("debug_draw", d.draw);
+    g_cfg.blastKnockdown = flag("blast_knockdown", d.blastKnockdown);
+    g_cfg.blast = num("blast_push", d.blast);
     ragcam::Settings();
     // the physics' own tables (jolt_ragdoll's muscles and joints, knock's thresholds): "jolt.<name>", "knock.<name>"
     for (auto [prefix, list, set] : {std::make_tuple("jolt.", &jolt_ragdoll::Tunes, &jolt_ragdoll::SetTune),

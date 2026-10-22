@@ -76,6 +76,9 @@ public:
     void SetMotionFrom(const V3 *prevWorld, float dt);
     void Setup(const V3 *pts, const V3 &fwd);   // the parts only (also used by the offline Jolt bench)
     void Impulse(const V3 &dir, const V3 &at, float speed, float radius, float wholeBody);
+    // A blast at `centre`: each part thrown away from it (and up by `lift` of its speed), `speed` m/s at the centre
+    // falling off to 0 at `radius` as (1 - d/radius)^1.5; the nearer side more, so the body turns. False: out of reach.
+    bool Blast(const V3 &centre, float radius, float speed, float lift);
     // A blow of momentum J (N s, world) at `at`. `whole` of it moves the whole body (each part by the same speed);
     // the rest goes to the parts within `radius` of `at` (by mass and closeness; the nearest part when none is),
     // with the spin its offset gives. The blows of one tick add up, and all of them together speed a part up by at

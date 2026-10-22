@@ -357,6 +357,24 @@ void Ragdoll::Impulse(const V3 &dir, const V3 &at, float speed, float radius, fl
     velocityEdited = true;
 }
 
+bool Ragdoll::Blast(const V3 &centre, float radius, float speed, float lift) {
+    if (radius <= 0) return false;
+    bool any = false;
+    for (auto &bd : body) {
+        V3 off = bd.x + origin - centre;
+        float d = Len(off);
+        if (d >= radius) continue;
+        float w = std::pow(1.0f - d / radius, 1.5f);
+        V3 away = Norm(Norm(off, {0, 1, 0}) + V3{0, lift, 0}, {0, 1, 0});
+        bd.v += away * (speed * w);
+        any = true;
+    }
+    if (!any) return false;
+    sleeping = false; sleepTimer = 0;
+    velocityEdited = true;
+    return true;
+}
+
 void Ragdoll::Kick(const V3 &J, const V3 &at, float whole, float radius, float maxPart) {
     float M = 0;
     for (const Body &bd : body) if (bd.invMass > 0) M += 1.0f / bd.invMass;

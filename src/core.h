@@ -12,6 +12,7 @@ void Tick(float dt);                  // MISSION_TICK: after the game's world mo
 void Render();                        // RENDER_BEGIN: the bones written over the game's animation
 void OnHit(const MmlEvent &ev);       // HUMAN_HIT, PEDESTRIAN_HIT
 void OnActorDestroyed(void *actor);
+void OnExplosion(const MmlExplosion &x);   // EXPLOSION: the blast throws the bodies near it
 void OnMissionClose();
 void Settings();                      // the settings read again (config.json, the game's Options > Mods)
 std::string State();                  // the `state` command's reply (json)

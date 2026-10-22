@@ -86,3 +86,13 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   type 8, 35 of damage), thrown 5 m, then killed by the car's next hits as in 1.2; his body 20 cm over the street. A
   traffic pedestrian shot dead lies on the kerb, his pelvis 14 cm over it. (A car the player was seated in by
   `world.seat` takes no throttle until his getting in has played: the first try reversed under the brake.)
+- **Made**: explosions. The EXPLOSION event (after the game's own damage: its dead and knocked over are ragdolls
+  already) throws every body within its radius and a half away from its centre, each part by its own distance
+  ((1 - d/r)^1.5: the near side more, so a body turns), a third of it up; 12 m/s at the centre for a grenade's force
+  of 400, growing with its root, 25 at most ("Blast's push" scales it). The living in it are knocked down ("Blasts
+  knock down"). The game hits them with type 2, not 3 as the port believed (C_game::NewExplosion 0x5AAE10: the
+  loader's SDK said 3 too, corrected there): with no vehicle behind it a type 2 is a blast now.
+- **Fixed**: one hit's momentum is held to 120 N s ("Strongest shot"): a damage of 1000 (a script's, a test's) gave
+  1000 N s and threw a body 12 m.
+- **Seen** (both labs, the scripts' `explosion 6, 400`): two corpses 2 m from it thrown 4.6 to 7.3 m, a man 3 m away
+  killed by it and thrown, a man 5 m away (67 of damage, alive) knocked 2.4 m and up again 2.5 s later.

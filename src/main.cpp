@@ -1,6 +1,6 @@
 // The mod's entry: the loader's host table kept, the ragdolls started and stopped, the events and commands wired.
 //
-// Events: MISSION_TICK (the ragdolls' tick, after the game's world moved), RENDER_BEGIN (the bones written over the
+// Events: EXPLOSION (a blast throws the bodies near it), MISSION_TICK (the ragdolls' tick, after the game's world moved), RENDER_BEGIN (the bones written over the
 // game's animation), HUMAN_HIT and PEDESTRIAN_HIT (a death, a knock-down, a bullet's push), ACTOR_DESTROYED,
 // MISSION_CLOSE, CONFIG_CHANGED (the settings, from config.json or the game's Options > Mods).
 // Commands (the bridge's `ragdoll.<name>`): state, start {actor | pedestrian}, drop {actor | pedestrian}, jolt, knock,
@@ -49,6 +49,7 @@ void OnEvent(const MmlEvent *ev, void *) {
     case MML_EVENT_HUMAN_HIT:
     case MML_EVENT_PEDESTRIAN_HIT: core::OnHit(*ev); break;
     case MML_EVENT_ACTOR_DESTROYED: core::OnActorDestroyed(ev->actor); break;
+    case MML_EVENT_EXPLOSION: if (ev->explosion) core::OnExplosion(*ev->explosion); break;
     case MML_EVENT_MISSION_CLOSE: core::OnMissionClose(); break;
     case MML_EVENT_CONFIG_CHANGED: core::Settings(); break;
     default: break;
@@ -93,7 +94,7 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
         return 1;
     }
     for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT,
-                           MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_CLOSE, MML_EVENT_CONFIG_CHANGED})
+                           MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_CLOSE, MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION})
         H->subscribe(M, t, OnEvent, nullptr);
     static const char *const kCommands[][2] = {
         {"state", "the ragdolls: each one's actor, kind, age, pelvis; the people tracked, the world, the counts"},
