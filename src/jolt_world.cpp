@@ -584,8 +584,12 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
             continue;
         }
         Kinematic &k = it->second;
-        if (dt <= 0 || Len(pos - k.pos) > 30.0f * dt + 2.0f) bi.SetPositionAndRotation(k.body, J(pos), rot, JPH::EActivation::Activate);
-        else bi.MoveKinematic(k.body, J(pos), rot, dt);
+        if (dt <= 0 || Len(pos - k.pos) > 30.0f * dt + 2.0f) {
+            JLOG("jolt: car %p's cabin jumped %.2f m (dt %.3f)", m.key, Len(pos - k.pos), dt);
+            bi.SetPositionAndRotation(k.body, J(pos), rot, JPH::EActivation::Activate);
+        } else {
+            bi.MoveKinematic(k.body, J(pos), rot, dt);
+        }
         k.pos = pos;
         k.seen = g_tick;
     }

@@ -56,3 +56,9 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   config.json, the defaults (what the game changed is in mml/data/ragdoll/): it goes as built now.
 - **Seen** (both labs): the page with the game's controls (1.0's in French around it); "Bodies drawn" ticked there
   reached the mod at once (the capsules over the six corpses, the sleeping ones violet).
+- **Seen** (both labs): a man killed in a Bolt-Thrower's seat slumps over in it; with the player driving (2.5 s of
+  throttle to 11 m/s, a turn, a hard brake) the dead passenger stays in his seat, 15 cm to the side in the turn and a
+  few forward at the brake; into a lamp post at 12 m/s (1.2) he stays in, 30 cm forward. Moved by the loader's
+  `vehicle.move` (no physics of the game's) the body stays seated too; the one that left the car had been carried
+  through a shop's wall by it (the wall pushed it out) and once more when the car, given back to the game's physics,
+  rolled into a shop front. A cabin's jump (a car teleported) is logged now ("cabin jumped"): none seen yet.
