@@ -836,6 +836,9 @@ bool IsCarBody(uint32_t body) { return g_carOfBody.count(body) != 0; }
 
 void ApplyWater(float dt) {
     g_inWater = 0;
+    // a step's splashes are for that step's TakeSplashes; nobody took them: gone (kept, a body in the river added
+    // fifteen a tick for as long as it floated)
+    g_splashes.clear();
     if (!g_water) return;
     CarsInWater(dt);
     if (g_floats.empty()) return;
@@ -844,6 +847,7 @@ void ApplyWater(float dt) {
     for (auto it = g_floats.begin(); it != g_floats.end();) {
         JPH::BodyID id(it->first);
         if (!bi.IsAdded(id)) { it = g_floats.erase(it); continue; }
+        if (!it->second.wet && !bi.IsActive(id)) { ++it; continue; }   // (asleep on dry land: nothing to ask)
         V3 c = ToWorld(F(bi.GetCenterOfMassPosition(id)));
         float y;
         V3 n, flow;

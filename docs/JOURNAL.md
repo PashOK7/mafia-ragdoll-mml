@@ -111,3 +111,6 @@ What was done, found and tried, in order (newest last). Agents: read the end fir
   the loader's bullets every tick were 3 % of the frame. The loader keeps them until they are given again: a body
   asleep gives them once now (0.58 ms a frame). A sleeping corpse shot afterwards: two bullets on its capsules, taken.
   A restore point loaded with corpses lying: the game's own load brought them back and the mod adopted them again.
+- **Fixed**: a leak. jolt_world gathers the splashes of the bodies and cars in water for mafia-ragdoll's water (not a
+  part of this port): nobody took them, and a body floating in the river added fifteen a tick for as long as it lay
+  there. A step's splashes are dropped at the next step now. And a body asleep on dry land no longer asks for water.
