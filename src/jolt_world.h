@@ -25,9 +25,9 @@ using LogFn = void (*)(const char *fmt, ...);
 // kOccupant: the bodies of people sitting in a car; they meet each other, dynamic bodies and kCabin only (not the
 // car's convex hulls, which fill its inside, nor the street). kCabin: a car's own triangles, both sides, moved with
 // it, for the people in it to slump against (seats, doors, the dashboard, the wheel).
-// kCarBody: a car the game drives, as a body of its real mass that meets only dynamic bodies (the game keeps it on
-// the road and away from people); see CarKicks.
-enum Layer : unsigned short { kStatic = 0, kKinematic = 1, kDynamic = 2, kOccupant = 3, kCabin = 4, kCarBody = 5, kLayerCount = 6 };
+// kCarBody: a car the game drives, as a body of its real mass that meets dynamic bodies and living-body sensors.
+// kLiving is separate from other kinematics, so car/car and car/tram collisions remain native, without doubling.
+enum Layer : unsigned short { kStatic = 0, kKinematic = 1, kDynamic = 2, kOccupant = 3, kCabin = 4, kCarBody = 5, kLiving = 6, kLayerCount = 7 };
 
 bool Start(LogFn log, const V3 &near, std::string *err);   // idempotent
 void Stop();               // every body gone; before the core unloads
@@ -62,22 +62,29 @@ bool StaticReady(const V3 &lo, const V3 &hi);
 std::string ReadyReport(const V3 &lo, const V3 &hi);   // why StaticReady says what it says (for the log)
 
 // How a living person (his body-part capsules) meets dynamic bodies: not with hard contacts (a kinematic body has
-// infinite strength) but with impacts of a part that has `mass` kg behind it and a steady push of at most `maxForce`
-// N. maxForce <= 0: hard contacts.
+// infinite strength). Segment masses match the ragdoll, capped by `mass` kg. All walker-powered impacts and
+// overlap pushes together are at most `maxForce` N per person; incoming dynamic momentum is separate.
+// maxForce <= 0: hard contacts.
 void SetPersonPush(float maxForce, float mass);
+// Aggregate contact diagnostics since world reset; locomotion excludes the body's own incoming reaction.
+std::string PersonPushState();
 // The blows dynamic bodies dealt living people in the last step: the momentum a body brought into a person (N s,
-// world, pointing into him), where, and the body (its id's value). Only the body's own approach counts: a person
-// walking into a body still or slow is no blow. Measured against the same `mass` behind the part as the impact.
+// world, pointing into him), where, and the body (its id's value). Incoming assembly translation is sampled
+// before pushes; work previously supplied by this person is excluded conservatively from the incoming energy.
+// Walking into a resting body or its self-induced rebound is no independent blow. Part effective mass is retained.
 struct PersonBlow { const void *who; V3 J, at; unsigned body; };
 const std::vector<PersonBlow> &PersonBlows();
-// The vehicle (its actor: the mover key of its body) `at` (world) is inside: the first solid thing straight below it
-// within `down` m and straight above it within `up` m is that vehicle's body (its floor and its roof), or null. A
-// body under a tram, beside it (its low parts) or on its roof is not in it.
-const void *VehicleAround(const V3 &at, float down, float up);
+// Measured car/living-body contacts. Sensors only: native gameplay receives them after the solver returns;
+// they never push a car as an infinitely strong animated body. at/velocity are world space, m/s.
+struct VehicleContact { const void *who, *car; V3 at, velocity; float closing; };
+const std::vector<VehicleContact> &VehicleContacts();
+
 
 // The game object a kinematic body stands for (a car), or null; whether a car (mover key) has a body now.
 const void *KinematicOwner(const JPH::BodyID &id);
 bool HasKinematic(const void *key);
+// Register a known vehicle before its first impact. Does not advance the world or retire other movers.
+bool EnsureVehicle(const smoke::Mover &mover);
 
 // A car someone sits in: its cabin body (layer kCabin) is kept while asked for every tick, from the next Step on.
 void RequestCabin(const void *car);
@@ -91,9 +98,6 @@ using CabinJumpFn = void (*)(const void *car, const JPH::Vec3 &fromPos, const JP
                              const JPH::Quat &toRot);
 void SetCabinJumpListener(CabinJumpFn fn);
 
-// Impulse (N s, world) the dynamic bodies gave each car during the last step, estimated from the contacts.
-struct Push { const void *car; V3 impulse; };
-const std::vector<Push> &CarPushes();
 // What the bodies did to each car in the last step. A car with a known mass (Mover::mass) is a dynamic body of that
 // mass and inertia: every step it is put where the game had it and given the velocity that brings it to where the
 // game has it now (no gravity, no damping: the game keeps it on the road); the solver meets it with the bodies both
@@ -109,8 +113,15 @@ std::string DescribeCar(const void *car);
 int CarPartOf(const JPH::BodyID &car, unsigned subShapeId);
 // The last step's contacts of driven cars with bodies: the car, the part of its hull, the point (world), the normal
 // from the car to the body, the depth. For `carfeel`.
-struct CarContactInfo { const void *car; int part; V3 at, n; float depth; };
+struct CarContactInfo {
+    const void *car; int part; V3 at, n; float depth;
+    uintptr_t owner; uint32_t body; bool sensor;
+    V3 carOrigin, carRight, carForward, velocity;
+};
 const std::vector<CarContactInfo> &CarContacts();
+unsigned CarContactsDropped();   // diagnostic limit reached in the last step; absence is then inconclusive
+// Native wheel-index mask supported by physical bodies below the tyres during the last completed step.
+uint32_t WheelSupport(const void *car);
 
 // The scenery's focus for the static world: around the player, and around every box callers add each tick.
 void AddFocus(const V3 &lo, const V3 &hi);
@@ -131,13 +142,6 @@ bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow);
 void SetFloat(const JPH::BodyID &id, float buoyancy, float linearDrag, float angularDrag);
 void ClearFloat(const JPH::BodyID &id);
 unsigned BodiesInWater();   // in the last step
-// What disturbed the water in the last steps: a body falling in (a splash: pushed down at a point), a body or a car
-// in the water (a footprint: where it is now and was a step ago, its size along its motion and across, how deep it
-// sits; its moving footprint makes its waves). Taken (and cleared) by the water every tick.
-// A body in the water: its middle now (x, z) and `dt` s ago (px, pz), half its size along its motion and across, as
-// deep as it sits. Not moving: it fell in (`depth`: how hard; `speed` m/s it came down at, `mass` kg).
-struct Splash { float x, z, px, pz, along, across, depth, dt; bool moving; uint32_t body; float speed = 0, mass = 0; };
-void TakeSplashes(std::vector<Splash> &out);
 bool IsCarBody(uint32_t body);   // a Jolt body (its index and sequence number) stands for a car the game moves
 
 // The boxes (world) round every body that moves (the dynamic ones, and the kinematic ones the game moves: cars,

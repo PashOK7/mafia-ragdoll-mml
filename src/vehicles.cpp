@@ -1,7 +1,7 @@
 // The vehicles as the physics sees them (vehicles.h).
 //
-// A car's body is read once a model (the game swaps a car's model: a traffic car becomes the player's when he gets
-// in): every visual of it the loader gives (actor_meshes: its body, doors, wheels, each in its frame's pose now), the
+// Sample the visible parts in the car's own frame. Changed doors and detached parts update the
+// compound while unchanged parts keep their cooked hulls. The loader supplies the posed meshes; the
 // triangles in the car's frame, one hull a visual (a single hull of a whole car fills the space under its bumpers).
 // Parts smaller than 8 cm (lamps, badges) and flat ones (panes, plates: no volume for a hull) are left out; a part
 // whose frame is the model's WHL<n> or WHR<n> is a wheel (mafia-ragdoll's vehicles.cpp, from the cars' .4ds files
@@ -23,13 +23,27 @@ namespace {
 constexpr float kMinPart = 0.08f;
 constexpr int kCar = 4, kTram = 8;
 
+struct PiecePose {
+    void *visual{};
+    const float *mesh{};
+    int vertices{}, triangles{};
+    V3 origin{}, axes[3]{};
+    bool wheel{};
+    uint32_t nativeWheel{};
+    size_t first{}, count{};
+    int part = -1;
+};
+uint64_t g_nextHull;
 struct CarBody {
+    std::vector<PiecePose> poses;
+    std::vector<uint64_t> revisions;
     std::vector<V3> all;
     std::vector<std::vector<V3>> parts;
     std::vector<char> wheel;
+    std::vector<uint32_t> nativeWheels;
     void *root = nullptr;
     unsigned version = 0;
-    unsigned long retryAt = 0;
+    ULONGLONG refreshAt = 0;
 };
 std::unordered_map<void *, CarBody> g_bodies;
 std::vector<MmlMeshPiece> g_pieces;
@@ -60,6 +74,17 @@ bool IsWheelFrame(void *frame) {
            s[3] >= '0' && s[3] <= '9';
 }
 
+uint32_t NativeWheel(void *car, void *visual) {
+    if (game::at<int>(car, game::kActorType) != kCar) return 0;
+    game::Car native(car);
+    for (int i = 0; i < native.WheelCount() && i < 32; ++i) {
+        void *wheel = native.Wheel(i);
+        if (wheel && game::at<void *>(wheel, game::kWheelFrame) == visual)
+            return static_cast<uint32_t>(i + 1);
+    }
+    return 0;
+}
+
 bool Unfit(const std::vector<V3> &p) {
     if (p.size() < 4) return true;
     V3 lo = p[0], hi = p[0];
@@ -80,47 +105,87 @@ const CarBody *Body(void *car) {
     void *root = nullptr;
     auto r = [&] { root = game::at<void *>(car, game::kActorFrame); };
     if (!Guarded(r) || !root) return nullptr;
-    auto it = g_bodies.find(car);
-    if (it != g_bodies.end() && it->second.root == root && (!it->second.all.empty() || GetTickCount() < it->second.retryAt))
-        return it->second.all.empty() ? nullptr : &it->second;
-    CarBody &body = g_bodies[car];
-    unsigned version = body.version + 1;
-    body = CarBody{};
-    body.root = root;
-    body.version = version;
-    body.retryAt = GetTickCount() + 1000;
+    CarBody &cached = g_bodies[car];
+    const auto now = GetTickCount64();
+    if (cached.root == root && now < cached.refreshAt)
+        return cached.parts.empty() ? nullptr : &cached;
     V3 t, ax[3];
-    bool posed = false;
-    auto p = [&] { posed = CarPose(car, &t, ax); };
-    if (!Guarded(p) || !posed) return nullptr;
-    int n = H->actor_meshes(M, car, nullptr, 0);
-    if (n <= 0) return nullptr;
-    g_pieces.resize(n);
-    n = H->actor_meshes(M, car, g_pieces.data(), n);
-    for (int i = 0; i < n && i < (int)g_pieces.size(); i++) {
+    if (!Pose(car, &t, ax)) return nullptr;
+    const bool extended = MML_HAS(H, actor_meshes_ex) && H->actor_meshes_ex;
+    auto meshes = [&] {
+        return extended ? H->actor_meshes_ex(M, car, MML_ACTOR_MESH_HIDDEN_ROOT, g_pieces.data(), (int)g_pieces.size())
+                        : H->actor_meshes(M, car, g_pieces.data(), (int)g_pieces.size());
+    };
+    if (g_pieces.empty()) g_pieces.resize(32);
+    int n = meshes();
+    if (n > (int)g_pieces.size()) { g_pieces.resize(n); n = meshes(); }
+    if (n < 0 || n > (int)g_pieces.size()) return nullptr;
+    auto local = [&](V3 v) { return V3{Dot(v, ax[0]), Dot(v, ax[1]), Dot(v, ax[2])}; };
+    std::vector<PiecePose> poses(n);
+    std::vector<const PiecePose *> reused(n);
+    bool changed = cached.root != root || poses.size() != cached.poses.size();
+    for (int i = 0; i < n; ++i) {
         const MmlMeshPiece &mp = g_pieces[i];
-        std::vector<V3> part;
-        part.reserve(mp.triangles * 3);
+        PiecePose &p = poses[i];
+        p.visual = mp.visual; p.mesh = mp.pos;
+        p.vertices = mp.vertices; p.triangles = mp.triangles;
+        p.wheel = IsWheelFrame(p.visual);
+        if (p.wheel) p.nativeWheel = NativeWheel(car, p.visual);
         const float *w = mp.world;
-        for (int f = 0; f < mp.triangles; f++)
-            for (int k = 0; k < 3; k++) {
-                uint32_t v = mp.index[f * 3 + k];
-                if (v >= (uint32_t)mp.vertices) continue;
-                const float *q = mp.pos + v * 3;
-                V3 wp{q[0] * w[0] + q[1] * w[4] + q[2] * w[8] + w[12], q[0] * w[1] + q[1] * w[5] + q[2] * w[9] + w[13],
-                      q[0] * w[2] + q[1] * w[6] + q[2] * w[10] + w[14]};
-                V3 d = wp - t;
-                V3 l{Dot(d, ax[0]), Dot(d, ax[1]), Dot(d, ax[2])};
-                body.all.push_back(l);
-                part.push_back(l);
+        p.origin = local(V3{w[12], w[13], w[14]} - t);
+        for (int j = 0; j < 3; ++j) p.axes[j] = local({w[4*j], w[4*j+1], w[4*j+2]});
+        if (cached.root == root) {
+            for (const auto &old : cached.poses) {
+                if (old.visual != p.visual || old.mesh != p.mesh || old.vertices != p.vertices ||
+                    old.triangles != p.triangles || old.wheel != p.wheel || old.nativeWheel != p.nativeWheel) continue;
+                if (Len(p.origin - old.origin) > (p.wheel ? .04f : .005f)) break;
+                // Tyre spin is supplied by WheelContact. Keep its rolling hull stable.
+                bool aligned = true;
+                if (!p.wheel) for (int j = 0; j < 3; ++j) aligned &= Len(p.axes[j] - old.axes[j]) <= .005f;
+                if (aligned) reused[i] = &old;
+                break;
             }
-        if (Unfit(part)) continue;
-        body.parts.push_back(std::move(part));
-        body.wheel.push_back(IsWheelFrame(mp.visual));
+        }
+        if (!reused[i]) changed = true;
     }
-    if (body.all.empty()) return nullptr;
-    Log("vehicles: car %p body from %u model triangles, %u parts", car, (unsigned)body.all.size() / 3, (unsigned)body.parts.size());
-    return &body;
+    if (!changed) {
+        cached.refreshAt = now + (n ? 80 : 500);
+        return cached.parts.empty() ? nullptr : &cached;
+    }
+    CarBody body;
+    body.root = root;
+    body.version = cached.version + 1;
+    body.refreshAt = now + (n ? 80 : 500);
+    for (int i = 0; i < n; ++i) {
+        PiecePose &p = poses[i];
+        const auto *old = reused[i];
+        const MmlMeshPiece &mp = g_pieces[i];
+        if (old) p = *old; // Keep the reference pose for the movement threshold.
+        p.first = body.all.size();
+        if (old) {
+            body.all.insert(body.all.end(), cached.all.begin() + old->first, cached.all.begin() + old->first + old->count);
+        } else {
+            for (int j = 0; j < mp.triangles * 3; ++j) {
+                const auto v = mp.index[j];
+                if (v >= (uint32_t)mp.vertices) continue;
+                const float *q = mp.pos + 3*v;
+                body.all.push_back(p.origin + p.axes[0]*q[0] + p.axes[1]*q[1] + p.axes[2]*q[2]);
+            }
+        }
+        p.count = body.all.size() - p.first;
+        p.part = -1;
+        if (old && old->part < 0) continue;
+        std::vector<V3> points(body.all.begin() + p.first, body.all.end());
+        if (!old && Unfit(points)) continue;
+        p.part = (int)body.parts.size();
+        body.parts.push_back(std::move(points));
+        body.wheel.push_back(p.wheel);
+        body.nativeWheels.push_back(p.nativeWheel);
+        body.revisions.push_back(old ? cached.revisions[old->part] : ++g_nextHull);
+    }
+    body.poses = std::move(poses);
+    cached = std::move(body);
+    return cached.parts.empty() ? nullptr : &cached;
 }
 
 int TypeOf(void *a) {
@@ -163,31 +228,41 @@ void GatherVehicles(const V3 &lo, const V3 &hi, std::vector<smoke::Mover> &out) 
     static std::vector<void *> cars;
     ListVehicles(mid, Len(hi - mid) + 5.0f, cars);
     for (void *car : cars) {
-        const CarBody *body = Body(car);
-        if (!body) continue;
         V3 t, ax[3];
         if (!Pose(car, &t, ax)) continue;
         if (t.x < lo.x || t.y < lo.y || t.z < lo.z || t.x > hi.x || t.y > hi.y || t.z > hi.z) continue;
         smoke::Mover m;
-        m.key = car;
-        m.kind = smoke::Mover::HULL;
-        m.c = t;
-        for (int i = 0; i < 3; i++) m.ax[i] = ax[i];
-        m.hull = &body->all;
-        m.hullParts = &body->parts;
-        for (size_t i = 0; i < body->wheel.size() && i < 64; i++) if (body->wheel[i]) m.wheelParts |= 1ull << i;
-        m.shapeVersion = body->version;
-        m.hullIsTriangles = true;
-        // a car's mass is C_car's field; a tram (type 8) is another class: kinematic, with its exact mesh
-        float mass = 0;
-        if (TypeOf(car) == kCar) {
-            auto f = [&] { mass = game::at<float>(static_cast<uint8_t *>(car) + game::Exe().vehicle, game::Exe().vehMass); };
-            Guarded(f);
-        }
-        m.mass = mass > 300.0f && mass < 20000.0f ? mass : 0.0f;
-        m.hullAsMesh = m.mass == 0.0f;
-        out.push_back(m);
+        if (MoverOf(car, &m)) out.push_back(m);
     }
+}
+
+bool MoverOf(void *car, smoke::Mover *out) {
+    const CarBody *body = Body(car);
+    if (!body) return false;
+    V3 t, ax[3];
+    if (!Pose(car, &t, ax)) return false;
+    smoke::Mover m;
+    m.key = car;
+    m.kind = smoke::Mover::HULL;
+    m.c = t;
+    for (int i = 0; i < 3; i++) m.ax[i] = ax[i];
+    m.hull = &body->all;
+    m.hullParts = &body->parts;
+    m.nativeWheels = &body->nativeWheels;
+    m.hullRevisions = &body->revisions;
+    for (size_t i = 0; i < body->wheel.size() && i < 64; i++) if (body->wheel[i]) m.wheelParts |= 1ull << i;
+    m.shapeVersion = body->version;
+    m.hullIsTriangles = true;
+    // a car's mass is C_car's field; a tram (type 8) is another class: kinematic, with its exact mesh
+    float mass = 0;
+    if (TypeOf(car) == kCar) {
+        auto f = [&] { mass = game::at<float>(static_cast<uint8_t *>(car) + game::Exe().vehicle, game::Exe().vehMass); };
+        Guarded(f);
+    }
+    m.mass = mass > 300.0f && mass < 20000.0f ? mass : 0.0f;
+    m.hullAsMesh = m.mass == 0.0f;
+    *out = m;
+    return true;
 }
 
 void ListVehicles(const V3 &at, float radius, std::vector<void *> &out) {

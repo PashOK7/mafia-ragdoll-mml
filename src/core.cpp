@@ -21,6 +21,7 @@
 #include <windows.h>
 #include <intrin.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <cstdarg>
@@ -41,6 +42,8 @@
 #include "ragdoll.h"
 #include "scenery.h"
 #include "vehicles.h"
+#include "pedestrian_position.h"
+#include "mml/path.h"
 
 using namespace mod;
 
@@ -53,7 +56,6 @@ namespace {
 struct Config {
     bool enabled = true;          // a ragdoll on death
     bool carKnockdown = true;     // a car knocks living people over as ragdolls (the player too)
-    float carPush = 0.7f;         // the share of the car's speed given to the body where it is struck (no car body)
     bool carFeel = true;          // cars feel the bodies they push
     float trackRadius = 60.0f;    // m: people this close to the player have their pose remembered
     bool bullets = true;          // bullets strike the bodies on the ground
@@ -64,7 +66,7 @@ struct Config {
     float most = 120.0f;          // N s: the most one hit gives (1.5 m/s to the whole of an 80 kg body)
     float remember = 0.3f;        // s: bullets in someone alive given to his body if he dies within this
     bool draw = false;            // the bodies drawn (debug)
-    bool blastKnockdown = true;   // an explosion knocks the living near it over as ragdolls
+    bool blastKnockdown = true;   // use physics for Tommy's native heavy blast fall
     float blast = 1.0f;           // the blast's push times this (a grenade's 400 of force: 12 m/s at its centre)
 } g_cfg;
 
@@ -81,15 +83,83 @@ struct PoseHistory {
     float dt[2] = {0, 0};
     int count = 0;
     unsigned seen = 0;
+    V3 pedestrianPos{}, pedestrianVelocity{};
+    int pedestrianAnimation = -1;
+    void *pedestrianModel = nullptr;
 };
 std::unordered_map<void *, PoseHistory> g_poses;
+struct RenderedPose { Ragdoll::PoseSnap pose{}; void *model = nullptr; unsigned tick = 0; uint64_t ms = 0; };
+std::unordered_map<void *, RenderedPose> g_lastDrawn;
+
+struct HandoverPose {
+    unsigned tick = 0, stage = 0;
+    float age = 0, error = 0, fastest = 0;
+    V3 physical{}, drawn{}, element{};
+};
+struct HandoverContact {
+    unsigned tick = 0;
+    float age = 0;
+    jolt_world::CarContactInfo contact{};
+};
+enum class TrajectoryStage { PreviousWorldDraw, BeforeHit, NativeHit, AfterHit, TickBegin, Physics, TickEnd, RenderBegin, WorldDrawn, Count };
+struct PedestrianSample {
+    uint64_t ms = 0;
+    unsigned tick = 0;
+    TrajectoryStage stage{};
+    int animation = -1;
+    float health = 0;
+    V3 element{}, root{}, pelvis{}, body{}, velocity{};
+    bool hasPelvis = false, physical = false, hasElement = true;
+};
+struct CarHandover {
+    void *actor = nullptr, *model = nullptr;
+    unsigned serial = 0, tick = 0;
+    int animation = -1;
+    bool preHitPose = false;
+    bool open = false, captured = false, started = false, history = false, committed = false, stepped = false;
+    Ragdoll::PoseSnap beforePose{};
+    V3 elementBefore{}, modelBefore{}, initial{}, bodyStart{}, elementAfter{}, firstStep{};
+    float poseGap = 0;
+    Ragdoll *body = nullptr;
+    std::array<HandoverPose, 128> poses{};
+    unsigned poseCount = 0, lastPoseTick[2] = {};
+    bool sampled[2] = {};
+    float nextPoseAge[2] = {}, maxDrawError = 0;
+    bool lastDrawnCaptured = false, worldSampled = false;
+    unsigned lastDrawnTick = 0, lastWorldTick = 0;
+    V3 lastDrawnPelvis{}, lastDrawnRoot{};
+    float lastDrawnGap = 0, nextWorldAge = 0, maxWorldError = 0;
+    std::array<HandoverContact, 192> contacts{};
+    unsigned contactCount = 0, contactsDropped = 0, worldContactsDropped = 0;
+    uint64_t traceStart = 0;
+    void *pelvisFrame = nullptr, *car = nullptr;
+    V3 carOrigin{}, carRight{}, carForward{}, hitVelocity{};
+    float damage = 0;
+    bool carBasis = false, nativeEvent = false, traceEnded = false, savedJump = false, savedEnd = false;
+    const char *startResult = "not_attempted";
+    std::array<PedestrianSample, 256> trajectory{};
+    unsigned trajectoryCount = 0, trajectoryDropped = 0;
+    unsigned firstJump = 0;
+    std::array<uint64_t, static_cast<unsigned>(TrajectoryStage::Count)> lastSampleMs{};
+    std::array<unsigned, static_cast<unsigned>(TrajectoryStage::Count)> lastSampleTick{};
+};
+std::array<CarHandover, 16> g_handovers;
+unsigned g_handoverCount;
+
+CarHandover *PendingHandover(void *actor) {
+    for (unsigned i = 0; i < std::min<unsigned>(g_handoverCount, g_handovers.size()); ++i) {
+        auto &entry = g_handovers[(g_handoverCount - 1 - i) % g_handovers.size()];
+        if (entry.open && entry.actor == actor) return &entry;
+    }
+    return nullptr;
+}
 
 template <class F> bool Guarded(F &f) {
     __try { f(); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 // ---- people and pedestrians
-constexpr int kPedPos = 0x10, kPedModel = 0x40, kPedHealth = 0x15C, kPedActive = 0x0C;
+constexpr int kPedPos = 0x10, kPedModel = 0x40, kPedHealth = 0x15C, kPedAnimation = 0x160, kPedActive = 0x0C;
 std::unordered_set<void *> g_peds;   // the traffic's elements this tick
 std::vector<MmlPedestrian> g_pedList;
 std::vector<void *> g_humanList;
@@ -131,12 +201,151 @@ Ragdoll *Find(void *actor) {
     return nullptr;
 }
 
+bool FinitePoint(const V3 &p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
+
+const char *StageName(TrajectoryStage stage) {
+    switch (stage) {
+    case TrajectoryStage::PreviousWorldDraw: return "previous_world_draw";
+    case TrajectoryStage::BeforeHit: return "before_hit";
+    case TrajectoryStage::NativeHit: return "after_native_hit";
+    case TrajectoryStage::AfterHit: return "after_hit_handler";
+    case TrajectoryStage::TickBegin: return "after_native_tick";
+    case TrajectoryStage::Physics: return "after_physics_step";
+    case TrajectoryStage::TickEnd: return "after_ragdoll_tick";
+    case TrajectoryStage::RenderBegin: return "before_render_pose";
+    case TrajectoryStage::WorldDrawn: return "after_world_draw";
+    case TrajectoryStage::Count: break;
+    }
+    return "unknown";
+}
+
+std::string TracePoint(const V3 &p) {
+    return FinitePoint(p) ? Fmt("[%.5f,%.5f,%.5f]", p.x, p.y, p.z) : "null";
+}
+
+std::string TrajectoryJson(const CarHandover &entry) {
+    std::string out = Fmt("{\"pid\":%u,\"serial\":%u,\"actor\":\"0x%p\",\"model\":\"0x%p\","
+                          "\"car\":\"0x%p\",\"started\":%s,\"start_result\":\"%s\",\"native_event\":%s,"
+                          "\"damage\":%.3f,\"first_jump_index\":%u,\"dropped\":%u,\"ended\":%s,",
+                          (unsigned)GetCurrentProcessId(), entry.serial, entry.actor, entry.model, entry.car,
+                          entry.started ? "true" : "false", entry.startResult, entry.nativeEvent ? "true" : "false",
+                          entry.damage, entry.firstJump, entry.trajectoryDropped, entry.traceEnded ? "true" : "false");
+    out += "\"hit_velocity\":" + TracePoint(entry.hitVelocity);
+    if (entry.carBasis) {
+        out += ",\"car_origin\":" + TracePoint(entry.carOrigin) + ",\"car_right\":" + TracePoint(entry.carRight) +
+               ",\"car_forward\":" + TracePoint(entry.carForward);
+    }
+    out += ",\"samples\":[";
+    for (unsigned i = 0; i < entry.trajectoryCount; ++i) {
+        const auto &p = entry.trajectory[i];
+        out += Fmt("%s{\"ms\":%lld,\"tick\":%u,\"stage\":\"%s\",\"animation\":%d,\"health\":%.4f,",
+                   i ? "," : "", static_cast<long long>(p.ms) - static_cast<long long>(entry.traceStart), p.tick,
+                   StageName(p.stage), p.animation, p.health);
+        out += "\"element\":" + (p.hasElement ? TracePoint(p.element) : "null") + ",\"root\":" + TracePoint(p.root) +
+               ",\"pelvis\":" + (p.hasPelvis ? TracePoint(p.pelvis) : "null") +
+               ",\"body\":" + (p.physical ? TracePoint(p.body) : "null") +
+               ",\"body_velocity\":" + (p.physical ? TracePoint(p.velocity) : "null") + "}";
+    }
+    return out + "]}";
+}
+
+bool SaveTrajectory(const CarHandover &entry, const char *name) {
+    const std::string path = std::string(H->mod_data_dir(M)) + name;
+    const std::string temporary = path + ".new";
+    wchar_t destination[1024], source[1024];
+    if (!mml_widen(path.c_str(), destination, 1024) || !mml_widen(temporary.c_str(), source, 1024)) return false;
+    const std::string data = TrajectoryJson(entry);
+    FILE *file = mml_fopen(temporary.c_str(), "wb");
+    if (!file) return false;
+    const bool written = fwrite(data.data(), 1, data.size(), file) == data.size();
+    const bool closed = fclose(file) == 0;
+    if (written && closed && MoveFileExW(source, destination, MOVEFILE_REPLACE_EXISTING)) return true;
+    DeleteFileW(source);
+    return false;
+}
+
+void TracePedestrian(CarHandover &entry, TrajectoryStage stage, uint64_t now) {
+    if (!entry.actor || entry.traceEnded) return;
+    if (now - entry.traceStart > 1600 || !IsPed(entry.actor)) {
+        entry.traceEnded = true;
+        return;
+    }
+    PedestrianSample sample{};
+    sample.tick = g_tick;
+    sample.stage = stage;
+    sample.ms = now;
+    bool valid = false;
+    auto read = [&] {
+        if (ModelOf(entry.actor) != entry.model || !game::at<uint8_t>(entry.actor, kPedActive)) return;
+        const float *root = game::WorldMatrix(entry.model);
+        if (!root) return;
+        sample.element = game::at<V3>(entry.actor, kPedPos);
+        sample.root = {root[12], root[13], root[14]};
+        sample.health = game::at<float>(entry.actor, kPedHealth);
+        sample.animation = game::at<int>(entry.actor, kPedAnimation);
+        if (entry.pelvisFrame) {
+            if (const float *pelvis = game::WorldMatrix(entry.pelvisFrame)) {
+                sample.pelvis = {pelvis[12], pelvis[13], pelvis[14]};
+                sample.hasPelvis = FinitePoint(sample.pelvis);
+            }
+        }
+        if (Ragdoll *body = Find(entry.actor); body && body->Model() == entry.model && jolt_ragdoll::Has(body)) {
+            sample.body = body->BodyPos(Ragdoll::B_PELVIS);
+            sample.velocity = body->BodyVel(Ragdoll::B_PELVIS);
+            sample.physical = true;
+        }
+        valid = FinitePoint(sample.root) && FinitePoint(sample.element) && std::isfinite(sample.health);
+    };
+    if (!Guarded(read) || !valid) { entry.traceEnded = true; return; }
+    if (entry.trajectoryCount == entry.trajectory.size()) { ++entry.trajectoryDropped; return; }
+    if (entry.trajectoryCount && !entry.firstJump) {
+        const auto &previous = entry.trajectory[entry.trajectoryCount - 1];
+        const float distance = std::max({Len(sample.root - previous.root), previous.hasElement ? Len(sample.element - previous.element) : 0.0f,
+            sample.hasPelvis && previous.hasPelvis ? Len(sample.pelvis - previous.pelvis) : 0.0f,
+            sample.physical && previous.physical ? Len(sample.body - previous.body) : 0.0f});
+        if (distance >= .75f && now - previous.ms <= 200) entry.firstJump = entry.trajectoryCount;
+    }
+    entry.trajectory[entry.trajectoryCount++] = sample;
+}
+
+unsigned g_lastSavedTrajectory;
+void PersistTrajectory(CarHandover &entry) {
+    if (entry.firstJump && !entry.savedJump) {
+        entry.savedJump = true;
+        if (!SaveTrajectory(entry, "pedestrian-jump.json")) LOG("pedestrian %p: could not save jump trace", entry.actor);
+    }
+    if (entry.traceEnded && !entry.savedEnd && entry.nativeEvent && entry.serial > g_lastSavedTrajectory) {
+        entry.savedEnd = true;
+        g_lastSavedTrajectory = entry.serial;
+        if (!SaveTrajectory(entry, "pedestrian-contact.json")) LOG("pedestrian %p: could not save contact trace", entry.actor);
+    }
+}
+
+void TracePedestrians(TrajectoryStage stage) {
+    const uint64_t now = GetTickCount64();
+    for (auto &entry : g_handovers) {
+        if (!entry.actor) continue;
+        if (entry.traceEnded) { PersistTrajectory(entry); continue; }
+        const auto index = static_cast<unsigned>(stage);
+        const uint64_t last = entry.lastSampleMs[index];
+        // Bound render passes per tick. After the initial burst, keep up to 30 samples/s per phase.
+        if (last && (entry.lastSampleTick[index] == g_tick || (now - entry.traceStart > 200 && now - last < 33))) continue;
+        entry.lastSampleMs[index] = now;
+        entry.lastSampleTick[index] = g_tick;
+        TracePedestrian(entry, stage, now);
+        PersistTrajectory(entry);
+    }
+}
+
 // the frames LS3D frees (frame_watch): forgotten at the next tick or frame, before anything of ours reads them
 std::unordered_set<void *> g_freed;
 std::unordered_set<void *> g_watched;
 void FrameGone(void *frame, void *) {
     g_freed.insert(frame);
     g_watched.erase(frame);
+    for (auto &entry : g_handovers) {
+        if (entry.model == frame || entry.pelvisFrame == frame) entry.traceEnded = true;
+    }
 }
 void Watch(void *frame) {
     if (frame && g_watched.insert(frame).second) H->frame_watch(M, frame, FrameGone, nullptr);
@@ -147,10 +356,14 @@ void WatchRagdoll(const Ragdoll *rd) {
 }
 
 void Unshape(void *actor) { H->bullet_shape(M, actor, nullptr, 0); }
+void StopHandoverPose(void *actor) {
+    for (auto &entry : g_handovers) if (entry.actor == actor) entry.body = nullptr;
+}
 
 void Drop(void *actor) {
     for (size_t i = 0; i < g_ragdolls.size(); i++)
         if (g_ragdolls[i]->actor == actor) {
+            StopHandoverPose(actor);
             g_ragdolls.erase(g_ragdolls.begin() + i);
             Unshape(actor);
             LOG("ragdoll dropped %p", actor);
@@ -158,6 +371,7 @@ void Drop(void *actor) {
         }
 }
 void EraseAt(size_t i) {
+    StopHandoverPose(g_ragdolls[i]->actor);
     Unshape(g_ragdolls[i]->actor);
     g_ragdolls.erase(g_ragdolls.begin() + i);
 }
@@ -197,11 +411,11 @@ bool SafeAliveAgain(const Ragdoll *rd) {
 bool SafeCapture(void *key, V3 *pts) {
     bool ok = false;
     auto f = [&] {
-        V3 fwd;
-        void *frames[20];
+        Ragdoll::PoseSnap pose;
         std::string err;
         V3 dir = IsPed(key) ? V3{} : game::at<V3>(key, game::kActorFacing);
-        ok = Ragdoll::Capture(ModelOf(key), IsPed(key) ? nullptr : &dir, pts, &fwd, frames, &err);
+        ok = Ragdoll::Snapshot(ModelOf(key), IsPed(key) ? nullptr : &dir, &pose, &err);
+        if (ok) memcpy(pts, pose.pts, sizeof pose.pts);
     };
     return Guarded(f) && ok;
 }
@@ -250,7 +464,8 @@ void *SeatCarOf(void *actor) {
 // lives in the world, so he is taken out the game's own way when it starts and put back when he gets up on its floor
 // (game_build.h humanPlatform, tramCarOf; C_human +0x9C the vehicle to go into, +0x584 which of its cars: both builds)
 constexpr int kHumanToVehicle = 0x9C, kHumanTramCar = 0x584;
-std::unordered_map<void *, void *> g_gettingUpInTram;
+struct RailPassenger { void *tram; int car; float deck; };
+std::unordered_map<void *, RailPassenger> g_railPassengers;
 void *TramOf(void *h) {
     void *v = game::at<void *>(h, game::kHumanVehicle);
     return v && game::at<uint32_t>(v, game::kActorType) == 8 ? v : nullptr;
@@ -278,51 +493,170 @@ void BackIntoTram(void *h, void *tram) {
     game::at<void *>(h, kHumanToVehicle) = tram;
     SafePlatform(h, true);
 }
-bool GettingUp(void *h) {
-    MmlHumanAnim s{};
-    s.size = sizeof s;
-    return H->human_anim_state(M, h, &s) && s.state == 6;
-}
+// The game keeps one private collision grid in each carriage's own coordinates.
+struct Cabin {
+    void *frame;
+    void *grid;
+    bool Open(void *tram, int car) {
+        if (car < 0 || car > game::at<int>(tram, game::kRailwayVagonCount)) return false;
+        auto grids = game::at<uint8_t *>(tram, 0xFC);
+        auto cars = game::at<void **>(tram, game::kRailwayVagons);
+        frame = car == 0 ? game::at<void *>(tram, game::kActorFrame) : cars ? cars[car-1] : nullptr;
+        grid = grids ? grids + 16 * car : nullptr;
+        return frame && grid;
+    }
+    V3 Local(V3 world) const {
+        const float *m = game::WorldMatrix(frame);
+        return M3::Raw(m).Inverse().Apply(world - V3{m[12], m[13], m[14]});
+    }
+    V3 World(V3 local) const {
+        const float *m = game::WorldMatrix(frame);
+        return M3::Raw(m).Apply(local) + V3{m[12], m[13], m[14]};
+    }
+    bool Floor(V3 from, float depth, float *height) const {
+        using Ray = void *(__thiscall *)(void *, void *, const V3 *, const V3 *, V3 *, V3 *, int);
+        const V3 delta{0, -depth, 0};
+        V3 hit{}, normal{};
+        auto ray = reinterpret_cast<Ray>(game::Exe().testLineInVehicle);
+        if (!ray(game::Collision(), grid, &from, &delta, &hit, &normal, 2) || normal.y < .5f) return false;
+        *height = hit.y;
+        return true;
+    }
+    bool Standing(V3 feet, float *height) const {
+        // The same ray and exclusion mask as C_human::MovementIntern on a railway.
+        return Floor(feet + V3{0, .5f, 0}, 1.5f, height);
+    }
+};
+
 void EnterTramUnder(void *h, const V3 &pelvis) {
-    if (!game::Exe().humanPlatform || !game::Exe().tramCarOf || IsPed(h) || TramOf(h)) return;
-    void *v = const_cast<void *>(jolt_world::VehicleAround(pelvis + V3{0, 0.3f, 0}, 1.5f, 4.0f));
-    if (!v || game::at<uint32_t>(v, game::kActorType) != 8) return;
-    int car = SafeTramCar(v, pelvis);
-    if (car < 0) return;
+    if (!game::Exe().humanPlatform || IsPed(h) || TramOf(h)) return;
+    // Resolve the fitted root against the carriage's private walking geometry. Render meshes
+    // include steps and overhangs and do not cover every trailing carriage.
+    std::vector<void *> nearby;
+    vehicles::ListVehicles(pelvis, 80.f, nearby);
+    const V3 root = game::ActorWorldPos(h);
+    void *v = nullptr;
+    int car = -1;
+    float deck = 0, distance = 1.f;
+    for (void *candidate : nearby) {
+        if (game::at<int>(candidate, game::kActorType) != game::kActorTypeRailway) continue;
+        const int index = SafeTramCar(candidate, pelvis);
+        Cabin cabin{};
+        float floor;
+        if (!cabin.Open(candidate, index)) continue;
+        const V3 local = cabin.Local(root);
+        if (!cabin.Standing(local, &floor)) continue;
+        const float gap = local.y - floor;
+        if (gap < -.1f || std::fabs(gap) >= distance) continue;
+        v = candidate;
+        car = index;
+        deck = floor;
+        distance = std::fabs(gap);
+    }
+    if (!v) return;
     game::at<int>(h, kHumanTramCar) = car;
     game::at<void *>(h, kHumanToVehicle) = v;
-    bool ok = SafePlatform(h, true);
-    LOG("%p got up on the floor of tram %p (its car %d): back in it (the game's way in)%s", h, v, car, ok ? "" : ": FAULTED");
-    if (ok) g_gettingUpInTram[h] = v;
-}
-// someone put back in a tram walks off its floor while his get-up animation moves him: out of it, into the street
-void WatchTramGetUps() {
-    for (auto it = g_gettingUpInTram.begin(); it != g_gettingUpInTram.end();) {
-        void *h = it->first;
-        if (!GettingUp(h) || TramOf(h) != it->second) { it = g_gettingUpInTram.erase(it); continue; }
-        V3 feet = game::ActorWorldPos(h);
-        if (jolt_world::VehicleAround(feet + V3{0, 0.5f, 0}, 1.5f, 4.0f) == it->second) { ++it; continue; }
-        bool ok = SafePlatform(h, false);
-        LOG("%p walked off tram %p's floor while getting up: out of it, into the street%s", h, it->second, ok ? "" : ": FAULTED");
-        it = g_gettingUpInTram.erase(it);
+    if (!SafePlatform(h, true) || TramOf(h) != v) return;
+    g_railPassengers[h] = {v, car, deck};
+    if (h == H->human_player(M)) {
+        g_playerRisingUntil = 0;
+        ragcam::Stop();
+        MmlGameCamera camera{};
+        camera.size = sizeof camera;
+        if (MML_HAS(H, game_camera) && H->game_camera && H->game_camera(M, &camera) && camera.mode == 17) {
+            // The native track now moves with the carriage. The hidden visual blend still targets the old world pelvis.
+            if (MML_HAS(H, human_get_up_cancel) && H->human_get_up_cancel) H->human_get_up_cancel(M, h);
+            // Intern_UseRailway(false) shows this same player frame when he leaves.
+            void *model = game::at<void *>(h, game::kActorFrame);
+            using SetOn = void(__stdcall *)(void *, bool);
+            reinterpret_cast<SetOn>((*reinterpret_cast<void ***>(model))[0x24 / 4])(model, false);
+        }
     }
+    LOG("%p recovered in railway %p, carriage %d, native floor %.3f", h, v, car, deck);
 }
+
+// A steep railway brace can be the first intersection above a walkable track or street.
+bool CrossedGround(const V3 &feet, float deckY, MmlHit *ground) {
+    float from[3] = {feet.x, deckY, feet.z};
+    const float to[3] = {feet.x, feet.y, feet.z};
+    while (from[1] > to[1] && H->world_ray(M, from, to, MML_WORLD_STATIC, nullptr, ground)) {
+        const float y = ground->pos[1];
+        if (!(y <= from[1] && y >= to[1])) break;
+        const unsigned material = ground->flags >> 24;
+        if (material == 31 || material == 44) return false;  // Native water entry handles the fall.
+        if (ground->normal[1] > .5f) return true;
+        const float next = y - .01f;
+        if (!(next < from[1])) break;
+        from[1] = next;
+    }
+    return false;
+}
+
+bool WatchPassenger(void *h, RailPassenger *known) {
+    void *tram = TramOf(h);
+    if (!tram || IsDead(h)) return false;
+    const int car = game::at<int>(h, kHumanTramCar);
+    if (known && (known->tram != tram || known->car != car)) return false;
+    Cabin cabin{};
+    void *model = game::at<void *>(h, game::kActorFrame);
+    if (!model || !cabin.Open(tram, car) || game::at<void *>(model, game::kFrameParent) != cabin.frame) return false;
+    // Native boarding, exits, stationary passengers and an upward jump keep their owner.
+    if (game::at<int>(h, game::Exe().humanState) != game::kHumanStateAir ||
+        game::at<float>(h, game::kHumanFallSpeed) <= 0) return true;
+    V3 feet = game::at<V3>(h, game::kActorPos);
+    float deck;
+    if (cabin.Standing(feet, &deck)) {
+        if (known) known->deck = deck;
+        return true;
+    }
+    // An unsupported foot can be jumping or stepping. Only leave once below a confirmed deck.
+    // On hot load use the railway's own centre-floor probe from C_railway::GameInit.
+    if (known) deck = known->deck;
+    else if (!cabin.Floor({0, .8f, 0}, 1.6f, &deck)) return true;
+    if (feet.y >= deck - .5f) return true;
+
+    const V3 world = cabin.World(feet);
+    const V3 rail = cabin.World({feet.x, deck, feet.z});
+    // Only recover a surface the passenger has already crossed. Over open air the native fall continues.
+    MmlHit ground{};
+    const bool crossed = CrossedGround(world, rail.y, &ground);
+    if (!SafePlatform(h, false) || TramOf(h)) return true;
+    if (MML_HAS(H, human_get_up_cancel) && H->human_get_up_cancel) H->human_get_up_cancel(M, h);
+    if (crossed) {
+        const MmlVec3 at{ground.pos[0], ground.pos[1] + .03f, ground.pos[2]};
+        if (H->actor_teleport(M, h, &at, nullptr)) game::at<float>(h, game::kHumanFallSpeed) = 0;
+    }
+    LOG("%p left unsupported railway %p, carriage %d, feet %.3f below deck%s", h, tram, car,
+        deck - feet.y, crossed ? " (crossed world surface)" : "");
+    return false;
+}
+
 void SafeWatchTramGetUps() {
-    auto f = [&] { WatchTramGetUps(); };
-    if (!Guarded(f)) g_gettingUpInTram.clear();
+    auto observe = [](void *actor, RailPassenger *known) {
+        bool keep = false;
+        auto check = [&] { keep = WatchPassenger(actor, known); };
+        return Guarded(check) && keep;
+    };
+    void *player = H->human_player(M);
+    if (player && !g_railPassengers.count(player)) observe(player, nullptr);
+    for (auto it = g_railPassengers.begin(); it != g_railPassengers.end();)
+        if (observe(it->first, &it->second)) ++it;
+        else it = g_railPassengers.erase(it);
 }
 
 // ---- bullets in bodies (mafia-ragdoll's hits.cpp, its blows; the loader gives the bodies' bullets)
 struct Kept { void *actor; V3 J, at; bool hasAt; DWORD tick; };
 std::vector<Kept> g_kept;
 unsigned g_corpseHits, g_shapesGiven;
+struct BulletContact { void *actor; V3 at; int shape, part; float localDv; };
+BulletContact g_lastBullet{};
 
 // A hit's momentum (N s): the game's damage times the kick, held to the strongest one shot gives (a script's or a
 // test's damage of 1000 threw a body 12 m; a shotgun's pellets are each a hit of their own)
 float Momentum(float damage) { return std::min(damage * g_cfg.kick, g_cfg.most); }
-void Kick(Ragdoll *rd, const V3 &dir, const V3 &at, float damage) {
-    if (!rd || damage <= 0 || Len(dir) < 1e-4f) return;
-    rd->Kick(Norm(dir) * Momentum(damage), at, g_cfg.whole, g_cfg.radius, g_cfg.maxPart);
+float Kick(Ragdoll *rd, const V3 &dir, const V3 &at, float damage, int part = -1) {
+    if (!rd || damage <= 0 || Len(dir) < 1e-4f) return 0;
+    return rd->Kick(Norm(dir) * Momentum(damage), at, g_cfg.whole, g_cfg.radius, g_cfg.maxPart, part);
 }
 void Remember(void *actor, const V3 &dir, const V3 *at, float damage) {
     if (!actor || damage <= 0 || Len(dir) < 1e-4f || g_cfg.remember <= 0) return;
@@ -343,26 +677,26 @@ void KeptTick() {
     g_kept.erase(std::remove_if(g_kept.begin(), g_kept.end(), [&](const Kept &k) { return now - k.tick > keep; }), g_kept.end());
 }
 
-// every body's parts for the bullets, where they are this tick
+// Register corpse parts only. Living actors, including temporary knockdowns, use the game's bullet collision.
 void GiveShapes() {
-    MmlCapsule caps[Ragdoll::BCOUNT];
+    MmlCapsule caps[Ragdoll::BulletShapeCount()]{};
     for (auto &r : g_ragdolls) {
-        if (!g_cfg.bullets) { Unshape(r->actor); r->shapeAtRest = false; continue; }
+        if (!g_cfg.enabled || !g_cfg.bullets || !IsDead(r->actor)) {
+            Unshape(r->actor);
+            r->shapeAtRest = false;
+            continue;
+        }
         // the loader keeps the capsules until they are given again: a body asleep gives them once
         if (r->sleeping && r->shapeAtRest) continue;
-        for (int b = 0; b < Ragdoll::BodyCount(); b++) {
-            V3 a, e;
-            float rad;
-            r->BodyCapsule(b, &a, &e, &rad);
-            caps[b] = {{a.x, a.y, a.z}, {e.x, e.y, e.z}, rad};
-        }
-        if (H->bullet_shape(M, r->actor, caps, Ragdoll::BodyCount())) g_shapesGiven++;
-        r->shapeAtRest = r->sleeping;
+        r->BulletCapsules(caps);
+        bool registered = H->bullet_shape(M, r->actor, caps, Ragdoll::BulletShapeCount()) != 0;
+        if (registered) g_shapesGiven++;
+        r->shapeAtRest = registered && r->sleeping;
     }
 }
 
 // ---- cars, tracked every tick from their model frame (the speed of a car that hits someone)
-struct CarTrack { V3 pos, vel; unsigned tick; };
+struct CarTrack { V3 pos, vel; unsigned tick; float speed = 0; unsigned reported = 0; float joltDelta = 0; };
 std::unordered_map<void *, CarTrack> g_carTracks;
 void TrackCars(float dt) {
     void *pl = game::Player();
@@ -375,18 +709,52 @@ void TrackCars(float dt) {
         if (!m) continue;
         const float *w = game::WorldMatrix(m);
         V3 p{w[12], w[13], w[14]};
+        float speed = game::at<uint32_t>(a, game::kActorType) == 4 ?
+            Len(game::at<V3>(static_cast<uint8_t *>(a) + game::Exe().vehicle, game::Exe().vehVelocity)) : 0.0f;
         auto it = g_carTracks.find(a);
         if (it != g_carTracks.end() && g_tick - it->second.tick == 1) {
+            CarTrack &track = it->second;
+            // Rare hard-stop reports need evidence from the same frame, rather than inferring from a later
+            // ragdoll event. Logging has no collision policy and is limited to one report per car per 60 ticks.
+            if (track.speed - speed > 1.0f && track.speed > 1.5f && g_tick - track.reported > 60 &&
+                Len(p - track.pos) < 1.0f) {
+                void *nearest = nullptr;
+                float distance = 6.0f;
+                V3 element{}, model{};
+                int animation = -1;
+                for (const MmlPedestrian &ped : g_pedList) {
+                    if (!ped.model || !ped.spawned) continue;
+                    const float *w = game::WorldMatrix(ped.model);
+                    V3 at{w[12],w[13],w[14]};
+                    V3 stored = game::at<V3>(ped.element, kPedPos);
+                    float d = std::min(Len(at - p), Len(stored - p));
+                    if (d >= distance) continue;
+                    nearest = ped.element;
+                    distance = d;
+                    model = at;
+                    element = stored;
+                    animation = game::at<int>(ped.element, 0x160);
+                }
+                if (nearest) {
+                    LOG("car hard-stop %p: %.2f -> %.2f m/s (dt %.3f), Jolt delta %.3f m/s; nearest pedestrian %p "
+                        "%.2f m, anim %d, element/model gap %.3f m, physical %d; car at %.2f %.2f %.2f",
+                        a, track.speed, speed, dt, track.joltDelta, nearest, distance, animation,
+                        Len(element-model), Find(nearest) != nullptr, p.x,p.y,p.z);
+                    track.reported = g_tick;
+                }
+            }
             V3 v = (p - it->second.pos) * (1.0f / dt);
             it->second.vel = it->second.vel * 0.5f + v * 0.5f;   // (the frames' jitter smoothed)
         } else if (it == g_carTracks.end()) {
-            g_carTracks[a] = {p, {0, 0, 0}, g_tick};
+            g_carTracks[a] = {p, {0, 0, 0}, g_tick, speed};
             continue;
         } else {
             it->second.vel = {0, 0, 0};
         }
         it->second.pos = p;
         it->second.tick = g_tick;
+        it->second.speed = speed;
+        it->second.joltDelta = 0;
     }
     for (auto it = g_carTracks.begin(); it != g_carTracks.end();) it = g_tick - it->second.tick > 30 ? g_carTracks.erase(it) : std::next(it);
 }
@@ -413,6 +781,8 @@ void JoltCarKicks() {
         V3 dv = k.dv + Cross(k.dw, game::at<V3>(veh, x.vehCentre) - k.com), dw = k.dw;
         if (Len(dv) > 3.0f) dv = dv * (3.0f / Len(dv));
         if (Len(dw) > 2.0f) dw = dw * (2.0f / Len(dw));
+        auto track = g_carTracks.find(car);
+        if (track != g_carTracks.end()) track->second.joltDelta += Len(dv);
         game::at<V3>(veh, x.vehVelocity) += dv;
         game::at<V3>(veh, x.vehTurn) -= dw;
     }
@@ -423,43 +793,97 @@ bool SafeCarReactions() {
 }
 
 // ---- making a ragdoll
-Ragdoll *Start(void *actor, bool puppet, std::string *err) {
+Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy = nullptr) {
     if (Ragdoll *r = Find(actor)) return r;
+    // The host must stop its previous handover before a new body captures/poses the skeleton.
+    if (MML_HAS(H, human_get_up_cancel) && H->human_get_up_cancel) H->human_get_up_cancel(M, actor);
     void *leftTram = LeaveTram(actor);
     auto r = std::make_unique<Ragdoll>();
     r->puppet = puppet;
+    r->vehicleImpact = struckBy != nullptr;
+    r->impactVehicle = const_cast<void *>(struckBy);
     float dt = 0;
     const V3 *prev = nullptr;
     const Ragdoll::PoseSnap *startPose = nullptr;
+    bool ped = IsPed(actor);
+    V3 pedestrianVelocity{};
+    CarHandover *handover = ped ? PendingHandover(actor) : nullptr;
+    Ragdoll::PoseSnap currentPose{};
+    bool preHitPose = false;
     // the pose at the end of the last tick, before the game reacted to what is killing him (a hit's reaction moves
     // the model and starts falls the body should not inherit)
     auto hist = g_poses.find(actor);
     if (hist != g_poses.end() && hist->second.count > 0 && g_tick - hist->second.seen <= 1) {
         startPose = &hist->second.snap;
         if (hist->second.count > 1) { prev = hist->second.pts[1]; dt = hist->second.dt[0]; }
-    } else {
+        if (ped) pedestrianVelocity = hist->second.pedestrianVelocity;
+    } else if (!ped) {
         prev = PreviousPose(actor, &dt);
     }
-    bool ped = IsPed(actor);
     V3 dir = ped ? V3{} : game::at<V3>(actor, game::kActorFacing);
     bool inited = false;
-    auto init = [&] { inited = r->Init(actor, ModelOf(actor), ped ? nullptr : &dir, err, prev, dt, startPose); };
+    auto init = [&] {
+        void *model = ModelOf(actor);
+        if (ped && startPose && hist->second.pedestrianModel != model) {
+            startPose = nullptr;
+            prev = nullptr;
+            dt = 0;
+            pedestrianVelocity = {};
+        }
+        if (handover && handover->captured && handover->model == model) {
+            // Capture before native collision reaction, after this tick's dodge animation advanced.
+            // A native skeleton rebuild invalidates the captured frame pointers.
+            if (Ragdoll::Snapshot(model, nullptr, &currentPose, err)) {
+                const bool sameFrames = std::equal(std::begin(currentPose.frames), std::end(currentPose.frames),
+                                                   std::begin(handover->beforePose.frames));
+                startPose = sameFrames ? &handover->beforePose : &currentPose;
+                preHitPose = sameFrames;
+                prev = nullptr;
+                dt = 0;
+                if (sameFrames && hist != g_poses.end() && hist->second.count > 0 &&
+                    g_tick - hist->second.seen <= 1 && hist->second.pedestrianModel == model &&
+                    hist->second.pedestrianAnimation == handover->animation) {
+                    prev = hist->second.pts[0];
+                    dt = g_lastDt;
+                } else {
+                    pedestrianVelocity = {};
+                }
+            } else {
+                startPose = nullptr;
+                prev = nullptr;
+                dt = 0;
+                pedestrianVelocity = {};
+            }
+        }
+        inited = r->Init(actor, model, ped ? nullptr : &dir, err, ped ? nullptr : prev, dt, startPose);
+    };
     if (!Guarded(init) || !inited) {
+        if (handover) handover->startResult = "skeleton_init_failed";
         LOG("ragdoll init failed on %p: %s", actor, err->c_str());
         BackIntoTram(actor, leftTram);
         return nullptr;
     }
     r->pedestrian = ped;
+    if (ped) r->SetMotionFrom(prev, dt, &pedestrianVelocity);
     r->keyVtable = game::at<uint32_t>(actor, 0);
     V3 pv = r->BodyVel(Ragdoll::B_PELVIS);
     LOG("ragdoll started on %s %p (puppet=%d, pose from %s, motion from %s, dt %.3f; pelvis %.2f %.2f %.2f m/s)", ped ? "pedestrian" : "person",
-        actor, puppet, startPose ? "last tick" : "now", prev ? "history" : "rest", dt, pv.x, pv.y, pv.z);
+        actor, puppet, preHitPose ? "before car hit" : startPose == &currentPose ? "now" : startPose ? "last tick" : "now",
+        prev ? "history" : "rest", dt, pv.x, pv.y, pv.z);
+    if (ped && prev && dt > 1e-4f) {
+        const V3 visual = (startPose->pts[Ragdoll::PELVIS] - prev[Ragdoll::PELVIS]) * (1.0f / dt);
+        if (Len(visual - pedestrianVelocity) > 8.0f)
+            LOG("pedestrian %p motion seed (animation %d): native %.2f %.2f %.2f, visual pelvis %.2f %.2f %.2f m/s",
+                actor, hist->second.pedestrianAnimation, pedestrianVelocity.x, pedestrianVelocity.y, pedestrianVelocity.z,
+                visual.x, visual.y, visual.z);
+    }
     g_ragdolls.push_back(std::move(r));
     Ragdoll *made = g_ragdolls.back().get();
     void *car = ped ? nullptr : SeatCarOf(actor);
     if (car) LOG("ragdoll %p dies sitting in car %p: its body stays in the car's cabin, held to the seat", actor, car);
     std::string jerr;
-    if (!jolt_ragdoll::Add(made, &jerr, car)) {
+    if (!jolt_ragdoll::Add(made, &jerr, car, struckBy)) {
+        if (handover) handover->startResult = "physics_body_failed";
         LOG("ragdoll %p: Jolt could not make its body (%s): left to the game's animation; %s", actor, jerr.c_str(), jolt_world::Describe().c_str());
         g_ragdolls.pop_back();
         *err = "Jolt could not make the body: " + jerr;
@@ -467,6 +891,21 @@ Ragdoll *Start(void *actor, bool puppet, std::string *err) {
         return nullptr;
     }
     WatchRagdoll(made);
+    if (auto *entry = PendingHandover(actor); entry && entry->model == made->Model()) {
+        entry->started = true;
+        entry->startResult = "started";
+        entry->body = made;
+        entry->history = prev != nullptr;
+        entry->preHitPose = preHitPose;
+        entry->initial = made->InitialPoints()[Ragdoll::PELVIS];
+        entry->bodyStart = made->BodyPos(Ragdoll::B_PELVIS);
+        if (entry->captured) {
+            for (int i = 0; i < Ragdoll::COUNT; ++i)
+                entry->poseGap = std::max(entry->poseGap, Len(made->InitialPoints()[i] - entry->beforePose.pts[i]));
+            if (entry->poseGap > .3f)
+                LOG("pedestrian %p car handover pose gap %.3f m (history %d)", actor, entry->poseGap, entry->history);
+        }
+    }
     return made;
 }
 
@@ -478,24 +917,45 @@ void JoltMovers(std::vector<smoke::Mover> &out) {
     if (!pl) return;
     V3 pp = game::ActorWorldPos(pl);
     vehicles::GatherVehicles(pp - V3{40, 15, 40}, pp + V3{40, 15, 40}, out);
+    for (const auto &body : g_ragdolls) {
+        void *car = body->impactVehicle;
+        if (!car || std::any_of(out.begin(), out.end(), [&](const smoke::Mover &m) { return m.key == car; })) continue;
+        V3 at, axes[3];
+        if (!vehicles::Pose(car, &at, axes) || Len(at - body->BodyPos(Ragdoll::B_PELVIS)) > 40.0f) continue;
+        smoke::Mover mover;
+        if (vehicles::MoverOf(car, &mover)) out.push_back(mover);
+    }
     std::vector<V3> bodies;
     for (auto &r : g_ragdolls) bodies.push_back(r->BodyPos(Ragdoll::B_PELVIS));
-    if (bodies.empty()) return;
     for (auto &kv : g_poses) {
         if (kv.second.count == 0 || g_tick - kv.second.seen > 1) continue;
         if (Find(kv.first)) continue;   // (a fresh ragdoll's pose as capsules would stop it dead)
         V3 p = kv.second.snap.pts[Ragdoll::PELVIS];
         bool close = false;
         for (const V3 &c : bodies) close = close || Len(c - p) < 6.0f;
+        // Also give living bodies near a moving car as sensors. Native car/pedestrian contact can miss a waving
+        // animation until it is already inside the car. These use the actual car hull and anatomical capsules.
+        if (!close && IsPed(kv.first)) {
+            for (const smoke::Mover &m : out) {
+                if (m.kind == smoke::Mover::CAPSULE) break; // vehicle movers precede living capsules
+                if (Dot(m.c - p, m.c - p) >= 81.0f) continue;
+                auto track = g_carTracks.find(const_cast<void *>(m.key));
+                if (track != g_carTracks.end() && g_tick - track->second.tick <= 2 && Len(track->second.vel) > 1.5f) {
+                    close = true;
+                    break;
+                }
+            }
+        }
         if (!close) continue;
         Ragdoll pose;
-        pose.Setup(kv.second.snap.pts, kv.second.snap.fwd);
+        pose.Setup(kv.second.snap.pts, kv.second.snap.fwd, kv.second.snap.rot);
         for (int b = 0; b < Ragdoll::BodyCount(); b++) {
             smoke::Mover m;
             m.key = static_cast<const uint8_t *>(kv.first) + b;
             m.kind = smoke::Mover::CAPSULE;
             pose.BodyCapsule(b, &m.p0, &m.p1, &m.r);
             m.owner = kv.first;
+            m.partMass = Ragdoll::SegmentMass[b];
             out.push_back(m);
         }
     }
@@ -525,9 +985,50 @@ bool SafeSnapshotNow(Ragdoll *r) {
     auto f = [&] { ok = r->SnapshotNow(&r->anim); };
     return Guarded(f) && ok;
 }
-bool SafeApply(Ragdoll *r) {
+void SampleHandoverPose(CarHandover *entry, Ragdoll *r, unsigned stage) {
+    if (!entry || entry->poseCount >= entry->poses.size()) return;
+    Ragdoll::PoseSnap snap{};
+    if (!r->SnapshotNow(&snap)) return;
+    M3 rotations[19];
+    V3 origins[19];
+    r->PhysicalPose(rotations, origins);
+    HandoverPose sample;
+    sample.tick = g_tick;
+    sample.stage = stage;
+    sample.age = r->age;
+    sample.physical = origins[18];
+    sample.drawn = snap.org[18];
+    sample.element = game::at<V3>(r->actor, r->pedestrian ? kPedPos : game::kActorPos);
+    for (int i = 0; i < 19; ++i) sample.error = std::max(sample.error, Len(snap.org[i] - origins[i]));
+    for (int i = 0; i < Ragdoll::BodyCount(); ++i) sample.fastest = std::max(sample.fastest, Len(r->BodyVel(i)));
+    entry->poses[entry->poseCount++] = sample;
+    if (stage == 4) entry->maxDrawError = std::max(entry->maxDrawError, sample.error);
+}
+bool SafeApply(Ragdoll *r, bool rendering = false) {
+    CarHandover *entry = nullptr;
+    const unsigned phase = rendering ? 1 : 0;
+    for (unsigned i = 0; i < std::min<unsigned>(g_handoverCount, g_handovers.size()); ++i) {
+        auto &candidate = g_handovers[(g_handoverCount - 1 - i) % g_handovers.size()];
+        if (candidate.body != r || candidate.actor != r->actor || candidate.model != r->Model()) continue;
+        if (r->age > 3.5f || candidate.poseCount + 2 > candidate.poses.size() ||
+            (candidate.sampled[phase] && candidate.lastPoseTick[phase] == g_tick)) break;
+        if (candidate.poseCount < 48 || r->age >= candidate.nextPoseAge[phase]) entry = &candidate;
+        break;
+    }
+    if (entry) {
+        entry->sampled[phase] = true;
+        entry->lastPoseTick[phase] = g_tick;
+        entry->nextPoseAge[phase] = r->age + .10f;
+        auto sample = [&] { SampleHandoverPose(entry, r, rendering ? 3 : 1); };
+        Guarded(sample);   // diagnostics must not prevent the ordinary pose write
+    }
     auto f = [&] { r->Apply(); };
-    return Guarded(f);
+    const bool result = Guarded(f);
+    if (result && entry) {
+        auto sample = [&] { SampleHandoverPose(entry, r, rendering ? 4 : 2); };
+        Guarded(sample);
+    }
+    return result;
 }
 // The bones' worst turn since our last write (degrees): the engine's animation played on the model meanwhile.
 float SafeOverwritten(Ragdoll *r) {
@@ -549,7 +1050,6 @@ bool AtRest(Ragdoll *r, float overwritten) {
 // ---- every tick: the poses of the people near the player remembered, and the deaths caught (people die through
 // many paths: a hit, a fall, a script, the water; a ragdoll starts whenever the alive flag drops, a hit only adds its
 // push)
-std::unordered_map<void *, uint8_t> g_alive;
 std::unordered_set<void *> g_failed;   // bodies a ragdoll could not start on (until they live again)
 void TrackPoses(float dt) {
     void *pl = game::Player();
@@ -567,8 +1067,7 @@ void TrackPoses(float dt) {
         if (ped) { const float *m = game::WorldMatrix(ModelOf(h)); pos = {m[12], m[13], m[14]}; }
         else pos = game::ActorWorldPos(h);   // (a driver's actor position is in his car's frame)
         V3 d = pos - pp;
-        if (h != pl && Dot(d, d) > r2) { g_alive[h] = alive; continue; }   // (remembered at any distance)
-        g_alive[h] = alive;
+        if (h != pl && Dot(d, d) > r2) continue;
         if (alive) g_failed.erase(h);
         // every dead body near the player is a ragdoll, however it died: a corpse is never left frozen in its last pose
         if (!alive && g_cfg.enabled && !Find(h) && !g_failed.count(h)) {
@@ -579,7 +1078,23 @@ void TrackPoses(float dt) {
         if (Find(h)) continue;
         Ragdoll::PoseSnap snap;
         if (!SafeSnapshot(h, &snap)) continue;
+        void *model = ModelOf(h);
         PoseHistory &ph = g_poses[h];
+        if (ped) {
+            const V3 position = game::at<V3>(h, kPedPos);
+            const int animation = game::at<int>(h, kPedAnimation);
+            const bool continuous = ph.count && g_tick - ph.seen == 1 && ph.pedestrianModel == model &&
+                                    animation == ph.pedestrianAnimation && dt > 1e-4f;
+            const V3 velocity = continuous ? (position - ph.pedestrianPos) * (1.0f / dt) : V3{};
+            // The element position follows native movement. A clip switch, recycled element or teleport is
+            // not a velocity sample. The rendered skeleton may advance even while this position stays still.
+            const bool valid = continuous && Len(velocity) <= 12.0f;
+            ph.pedestrianVelocity = valid ? velocity : V3{};
+            ph.pedestrianPos = position;
+            ph.pedestrianAnimation = animation;
+            ph.pedestrianModel = model;
+            if (!valid) ph.count = 0;
+        }
         memcpy(ph.pts[1], ph.pts[0], sizeof ph.pts[0]);
         memcpy(ph.pts[0], snap.pts, sizeof snap.pts);
         ph.snap = snap;
@@ -587,7 +1102,7 @@ void TrackPoses(float dt) {
         ph.dt[0] = dt;
         ph.count = std::min(ph.count + 1, 2);
         ph.seen = g_tick;
-        Watch(ModelOf(h));
+        Watch(model);
     }
     for (auto it = g_poses.begin(); it != g_poses.end();) it = g_tick - it->second.seen > 2 ? g_poses.erase(it) : std::next(it);
 }
@@ -642,10 +1157,43 @@ void KnockByBodies(float dt) {
 
 // A living man whose ragdoll was taken off gets up the game's way (the loader blends from the pose last drawn); the
 // player's camera stays on his body meanwhile.
-void GetUp(void *actor) {
-    if (H->human_get_up(M, actor, 600)) {
+void GetUp(void *actor, const Ragdoll *rd = nullptr) {
+    int result = 0;
+    if (rd && MML_HAS(H, human_get_up_pose) && H->human_get_up_pose) {
+        M3 rot[19];
+        V3 org[19];
+        rd->PhysicalPose(rot, org);
+        // The physics uses its original frame order; the SDK uses a parent-first named bone order.
+        const int from[MML_BONE_COUNT] = {18,6,7,8,9,10,11,12,13,14,15,16,17,0,1,2,3,4,5,19};
+        MmlBone pose[MML_BONE_COUNT]{};
+        if (H->human_skeleton(M, actor, pose, MML_BONE_COUNT) != MML_BONE_COUNT) {
+            LOG("%p could not get up: no current skeleton", actor);
+            return;
+        }
+        M3 rootRotation = M3::FromWorld(pose[MML_BONE_ROOT].world);
+        float low = rd->BodyPos(Ragdoll::B_PELVIS).y;
+        for (int i = 0; i < Ragdoll::BodyCount(); i++) {
+            V3 a, e;
+            float radius;
+            rd->BodyCapsule(i, &a, &e, &radius);
+            low = std::min(low, std::min(a.y, e.y) - radius);
+        }
+        for (int i = 0; i < MML_BONE_COUNT; i++) {
+            int j = from[i];
+            M3 r = j < 19 ? rot[j] : rootRotation;
+            V3 p = j < 19 ? org[j] : V3{org[18].x, low, org[18].z};
+            const float world[16] = {r.r[0].x,r.r[0].y,r.r[0].z,0,r.r[1].x,r.r[1].y,r.r[1].z,0,
+                                     r.r[2].x,r.r[2].y,r.r[2].z,0,p.x,p.y,p.z,1};
+            memcpy(pose[i].world, world, sizeof world);
+        }
+        result = H->human_get_up_pose(M, actor, pose, MML_BONE_COUNT, 600);
+    } else {
+        result = H->human_get_up(M, actor, 600);
+    }
+    if (result) {
         LOG("%p gets up", actor);
         if (actor == H->human_player(M)) g_playerRisingUntil = GetTickCount() + 5000;
+        if (rd && !rd->pedestrian) EnterTramUnder(actor, rd->BodyPos(Ragdoll::B_PELVIS));
     } else {
         LOG("%p could not get up the game's way: handed back as he lies", actor);
     }
@@ -674,10 +1222,24 @@ bool PlayerBodyPoint(V3 *p) {
     return true;
 }
 
+const char *GetUpReason(const Ragdoll &body) {
+    if (!body.knockdown || body.age <= 2.5f) return nullptr;
+    if (body.sleeping) return "asleep";
+    if (body.sleepTimer >= 0.30f) {
+        const V3 p = body.BodyPos(Ragdoll::B_PELVIS);
+        const float from[3] = {p.x, p.y + .15f, p.z}, to[3] = {p.x, p.y - .60f, p.z};
+        MmlHit ground{};
+        if (H->world_ray(M, from, to, MML_WORLD_ALL | MML_WORLD_NO_PEOPLE, body.actor, &ground) && ground.normal[1] > .5f)
+            return "settled on support";
+    }
+    return body.age > 10.0f ? "timeout" : nullptr;
+}
+
 void TickBody(float dt) {
     g_tick++;
     Purge();
     ListPeople();
+    TracePedestrians(TrajectoryStage::TickBegin);
     scenery::Tick();
     KeptTick();
     SafeWatchTramGetUps();
@@ -690,14 +1252,13 @@ void TickBody(float dt) {
             continue;
         }
         // knocked over: died meanwhile (a corpse now), or lies still (the game gets him back)
-        if (rd->knockdown && IsDead(rd->actor)) { rd->knockdown = false; rd->puppet = false; }
-        if (rd->knockdown && rd->age > 2.5f && (rd->sleeping || rd->age > 10.0f)) {
+        if (rd->puppet && IsDead(rd->actor)) { rd->knockdown = false; rd->puppet = false; }
+        if (const char *reason = GetUpReason(*rd)) {
             void *actor = rd->actor;
-            bool ped = rd->pedestrian;
-            V3 pelvis = rd->BodyPos(Ragdoll::B_PELVIS);
-            EraseAt(i);   // (no more of our writes: the get-up blends from the pose last drawn)
-            GetUp(actor);
-            if (!ped) EnterTramUnder(actor, pelvis);
+
+            LOG("%p recovery after %.3f s: %s (quiet %.3f s)", actor, rd->age, reason, rd->sleepTimer);
+            GetUp(actor, rd);   // copy the current physics before deleting it
+            EraseAt(i);
             continue;
         }
         if (AliveAgain(rd)) {
@@ -720,7 +1281,44 @@ void TickBody(float dt) {
             EraseAt(i);
         }
     }
-    if (g_cfg.carFeel) SafeCarReactions();
+    if (joltOk) {
+        TracePedestrians(TrajectoryStage::Physics);
+        for (auto &entry : g_handovers) {
+            if (entry.started && entry.body && entry.body->age <= 3.5f) {
+                entry.worldContactsDropped += jolt_world::CarContactsDropped();
+                for (const auto &c : jolt_world::CarContacts()) {
+                    if (c.owner != (uintptr_t)entry.body) continue;
+                    if (entry.contactCount == entry.contacts.size()) { ++entry.contactsDropped; continue; }
+                    entry.contacts[entry.contactCount++] = {g_tick, entry.body->age, c};
+                }
+            }
+            if (!entry.started || entry.stepped) continue;
+            Ragdoll *body = Find(entry.actor);
+            if (!body || body != entry.body || std::find(jolt.begin(), jolt.end(), body) == jolt.end()) continue;
+            entry.firstStep = body->BodyPos(Ragdoll::B_PELVIS);
+            entry.stepped = true;
+            const float moved = Len(entry.firstStep - entry.bodyStart);
+            if (moved > .5f)
+                LOG("pedestrian %p first physics step moved %.3f m (dt %.4f s)", entry.actor, moved, dt);
+        }
+    }
+    if (joltOk && g_cfg.enabled && g_cfg.carFeel) SafeCarReactions();
+    if (joltOk && g_cfg.enabled && g_cfg.carKnockdown && MML_HAS(H, human_vehicle_contact) && H->human_vehicle_contact) {
+        // Copy first: a native hit may create a body, changing the physics world's registration containers.
+        auto contacts = jolt_world::VehicleContacts();
+        for (const auto &c : contacts) {
+            void *who = const_cast<void *>(c.who);
+            // This fallback repairs the traffic manager's missed sweep. Mission actors
+            // (including cinematic doubles) receive vehicle hits through their own collision handler.
+            if (!IsPed(who) || Find(who) || IsDead(who)) continue;
+            // Native knockdown thresholds: pedestrian strength >16 (pedCarHit uses 4.2 * speed), C_human >3 m/s.
+            // Minor contacts remain the native game's; repeatedly synthesizing them would accumulate damage.
+            if (Len(c.velocity) <= 16.0f / 4.2f) continue;
+            const float velocity[3] = {c.velocity.x,c.velocity.y,c.velocity.z}, at[3] = {c.at.x,c.at.y,c.at.z};
+            if (H->human_vehicle_contact(M, who, const_cast<void *>(c.car), velocity, at))
+                LOG("vehicle contact %p -> %p (%.2f m/s): native car hit after the physics step", c.car, who, c.closing);
+        }
+    }
     if (joltOk) KnockByBodies(dt);
     for (size_t i = 0; i < g_ragdolls.size();) {
         Ragdoll *rd = g_ragdolls[i].get();
@@ -734,6 +1332,7 @@ void TickBody(float dt) {
             EraseAt(i);
         }
     }
+    TracePedestrians(TrajectoryStage::TickEnd);
     GiveShapes();
     TrackPoses(dt);
     SafeTrackCars(dt);
@@ -742,20 +1341,102 @@ void TickBody(float dt) {
     g_lastDt = dt;
 }
 
-// ---- the dodge fix (the original game's bug): a pedestrian who jumps out of a car's way moves with the dodge
-// animation, its model, not its element's position (+0x10), which stays where it stood; the game tests cars against
-// that position, so a car passing the spot hits a pedestrian who is not there and puts him back under it. While the
-// game sweeps a car against the pedestrians, each stands where its model is (put back after); one the car does hit is
-// moved there for good first; and the pedestrian step's sphere sweep stopping against a moving car is no stop.
+// ---- pedestrian dodge: keep the native car sweep and hit aligned with the current model. The movement
+// sweep inside the pedestrian's own tick also needs the previously accepted root, as it otherwise tests
+// the entire dodge from its clip origin again and can send the pedestrian back to a car behind him.
+using PedTickFn = void(__fastcall *)(void *, void *, int);
+using PedStepSweepFn = void *(__stdcall *)(const V3 *, const V3 *, float, V3 *, V3 *, int, int);
+PedTickFn oPedTick;
+PedStepSweepFn oPedStepSweep;
+unsigned g_dodgeStepSweeps;
+
+struct PedTickScope {
+    void *element, *model;
+    V3 accepted;
+};
+thread_local const PedTickScope *g_pedTick;
+
+uintptr_t PedTickAddress() {
+    // pedStepReturn1 is at the same offset in C_traffic_element::Tick in both builds.
+    return game::Exe().pedStepReturn1 ? game::Exe().pedStepReturn1 - 0x949 : 0;
+}
+
+bool IsDodge(int animation) { return animation >= 0x142 && animation <= 0x149; }
+
+void __fastcall hkPedTick(void *element, void *edx, int dt) {
+    const auto *parent = g_pedTick;
+    const PedTickScope step{element, game::at<void *>(element, kPedModel), game::at<V3>(element, kPedPos)};
+    g_pedTick = &step;
+    __try { oPedTick(element, edx, dt); }
+    __finally { g_pedTick = parent; }
+}
+
+void *__stdcall hkPedStepSweep(const V3 *start, const V3 *delta, float radius, V3 *at, V3 *normal, int moving, int stat) {
+    const auto &x = game::Exe();
+    const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const PedTickScope *step = g_pedTick;
+    if (!step || (caller != x.pedStepReturn1 && caller != x.pedStepReturn2) ||
+        !IsDodge(game::at<int>(step->element, kPedAnimation)) ||
+        step->model != game::at<void *>(step->element, kPedModel) ||
+        !g_cfg.enabled || !g_cfg.carKnockdown)
+        return oPedStepSweep(start, delta, radius, at, normal, moving, stat);
+
+    // The engine's destination and collision response stay native. Move the start and shorten the delta
+    // by the same amount. TestSphereB returns a world-space stopping point and the caller feeds its
+    // difference from the proposed element position back into the animation's track offset.
+    const V3 offset = step->accepted - game::at<V3>(step->element, 0x34);
+    if (!FinitePoint(offset)) return oPedStepSweep(start, delta, radius, at, normal, moving, stat);
+    const V3 previous = *start + offset, remaining = *delta - offset;
+    ++g_dodgeStepSweeps;
+    if (Dot(remaining, remaining) < 1e-10f) return nullptr;
+    return oPedStepSweep(&previous, &remaining, radius, at, normal, moving, stat);
+}
+
 using PedCarSweepFn = char(__fastcall *)(void *, void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
                                          uint32_t, uint32_t, uint32_t);
 using PedCarHitFn = char(__fastcall *)(void *, void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, void *);
-using SphereSweepFn = int(__fastcall *)(void *, void *, V3 *, V3 *, float, V3 *, V3 *, int, int);
 PedCarSweepFn oPedCarSweep;
 PedCarHitFn oPedCarHit;
-SphereSweepFn oSphereSweep;
-unsigned g_dodgeFixes, g_carStops;
-struct PedSwap { uint8_t *e; V3 was; };
+unsigned g_dodgeFixes;
+struct PedSweepScope {
+    std::vector<PedestrianPositionSwap> *swaps;
+    PedSweepScope *parent;
+};
+PedSweepScope *g_pedSweep;
+
+void RestorePedPositions(const std::vector<PedestrianPositionSwap> &swaps) {
+    for (const auto &swap : swaps) {
+        auto restore = [&] { swap.Restore(game::at<void *>(swap.element, kPedModel),
+                                          game::at<V3>(swap.element, kPedPos)); };
+        Guarded(restore);
+    }
+}
+
+bool CommitPedPosition(uint8_t *element, void *model, V3 *before) {
+    bool committed = false;
+    for (auto *scope = g_pedSweep; scope; scope = scope->parent) {
+        for (auto &swap : *scope->swaps) {
+            if (swap.element != element || swap.model != model) continue;
+            *before = swap.before;
+            swap.committed = true;
+            committed = true;
+        }
+    }
+    return committed;
+}
+
+char RunPedCarSweep(void *self, void *edx, const uint32_t *args,
+                    std::vector<PedestrianPositionSwap> &swaps) {
+    PedSweepScope scope{&swaps, g_pedSweep};
+    g_pedSweep = &scope;
+    __try {
+        return oPedCarSweep(self, edx, args[0], args[1], args[2], args[3], args[4],
+                           args[5], args[6], args[7], args[8], args[9]);
+    } __finally {
+        g_pedSweep = scope.parent;
+        RestorePedPositions(swaps);
+    }
+}
 
 bool ModelPosition(uint8_t *e, V3 *out) {
     void *model = game::at<void *>(e, kPedModel);
@@ -765,80 +1446,116 @@ bool ModelPosition(uint8_t *e, V3 *out) {
     *out = {m[12], m[13], m[14]};
     return true;
 }
-void SwapToModels(std::vector<PedSwap> &swaps) {
+void SwapToModels(std::vector<PedestrianPositionSwap> &swaps) {
     for (const MmlPedestrian &p : g_pedList) {
         uint8_t *e = static_cast<uint8_t *>(p.element);
         V3 at;
         if (!e[kPedActive] || !ModelPosition(e, &at)) continue;
         V3 &pos = game::at<V3>(e, kPedPos);
         if (Len(at - pos) < 0.05f) continue;
-        swaps.push_back({e, pos});
+        swaps.push_back({e, game::at<void *>(e, kPedModel), pos, at});
         pos = at;
     }
 }
 char __fastcall hkPedCarSweep(void *self, void *edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6,
                               uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10) {
-    static std::vector<PedSwap> swaps;
-    swaps.clear();
+    if (!g_cfg.enabled || !g_cfg.carKnockdown || H->mission_state() == MML_MISSION_LOADING)
+        return oPedCarSweep(self, edx, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+    std::vector<PedestrianPositionSwap> swaps;
     auto f = [&] { SwapToModels(swaps); };
     if (!Guarded(f)) {
-        for (const PedSwap &s : swaps) game::at<V3>(s.e, kPedPos) = s.was;
+        RestorePedPositions(swaps);
         swaps.clear();
     }
-    char r = oPedCarSweep(self, edx, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
-    for (const PedSwap &s : swaps) game::at<V3>(s.e, kPedPos) = s.was;
-    return r;
+    const uint32_t args[] = {a1, a2, a3, a4, a5, a6, a7, a8, a9, a10};
+    return RunPedCarSweep(self, edx, args, swaps);
 }
 char __fastcall hkPedCarHit(void *self, void *edx, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, void *model) {
-    if (model) {
+    CarHandover *trace = nullptr;
+    unsigned serial = 0;
+    if (g_cfg.enabled && model && H->mission_state() != MML_MISSION_LOADING) {
         auto f = [&] {
+            // A traffic element may have spawned or changed model since the previous mod tick.
+            ListPeople();
             for (const MmlPedestrian &p : g_pedList) {
                 if (p.model != model) continue;
                 uint8_t *e = static_cast<uint8_t *>(p.element);
                 V3 at;
                 if (!ModelPosition(e, &at)) return;
                 V3 &pos = game::at<V3>(e, kPedPos);
-                if (Len(at - pos) > 0.3f && g_dodgeFixes++ < 50)
-                    LOG("pedestrian %p hit by a car %.1f m from where the game had it (a dodge): moved to its model first", e, Len(at - pos));
-                pos = at;
+                V3 before = pos;
+                const bool correctPosition = g_cfg.enabled && g_cfg.carKnockdown;
+                const bool committed = correctPosition && CommitPedPosition(e, model, &before);
+                trace = &g_handovers[g_handoverCount++ % g_handovers.size()];
+                *trace = {};
+                serial = trace->serial = g_handoverCount;
+                trace->tick = g_tick;
+                trace->animation = game::at<int>(e, kPedAnimation);
+                trace->actor = e;
+                trace->model = model;
+                trace->elementBefore = before;
+                trace->modelBefore = at;
+                trace->committed = committed;
+                trace->captured = SafeSnapshot(e, &trace->beforePose);
+                trace->traceStart = GetTickCount64();
+                if (trace->captured) trace->pelvisFrame = trace->beforePose.frames[18];
+                Watch(model);
+                if (trace->pelvisFrame) Watch(trace->pelvisFrame);
+                const auto drawn = g_lastDrawn.find(e);
+                if (trace->captured && drawn != g_lastDrawn.end() && drawn->second.model == model &&
+                    g_tick - drawn->second.tick <= 2 &&
+                    std::equal(std::begin(drawn->second.pose.frames), std::end(drawn->second.pose.frames),
+                               std::begin(trace->beforePose.frames))) {
+                    trace->lastDrawnCaptured = true;
+                    trace->lastDrawnTick = drawn->second.tick;
+                    trace->lastDrawnPelvis = drawn->second.pose.org[18];
+                    trace->lastDrawnRoot = drawn->second.pose.org[19];
+                    auto &previous = trace->trajectory[trace->trajectoryCount++];
+                    previous.ms = drawn->second.ms;
+                    previous.tick = drawn->second.tick;
+                    previous.stage = TrajectoryStage::PreviousWorldDraw;
+                    previous.root = trace->lastDrawnRoot;
+                    previous.pelvis = trace->lastDrawnPelvis;
+                    previous.hasPelvis = true;
+                    previous.hasElement = false;
+                    for (int i = 0; i < Ragdoll::COUNT; ++i)
+                        trace->lastDrawnGap = std::max(trace->lastDrawnGap,
+                            Len(drawn->second.pose.pts[i] - trace->beforePose.pts[i]));
+                }
+                trace->open = true;
+                TracePedestrian(*trace, TrajectoryStage::BeforeHit, trace->traceStart);
+                if (correctPosition && Len(at - before) > 0.3f && g_dodgeFixes++ < 50)
+                    LOG("pedestrian %p car hit uses its model position (native offset %.3f m)", e, Len(at - before));
+                if (correctPosition) pos = at;
                 return;
             }
         };
         Guarded(f);
     }
-    return oPedCarHit(self, edx, a1, a2, a3, a4, a5, model);
-}
-bool AgainstMovingCar(const V3 &contact) {
-    for (auto &kv : g_carTracks) {
-        if (g_tick - kv.second.tick > 2 || Len(kv.second.vel) < 1.5f) continue;
-        V3 d = contact - kv.second.pos;
-        d.y = 0;
-        if (Len(d) < 3.5f) return true;   // within a car's length of its middle
+    const char result = oPedCarHit(self, edx, a1, a2, a3, a4, a5, model);
+    if (trace && trace->serial == serial) {
+        trace->open = false;
+        auto read = [&] { trace->elementAfter = game::at<V3>(trace->actor, kPedPos); };
+        Guarded(read);
+        TracePedestrian(*trace, TrajectoryStage::AfterHit, GetTickCount64());
+        PersistTrajectory(*trace);
     }
-    return false;
-}
-int __fastcall hkSphereSweep(void *self, void *edx, V3 *start, V3 *delta, float radius, V3 *outPos, V3 *outNormal, int flags, int x) {
-    uintptr_t ra = reinterpret_cast<uintptr_t>(_ReturnAddress());
-    int hit = oSphereSweep(self, edx, start, delta, radius, outPos, outNormal, flags, x);
-    if (hit && (ra == game::Exe().pedStepReturn1 || ra == game::Exe().pedStepReturn2) && start && delta && outPos && outNormal) {
-        V3 contact = *outPos - *outNormal * radius;
-        if (AgainstMovingCar(contact)) {
-            if (g_carStops++ < 40) LOG("pedestrian step: its sweep stopped against a moving car: no stop, it stays where it is");
-            return 0;
-        }
-    }
-    return hit;
+    return result;
 }
 
 // ---- a bullet in a corpse: the mod's (the game's Hit would run a living person's hit logic on him; a dead
 // pedestrian's element would be woken and cry out)
 int HitFilter(void *person, int, MmlHumanHit *hit, void *) {
+    if (H->mission_state() == MML_MISSION_LOADING) return MML_HIT_GAME;
     Ragdoll *rd = Find(person);
     if (!rd || !g_cfg.enabled || hit->was_alive || hit->type == 2 || hit->type == 3) return MML_HIT_GAME;   // (a blast: OnExplosion)
     if (hit->shape || hit->type == 0) {
+        if (!g_cfg.bullets) return MML_HIT_TAKEN; // preserve native corpse state without an impulse
         V3 d{hit->dir.x, hit->dir.y, hit->dir.z}, at{hit->pos.x, hit->pos.y, hit->pos.z};
         if (Len(at) < 1e-3f) at = rd->Center();
-        Kick(rd, d, at, hit->damage);
+        int part = Ragdoll::BulletBody(hit->shape - 1);
+        float dv = Kick(rd, d, at, hit->damage, part);
+        g_lastBullet = {person, at, hit->shape - 1, part, dv};
         g_corpseHits++;
         return MML_HIT_TAKEN;
     }
@@ -854,19 +1571,34 @@ int ActorType(void *a) {
 }
 bool IsVehicle(void *a) { int t = ActorType(a); return t == 4 || t == 8 || t == 0x16 || t == 0x1E; }
 
+bool NativeBlastFall(void *human, float damage) {
+    // Both builds of C_human::Hit choose the blast fall only above 100 damage. Check the
+    // resulting animation too: the native hit can take health without starting that reaction.
+    if (!(damage > 100.0f)) return false;
+    MmlHumanAnim anim{};
+    anim.size = sizeof anim;
+    if (!H->human_anim_state(M, human, &anim) || (anim.state != 4 && anim.state != 6)) return false;
+    return (anim.playing >= 106 && anim.playing <= 108) || anim.playing == 114;
+}
+
 void Hooks() {
     const game::ExeBuild &x = game::Exe();
     bool a = x.pedCarSweep && H->hook(M, x.pedCarSweep, reinterpret_cast<void *>(&hkPedCarSweep), reinterpret_cast<void **>(&oPedCarSweep));
     bool b = x.pedCarHit && H->hook(M, x.pedCarHit, reinterpret_cast<void *>(&hkPedCarHit), reinterpret_cast<void **>(&oPedCarHit));
-    bool c = x.sphereSweep && H->hook(M, x.sphereSweep, reinterpret_cast<void *>(&hkSphereSweep), reinterpret_cast<void **>(&oSphereSweep));
-    LOG("ragdoll: the dodge fix (the pedestrians' car sweep, their car hit, their step's sweep): %s", a && b && c ? "on" : "not known for this build");
+    LOG("ragdoll: pedestrian car sweep and hit correction: %s", a && b ? "on" : "not known for this build");
+    const uintptr_t tick = PedTickAddress();
+    const bool tickHook = tick && x.sphereSweep && H->hook(M, tick, reinterpret_cast<void *>(&hkPedTick), reinterpret_cast<void **>(&oPedTick));
+    const bool stepHook = tickHook && H->hook(M, x.sphereSweep, reinterpret_cast<void *>(&hkPedStepSweep),
+                                              reinterpret_cast<void **>(&oPedStepSweep));
+    if (tickHook && !stepHook) H->unhook(M, tick);
+    LOG("ragdoll: pedestrian dodge movement sweep: %s", stepHook ? "on" : "unavailable");
 }
 
 } // namespace
 
 // ---- the events
 void Tick(float dt) {
-    if (!game::g_exe) return;
+    if (!game::g_exe || !g_cfg.enabled) return;
     try {
         TickBody(dt);
     } catch (const std::exception &e) {
@@ -876,14 +1608,16 @@ void Tick(float dt) {
 }
 
 void Render() {
+    if (!g_cfg.enabled) return;
     Purge();
+    TracePedestrians(TrajectoryStage::RenderBegin);
     for (auto &r : g_ragdolls) {
         // the game brought him back since our tick: the game's (the tick drops the ragdoll)
         if (SafeAliveAgain(r.get())) continue;
         // the engine played the model's animation (a death animation) since our write: the muscles' next target
         float ow = SafeOverwritten(r.get());
         if (ow > 0.5f && jolt_ragdoll::Has(r.get()) && SafeSnapshotNow(r.get())) r->animSerial++;
-        if (!AtRest(r.get(), ow)) SafeApply(r.get());
+        if (!AtRest(r.get(), ow)) SafeApply(r.get(), true);
     }
     if (g_cfg.draw)
         for (auto &r : g_ragdolls)
@@ -903,6 +1637,35 @@ void Render() {
             }
 }
 
+// Stage 1 is after the world's actual drawing, unlike RENDER_BEGIN's pose preparation.
+void Rendered() {
+    if (!g_cfg.enabled) return;
+    TracePedestrians(TrajectoryStage::WorldDrawn);
+    auto read = [&] {
+        for (const auto &kv : g_poses) {
+            void *actor = kv.first;
+            if (g_tick - kv.second.seen > 1 || !IsPed(actor) || Find(actor) || IsDead(actor)) continue;
+            Ragdoll::PoseSnap pose{};
+            if (!SafeSnapshot(actor, &pose)) continue;
+            g_lastDrawn[actor] = {pose, ModelOf(actor), g_tick, GetTickCount64()};
+        }
+        for (auto &entry : g_handovers) {
+            Ragdoll *r = entry.body;
+            if (!r || Find(entry.actor) != r || r->Model() != entry.model || r->age > 3.5f ||
+                (entry.worldSampled && entry.lastWorldTick == g_tick) ||
+                (r->age > .2f && r->age < entry.nextWorldAge)) continue;
+            entry.worldSampled = true;
+            entry.lastWorldTick = g_tick;
+            entry.nextWorldAge = r->age + .10f;
+            const unsigned before = entry.poseCount;
+            SampleHandoverPose(&entry, r, 5);
+            if (entry.poseCount > before)
+                entry.maxWorldError = std::max(entry.maxWorldError, entry.poses[entry.poseCount - 1].error);
+        }
+    };
+    Guarded(read);   // observation only: no pose, velocity or collision policy changes
+}
+
 void OnHit(const MmlEvent &ev) {
     if (!ev.hit || ev.hit->taken || !ev.actor) return;
     void *human = ev.actor;
@@ -920,6 +1683,25 @@ void OnHit(const MmlEvent &ev) {
     // (seen: a grenade's 400 gave 67 of damage at 5 m); 3 is kept for what else may call it so
     const bool blast = !body && !car && (type == 2 || type == 3);
     V3 carVel = car && attacker ? CarVelocity(attacker) : V3{0, 0, 0};
+    if (car && ev.type == MML_EVENT_PEDESTRIAN_HIT) {
+        if (CarHandover *entry = PendingHandover(human)) {
+            entry->nativeEvent = true;
+            entry->car = attacker;
+            entry->damage = std::isfinite(dmg) ? dmg : 0;
+            entry->hitVelocity = dir;
+            auto readCar = [&] {
+                void *frame = attacker ? game::at<void *>(attacker, game::kActorFrame) : nullptr;
+                const float *matrix = frame ? game::WorldMatrix(frame) : nullptr;
+                if (!matrix) return;
+                entry->carRight = {matrix[0], matrix[1], matrix[2]};
+                entry->carForward = {matrix[8], matrix[9], matrix[10]};
+                entry->carOrigin = {matrix[12], matrix[13], matrix[14]};
+                entry->carBasis = true;
+            };
+            Guarded(readCar);
+            TracePedestrian(*entry, TrajectoryStage::NativeHit, GetTickCount64());
+        }
+    }
     if (!g_cfg.enabled) return;
     ListPeople();   // (a hit between ticks: the pedestrians as they are)
     bool hasPos = Len(pos) > 1e-3f;
@@ -929,21 +1711,30 @@ void OnHit(const MmlEvent &ev) {
         bool died = wasAlive && !alive;
         // (someone alive in a car's seat is the game's: a crash's hit on its driver, type 5, made him a ragdoll that
         // got up on the street under his own car, still seated, and died there)
-        bool knocked = alive && ((car && g_cfg.carKnockdown) || body || (blast && g_cfg.blastKnockdown)) &&
+        // A gentle car touch is a native stagger, not a physical fall. In particular, do not re-knock a person
+        // getting up beside a stopped car because it reported a 0.2 m/s contact (both builds' native thresholds).
+        bool hardCarHit = car && (IsPed(human) ? dmg > 16.0f : Len(dir) > 3.0f);
+        // Living NPCs keep their native blast reaction and position for subsequent hits and mission checks.
+        const bool playerBlast = blast && type == 2 && wasAlive && alive && g_cfg.blastKnockdown &&
+                                 human == H->human_player(M) && NativeBlastFall(human, dmg);
+        bool knocked = alive && ((hardCarHit && g_cfg.carKnockdown) || body || playerBlast) &&
                        (IsPed(human) || !SeatCarOf(human));
         if (!died && !knocked) {
-            if (!blast && !car) Remember(human, dir, hasPos ? &pos : nullptr, dmg);   // (a shotgun's pellets)
+            if (!blast && !car && (!bullet || g_cfg.bullets)) Remember(human, dir, hasPos ? &pos : nullptr, dmg);   // (a shotgun's pellets)
             return;
         }
         std::string err;
-        rd = Start(human, knocked, &err);
+        rd = Start(human, knocked, &err, car ? attacker : nullptr);
         if (!rd) return;
         rd->knockdown = knocked;
         LOG("hit %p type %d damage %.1f alive %d->%d%s: a ragdoll", human, type, dmg, wasAlive, alive,
             car ? Fmt(", a car at %.1f m/s", Len(carVel)).c_str() : body ? ", a body's blow" : "");
         if (died) TakeRemembered(human, rd);
-    } else if (car) {
-        return;   // a ragdoll already: the car's own body pushes it
+    }
+    if (car) {
+        rd->vehicleImpact = true;
+        rd->impactVehicle = attacker;
+        return;   // vehicle/body contact in Jolt supplies the entire car impact
     }
     if (body) return;   // the blow is the caller's (KnockByBodies): the body's momentum where it struck
     V3 at = hasPos ? pos : rd->Center();
@@ -952,17 +1743,8 @@ void OnHit(const MmlEvent &ev) {
         V3 from = game::at<V3>(attacker, game::kActorPos) + V3{0, 1.4f, 0};
         at = rd->ClosestToLine(from, from + Norm(dir) * 200.0f);
     }
-    if (car) {
-        // the car is a body in the world moving with the game's car: it strikes the ragdoll itself this tick
-        if (jolt_ragdoll::Has(rd) && attacker && jolt_world::HasKinematic(attacker)) return;
-        float sp = Len(carVel);
-        V3 push = sp > 1.0f ? carVel * (1.0f / sp) : Norm(dir, {0, 0, 1});
-        if (sp <= 1.0f && type != 5 && Len(dir) > 1.0f) sp = Len(dir);
-        if (sp <= 1.0f) sp = std::max(4.0f, dmg * 0.2f);
-        rd->Impulse(push + V3{0, 0.3f, 0}, at, sp * g_cfg.carPush, 0.7f, 0.6f);
-        return;
-    }
     if (blast) return;   // an explosion: its blast throws every body near it (OnExplosion, the event after the hits)
+    if (bullet && !g_cfg.bullets) return;
     if (bullet || dmg > 0) Kick(rd, dir, at, dmg);
 }
 
@@ -981,13 +1763,14 @@ void OnExplosion(const MmlExplosion &x) {
 }
 
 void OnActorDestroyed(void *actor) {
+    for (auto &body : g_ragdolls) if (body->impactVehicle == actor) body->impactVehicle = nullptr;
     if (Find(actor)) Drop(actor);
     knock::Forget(actor);
     g_kept.erase(std::remove_if(g_kept.begin(), g_kept.end(), [&](const Kept &k) { return k.actor == actor; }), g_kept.end());
-    g_gettingUpInTram.erase(actor);
+    std::erase_if(g_railPassengers, [actor](const auto &p) { return p.first == actor || p.second.tram == actor; });
     g_poses.erase(actor);
+    g_lastDrawn.erase(actor);
     g_isHuman.erase(actor);
-    g_alive.erase(actor);
     g_failed.erase(actor);
     vehicles::Forget(actor);
     g_carTracks.erase(actor);
@@ -1026,10 +1809,11 @@ bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
     return true;
 }
 
-void OnMissionClose() {
+void OnWorldReset(const char *reason) {
+    for (auto &entry : g_handovers) { entry.traceEnded = true; PersistTrajectory(entry); }
     ragcam::Stop();
     g_playerRisingUntil = 0;
-    if (!g_ragdolls.empty()) LOG("mission close: dropping %u ragdolls", (unsigned)g_ragdolls.size());
+    if (!g_ragdolls.empty()) LOG("%s: dropping %u ragdolls", reason, (unsigned)g_ragdolls.size());
     for (auto &r : g_ragdolls) Unshape(r->actor);
     g_ragdolls.clear();
     jolt_ragdoll::Clear();
@@ -1038,27 +1822,49 @@ void OnMissionClose() {
     g_waterCells.clear();   // (the next mission's water)
     vehicles::Clear();
     knock::Clear();
-    g_gettingUpInTram.clear();
+    g_railPassengers.clear();
     g_poses.clear();
+    g_lastDrawn.clear();
     g_isHuman.clear();
-    g_alive.clear();
     g_failed.clear();
     g_carTracks.clear();
+    for (auto &entry : g_handovers) entry = {};
+    g_handoverCount = 0;
+    g_lastSavedTrajectory = 0;
     g_kept.clear();
+    g_peds.clear();
+    g_pedList.clear();
+    g_humanList.clear();
     g_freed.clear();
-    g_watched.clear();   // (the loader drops a mission's watches with its frames: they are told as freed first)
+    // A same-mission load can keep frames alive. FrameGone still removes their watches when they die.
 }
 
 void Settings() {
     auto num = [](const char *k, float def) { return static_cast<float>(H->config_number(M, k, def)); };
     auto flag = [](const char *k, bool def) { return H->config_number(M, k, def ? 1 : 0) != 0; };
     Config d;
+    const bool wasEnabled = g_cfg.enabled;
     g_cfg.enabled = flag("enabled", d.enabled);
+    if (wasEnabled && !g_cfg.enabled) {
+        Purge();
+        const int state = H->mission_state();
+        if (state == MML_MISSION_RUNNING || state == MML_MISSION_PAUSED) {
+            for (const auto &r : g_ragdolls)
+                if ((r->puppet || r->knockdown) && !IsDead(r->actor)) GetUp(r->actor, r.get());
+        }
+        OnWorldReset("disabled");
+        for (void *frame : g_watched) H->frame_watch(M, frame, nullptr, nullptr);
+        g_watched.clear();
+    }
     g_cfg.carKnockdown = flag("car_knockdown", d.carKnockdown);
-    g_cfg.carPush = num("car_push", d.carPush);
     g_cfg.carFeel = flag("car_feel", d.carFeel);
     g_cfg.trackRadius = num("track_radius", d.trackRadius);
+    const bool hadBullets = g_cfg.bullets;
     g_cfg.bullets = flag("bullets", d.bullets);
+    if (hadBullets && !g_cfg.bullets) {
+        g_kept.clear();
+        for (auto &r : g_ragdolls) { Unshape(r->actor); r->shapeAtRest = false; }
+    }
     g_cfg.kick = num("bullet_kick", d.kick);
     g_cfg.whole = num("bullet_whole", d.whole);
     g_cfg.radius = num("bullet_radius", d.radius);
@@ -1082,13 +1888,25 @@ void Settings() {
     }
 }
 
+uint32_t VehicleSupport(void *car, void *) {
+    if (!g_cfg.enabled || !g_cfg.carFeel || !g_carTracks.count(car)) return 0;
+    return jolt_world::WheelSupport(car);
+}
+
 void Start() {
+    if (MML_HAS(H, vehicle_support_hook) && H->vehicle_support_hook) {
+        if (!H->vehicle_support_hook(M, VehicleSupport, nullptr))
+            LOG("vehicle wheel support: native usability integration unavailable");
+    }
     jolt_world::SetWaterQuery(WaterAt);
     jolt_ragdoll::Init(mod::Log);
     knock::Init(mod::Log);
     Settings();
     Hooks();
     H->hit_filter(M, HitFilter, nullptr);
+    const int mission = H->mission_state();
+    if (g_cfg.enabled && (mission == MML_MISSION_RUNNING || mission == MML_MISSION_PAUSED))
+        SafeWatchTramGetUps();
 }
 
 void Stop() {
@@ -1099,6 +1917,35 @@ void Stop() {
     jolt_world::Stop();
 }
 
+std::string CarHandoverState() {
+    std::string out = "[";
+    const unsigned count = std::min<unsigned>(g_handoverCount, g_handovers.size());
+    for (unsigned i = 0; i < count; ++i) {
+        const auto &entry = g_handovers[(g_handoverCount - count + i) % g_handovers.size()];
+        const V3 &before = entry.beforePose.pts[Ragdoll::PELVIS];
+        out += Fmt("%s{\"actor\":\"0x%08X\",\"serial\":%u,\"tick\":%u,\"captured\":%s,\"started\":%s,"
+                   "\"history\":%s,\"pre_hit_pose\":%s,\"sweep_committed\":%s,\"pose_gap_m\":%.4f,"
+                   "\"element_before\":[%.4f,%.4f,%.4f],\"model_before\":[%.4f,%.4f,%.4f],"
+                   "\"pelvis_before\":[%.4f,%.4f,%.4f],\"pelvis_initial\":[%.4f,%.4f,%.4f],"
+                   "\"element_after_hit\":[%.4f,%.4f,%.4f],\"stepped\":%s,\"first_step_m\":%.4f,"
+                   "\"pose_samples\":%u,\"max_draw_error_m\":%.4f,\"max_world_error_m\":%.4f,"
+                   "\"last_drawn_captured\":%s,\"last_drawn_tick\":%u,\"last_drawn_gap_m\":%.4f,"
+                   "\"last_drawn_pelvis\":[%.4f,%.4f,%.4f],\"last_drawn_root\":[%.4f,%.4f,%.4f]}",
+                   i ? "," : "", (unsigned)(uintptr_t)entry.actor, entry.serial, entry.tick, entry.captured ? "true" : "false",
+                   entry.started ? "true" : "false", entry.history ? "true" : "false", entry.preHitPose ? "true" : "false",
+                   entry.committed ? "true" : "false",
+                   entry.poseGap, entry.elementBefore.x, entry.elementBefore.y, entry.elementBefore.z,
+                   entry.modelBefore.x, entry.modelBefore.y, entry.modelBefore.z, before.x, before.y, before.z,
+                   entry.initial.x, entry.initial.y, entry.initial.z, entry.elementAfter.x, entry.elementAfter.y,
+                   entry.elementAfter.z, entry.stepped ? "true" : "false",
+                   entry.stepped ? Len(entry.firstStep - entry.bodyStart) : 0.0f, entry.poseCount, entry.maxDrawError,
+                   entry.maxWorldError, entry.lastDrawnCaptured ? "true" : "false", entry.lastDrawnTick, entry.lastDrawnGap,
+                   entry.lastDrawnPelvis.x,entry.lastDrawnPelvis.y,entry.lastDrawnPelvis.z,
+                   entry.lastDrawnRoot.x,entry.lastDrawnRoot.y,entry.lastDrawnRoot.z);
+    }
+    return out + "]";
+}
+
 std::string State() {
     std::string list;
     for (auto &r : g_ragdolls) {
@@ -1106,23 +1953,44 @@ std::string State() {
         float fastest = 0;
         for (int b = 0; b < Ragdoll::BodyCount(); b++) fastest = std::max(fastest, Len(r->BodyVel(b)));
         V3 ch = r->BodyPos(Ragdoll::B_CHEST), hd = r->BodyPos(Ragdoll::B_HEAD);
-        list += Fmt("%s{\"actor\":\"0x%08X\",\"pedestrian\":%s,\"knockdown\":%s,\"puppet\":%s,\"sleeping\":%s,\"age\":%.2f,"
-                    "\"pelvis\":[%.3f,%.3f,%.3f],\"chest\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f],\"fastest_part\":%.4f}",
+        list += Fmt("%s{\"actor\":\"0x%08X\",\"pedestrian\":%s,\"knockdown\":%s,\"puppet\":%s,\"sleeping\":%s,\"vehicle_impact\":%s,\"age\":%.2f,"
+                    "\"pelvis\":[%.3f,%.3f,%.3f],\"chest\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f],\"fastest_part\":%.4f,\"quiet_s\":%.3f}",
                     list.empty() ? "" : ",", (unsigned)(uintptr_t)r->actor, r->pedestrian ? "true" : "false", r->knockdown ? "true" : "false",
-                    r->puppet ? "true" : "false", r->sleeping ? "true" : "false", r->age, p.x, p.y, p.z, ch.x, ch.y, ch.z,
-                    hd.x, hd.y, hd.z, fastest);
+                    r->puppet ? "true" : "false", r->sleeping ? "true" : "false", r->vehicleImpact ? "true" : "false", r->age, p.x, p.y, p.z, ch.x, ch.y, ch.z,
+                    hd.x, hd.y, hd.z, fastest, r->sleepTimer);
     }
-    return Fmt("{\"enabled\":%s,\"ragdolls\":[%s],\"tracked\":%u,\"pedestrians\":%u,\"world\":%s,\"corpse_hits\":%u,\"dodge_fixes\":%u,"
-               "\"car_stops\":%u,\"scenery\":\"%s\"}",
-               g_cfg.enabled ? "true" : "false", list.c_str(), (unsigned)g_poses.size(), (unsigned)g_pedList.size(),
-               jolt_world::Running() ? "true" : "false", g_corpseHits, g_dodgeFixes, g_carStops, scenery::Describe().c_str());
+    std::string supports;
+    for (const auto &[car, track] : g_carTracks) {
+        const uint32_t mask = VehicleSupport(car, nullptr);
+        if (mask)
+            supports += Fmt("%s{\"car\":\"0x%08X\",\"wheels\":%u}", supports.empty() ? "" : ",",
+                            (unsigned)(uintptr_t)car, mask);
+    }
+    return Fmt("{\"car_handovers\":%s,\"wheel_support\":[%s],\"enabled\":%s,\"ragdolls\":[%s],\"tracked\":%u,\"pedestrians\":%u,\"world\":%s,\"corpse_hits\":%u,\"dodge_fixes\":%u,\"dodge_step_sweeps\":%u,"
+               "\"scenery\":\"%s\",\"person_push\":%s,\"last_bullet\":%s}",
+               CarHandoverState().c_str(), supports.c_str(), g_cfg.enabled ? "true" : "false", list.c_str(), (unsigned)g_poses.size(), (unsigned)g_pedList.size(),
+               jolt_world::Running() ? "true" : "false", g_corpseHits, g_dodgeFixes, g_dodgeStepSweeps, scenery::Describe().c_str(),
+               jolt_world::PersonPushState().c_str(), g_lastBullet.actor ?
+               Fmt("{\"actor\":\"0x%08X\",\"at\":[%.4f,%.4f,%.4f],\"shape\":%d,\"part\":%d,\"local_dv\":%.4f}",
+                   (unsigned)(uintptr_t)g_lastBullet.actor, g_lastBullet.at.x, g_lastBullet.at.y, g_lastBullet.at.z,
+                   g_lastBullet.shape, g_lastBullet.part, g_lastBullet.localDv).c_str() : "null");
 }
 
 std::string Exec(const std::string &cmd, const std::string &args, bool *ok) {
     *ok = true;
+    if (cmd == "dodge") {
+        bool native = args.find("\"native\"") != std::string::npos;
+        bool fixed = args.find("\"fixed\"") != std::string::npos;
+        if (native == fixed) { *ok = false; return "dodge: mode must be native or fixed"; }
+        const game::ExeBuild &x = game::Exe();
+        for (uintptr_t at : {x.pedCarSweep, x.pedCarHit, PedTickAddress(), x.sphereSweep}) if (at) H->unhook(M, at);
+        if (fixed) Hooks();
+        return native ? "{\"mode\":\"native\"}" : "{\"mode\":\"fixed\"}";
+    }
     if (cmd == "start") {   // a ragdoll on someone alive (a puppet: no death; `drop` gives him back)
         void *who = reinterpret_cast<void *>(static_cast<uintptr_t>(strtoul(args.c_str(), nullptr, 16)));
         ListPeople();
+        if (!g_cfg.enabled) { *ok = false; return "start: ragdolls disabled"; }
         bool known = IsPed(who);
         for (void *h : g_humanList) known = known || h == who;
         if (!who || !known) { *ok = false; return "start: a person (humans.list) or a pedestrian (pedestrians.list) by its address"; }
@@ -1135,9 +2003,62 @@ std::string Exec(const std::string &cmd, const std::string &args, bool *ok) {
         void *who = reinterpret_cast<void *>(static_cast<uintptr_t>(strtoul(args.c_str(), nullptr, 16)));
         if (!Find(who)) { *ok = false; return "drop: no ragdoll on that one"; }
         bool getup = Find(who)->puppet || Find(who)->knockdown;
+        if (getup) GetUp(who, Find(who));
         Drop(who);
-        if (getup) GetUp(who);
         return "{\"dropped\":true}";
+    }
+    if (cmd == "trajectory") {
+        void *who = reinterpret_cast<void *>(static_cast<uintptr_t>(strtoul(args.c_str(), nullptr, 16)));
+        for (unsigned i = 0; i < std::min<unsigned>(g_handoverCount, g_handovers.size()); ++i) {
+            const auto &entry = g_handovers[(g_handoverCount - 1 - i) % g_handovers.size()];
+            if (!who || entry.actor == who) return TrajectoryJson(entry);
+        }
+        *ok = false;
+        return "trajectory: no retained car contact";
+    }
+    if (cmd == "handover") {
+        void *who = reinterpret_cast<void *>(static_cast<uintptr_t>(strtoul(args.c_str(), nullptr, 16)));
+        for (unsigned i = 0; i < std::min<unsigned>(g_handoverCount, g_handovers.size()); ++i) {
+            const auto &entry = g_handovers[(g_handoverCount - 1 - i) % g_handovers.size()];
+            if (entry.actor != who) continue;
+            std::string out = Fmt("{\"serial\":%u,\"samples\":[", entry.serial);
+            for (unsigned j = 0; j < entry.poseCount; ++j) {
+                const auto &p = entry.poses[j];
+                out += Fmt("%s{\"tick\":%u,\"stage\":%u,\"age\":%.4f,\"error_m\":%.4f,\"fastest_m_s\":%.3f,"
+                           "\"physical\":[%.4f,%.4f,%.4f],\"drawn\":[%.4f,%.4f,%.4f],\"element\":[%.4f,%.4f,%.4f]}",
+                           j ? "," : "", p.tick, p.stage, p.age, p.error, p.fastest,
+                           p.physical.x,p.physical.y,p.physical.z,p.drawn.x,p.drawn.y,p.drawn.z,
+                           p.element.x,p.element.y,p.element.z);
+            }
+            out += Fmt("],\"contacts_dropped\":%u,\"world_contacts_dropped\":%u,\"contacts\":[",
+                       entry.contactsDropped, entry.worldContactsDropped);
+            for (unsigned j = 0; j < entry.contactCount; ++j) {
+                const auto &p = entry.contacts[j];
+                const auto &c = p.contact;
+                out += Fmt("%s{\"tick\":%u,\"age\":%.4f,\"car\":\"0x%08X\",\"part\":%d,\"body\":%u,\"sensor\":%s,\"depth_m\":%.4f,"
+                           "\"at\":[%.4f,%.4f,%.4f],\"normal\":[%.4f,%.4f,%.4f],\"car_origin\":[%.4f,%.4f,%.4f],"
+                           "\"car_right\":[%.4f,%.4f,%.4f],\"car_forward\":[%.4f,%.4f,%.4f],\"velocity_before\":[%.4f,%.4f,%.4f]}",
+                           j ? "," : "", p.tick,p.age,(unsigned)(uintptr_t)c.car,c.part,c.body,c.sensor ? "true" : "false",c.depth,
+                           c.at.x,c.at.y,c.at.z,c.n.x,c.n.y,c.n.z,c.carOrigin.x,c.carOrigin.y,c.carOrigin.z,
+                           c.carRight.x,c.carRight.y,c.carRight.z,c.carForward.x,c.carForward.y,c.carForward.z,
+                           c.velocity.x,c.velocity.y,c.velocity.z);
+            }
+            return out + "]}";
+        }
+        *ok = false;
+        return "handover: no retained car contact on that person";
+    }
+    if (cmd == "inspect") {
+        void *who = reinterpret_cast<void *>(static_cast<uintptr_t>(strtoul(args.c_str(), nullptr, 16)));
+        Ragdoll *rd = Find(who);
+        if (!rd) { *ok = false; return "inspect: no ragdoll on that person"; }
+        std::string report;
+        jolt_ragdoll::Exec("jolt", Fmt("body %08X", (unsigned)(uintptr_t)who), &report);
+        return rd->Diagnose() + "\nrender errors [cm, degrees]: " + rd->BoneCheck() + "\n" + report;
+    }
+    if (cmd == "vehicle") {
+        const void *car = reinterpret_cast<void *>(static_cast<uintptr_t>(strtoul(args.c_str(), nullptr, 16)));
+        return jolt_world::DescribeCar(car ? car : game::PlayerCar());
     }
     if (cmd == "jolt") return jolt_world::Describe() + "\n" + jolt_ragdoll::Describe();
     if (cmd == "knock") {

@@ -19,8 +19,6 @@
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
-#include <Jolt/Physics/Collision/RayCast.h>
-#include <Jolt/Physics/Collision/CastResult.h>
 #include <windows.h>
 #include <algorithm>
 #include <cmath>
@@ -65,7 +63,7 @@ public:
 // Dynamic bodies meet everything; static and kinematic ones only meet dynamic ones (the game moves them).
 bool Meets(JPH::ObjectLayer a, JPH::ObjectLayer b) {
     auto either = [&](JPH::ObjectLayer x) { return a == x || b == x; };
-    if (either(kCarBody)) return a == kDynamic || b == kDynamic;   // a driven car meets the loose bodies only
+    if (either(kCarBody)) return a == kDynamic || b == kDynamic || a == kLiving || b == kLiving;
     if (either(kOccupant)) return (a == kOccupant || a == kDynamic || a == kCabin) && (b == kOccupant || b == kDynamic || b == kCabin);
     // A cabin is for the people in it (kOccupant) and for bodies passing through its car's hull (a person killed in
     // the open door, SetPassThrough); it exists only while someone asks for it.
@@ -85,28 +83,36 @@ public:
     }
 };
 
-// Which dynamic bodies touched which car during a step (for the cars' reaction).
-std::vector<std::pair<JPH::BodyID, const void *>> g_carTouches;
 std::unordered_map<uint32_t, const void *> g_carOfBody;   // kinematic body id -> the car it stands for
 std::unordered_map<uint32_t, const void *> g_passCar;     // dynamic body id -> the car whose hull it passes through
 // Living people: their body-part capsules are kinematic (the game's animation moves them), so a hard contact would
 // give them infinite strength: they bulldozed bodies as if weightless and forced pinned limbs past their joints.
 // Their contacts with dynamic bodies are sensors instead; each tick the touched bodies get the impulse that stops
 // them closing in on the person and lets them out of the overlap, at most `g_personForce` N per person.
-std::unordered_map<uint32_t, const void *> g_personOfBody;   // body-part capsule id -> the person it belongs to
+struct PersonPart { const void *who; float mass; };
+std::unordered_map<uint32_t, PersonPart> g_personOfBody;   // capsule -> its person and anatomical mass
 struct PersonTouch { JPH::BodyID person, body; const void *who; JPH::Vec3 n; JPH::RVec3 point; float depth; };
 std::unordered_map<uint64_t, PersonTouch> g_personTouches;   // (capsule, body) -> the latest contact of the last step
 float g_personForce = 700.0f;                                 // <= 0: hard contacts (infinite strength)
-float g_personMass = 20.0f;                                   // kg behind each part of a person in an impact
+float g_personMass = 20.0f;                                   // upper bound on a segment's impact mass (kg)
 std::vector<PersonBlow> g_personBlows;                        // the last step's (PersonBlows)
+struct PushStats {
+    unsigned contacts = 0;
+    double requested = 0, delivered = 0, reaction = 0;
+    float peakForce = 0, maxPartMass = 0;
+} g_pushStats;
 // Cars and bodies: see CarKicks (jolt_world.h). A car the game drives is a dynamic body of its own mass here, so the
 // solver itself settles every contact with the bodies both ways; what it did to the car goes back to the game.
 std::vector<CarKick> g_carKicks;
+std::vector<VehicleContact> g_vehicleContacts;
+V3 F(JPH::Vec3Arg v);
 std::vector<CarContactInfo> g_carContacts;   // this step's (cleared before each step)
+unsigned g_carContactsDropped;
 // A driven car's wheels: the parts of its hull made from the model's wheel frames (WHL0, WHR1...), a bit per part, by
 // the car's body. Their hull does not turn, but a wheel rolls: its contacts with bodies get the rolling tyre's surface
 // velocity and rubber's friction (WheelContact), so a wheel climbs onto what it meets as a tyre climbs a kerb.
 std::unordered_map<uint32_t, uint64_t> g_wheelParts;
+std::unordered_map<const void *, uint32_t> g_wheelSupport; // supporting wheel contacts from the completed step
 int CarPartOfSub(const JPH::Body &car, const JPH::SubShapeID &sub) {
     const JPH::Shape *shape = car.GetShape();
     if (!shape || shape->GetSubType() != JPH::EShapeSubType::StaticCompound) return -1;
@@ -116,14 +122,14 @@ int CarPartOfSub(const JPH::Body &car, const JPH::SubShapeID &sub) {
 
 ImpactFn g_impact;
 V3 OriginNow();
+void NoteCarReaction(const void *car);
 
 class Contacts final : public JPH::ContactListener {
 public:
     void OnContactAdded(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m, JPH::ContactSettings &s) override {
-        Note(a, b);
         PersonContact(a, b, m, s);
         WheelContact(a, b, m, s);
-        DrivenCarContact(a, b, m);
+        DrivenCarContact(a, b, m, s);
         if (!g_impact || m.mRelativeContactPointsOn1.empty()) return;
         JPH::RVec3 p = m.GetWorldSpaceContactPointOn1(0);
         JPH::Vec3 n = m.mWorldSpaceNormal;   // from a towards b
@@ -135,10 +141,9 @@ public:
         if (b.IsDynamic()) g_impact(b.GetID(), approach, wp, nv);
     }
     void OnContactPersisted(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m, JPH::ContactSettings &s) override {
-        Note(a, b);
         PersonContact(a, b, m, s);
         WheelContact(a, b, m, s);
-        DrivenCarContact(a, b, m);
+        DrivenCarContact(a, b, m, s);
     }
     // A body passing through a car's hull (SetPassThrough) does not meet that car's hull bodies; it meets the car's
     // cabin, which is not one of them.
@@ -166,34 +171,67 @@ private:
         JPH::Vec3 tyre = up.Cross(fwd).Cross(n) * v;                        // the tyre's surface, against the car
         s.mRelativeLinearSurfaceVelocity = carA ? -tyre : tyre;
         s.mCombinedFriction = 0.8f;   // rubber on cloth
+
     }
     // A driven car (kCarBody) touching a body: noted for CarContacts.
-    static void DrivenCarContact(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m) {
+    static void DrivenCarContact(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m, const JPH::ContactSettings &s) {
         bool carA = a.GetObjectLayer() == kCarBody, carB = b.GetObjectLayer() == kCarBody;
-        if (carA == carB || g_carContacts.size() >= 64) return;
+        if (carA == carB) return;
         const JPH::Body &car = carA ? a : b;
         auto owner = g_carOfBody.find(car.GetID().GetIndexAndSequenceNumber());
         if (owner == g_carOfBody.end()) return;
+        const JPH::Body &other = carA ? b : a;
+        if (!s.mIsSensor && other.GetObjectLayer() == kDynamic) NoteCarReaction(owner->second);
         JPH::Vec3 n = carA ? m.mWorldSpaceNormal : -m.mWorldSpaceNormal;   // from the car to the body
+        // Support is independent of diagnostic contact limits and compound part ordering.
+        if (!s.mIsSensor && other.GetObjectLayer() == kDynamic && n.GetY() < -0.5f) {
+            const auto sub = carA ? m.mSubShapeID1 : m.mSubShapeID2;
+            const uint64_t wheel = car.GetShape()->GetSubShapeUserData(sub);
+            if (wheel > 0 && wheel <= 32) g_wheelSupport[owner->second] |= 1u << (wheel - 1);
+        }
+        if (g_carContacts.size() >= 64) { ++g_carContactsDropped; return; }
         JPH::RVec3 p = m.mRelativeContactPointsOn1.empty() ? m.mBaseOffset : m.GetWorldSpaceContactPointOn1(0);
         int part = CarPartOfSub(car, carA ? m.mSubShapeID1 : m.mSubShapeID2);
+        const JPH::RVec3 origin = car.GetPosition();
+        const JPH::Quat rotation = car.GetRotation();
         g_carContacts.push_back(CarContactInfo{owner->second, part, V3{(float)p.GetX(), (float)p.GetY(), (float)p.GetZ()} + OriginNow(),
-                                               V3{n.GetX(), n.GetY(), n.GetZ()}, m.mPenetrationDepth});
+                                               V3{n.GetX(), n.GetY(), n.GetZ()}, m.mPenetrationDepth,
+                                               (uintptr_t)other.GetUserData(), other.GetID().GetIndexAndSequenceNumber(), s.mIsSensor,
+                                               V3{(float)origin.GetX(), (float)origin.GetY(), (float)origin.GetZ()} + OriginNow(),
+                                               F(rotation * JPH::Vec3::sAxisX()), F(rotation * JPH::Vec3::sAxisZ()), F(other.GetLinearVelocity())});
     }
     // A living person's capsule touching a dynamic body: no hard contact, remembered for ApplyPersonPushes.
     static void PersonContact(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m, JPH::ContactSettings &s) {
-        if (g_personForce <= 0 || g_personOfBody.empty()) return;
+        if (g_personOfBody.empty()) return;
         auto pa = g_personOfBody.find(a.GetID().GetIndexAndSequenceNumber());
         auto pb = g_personOfBody.find(b.GetID().GetIndexAndSequenceNumber());
         const JPH::Body *person, *body;
         const void *who;
         JPH::Vec3 n = m.mWorldSpaceNormal;   // from a towards b
-        if (pa != g_personOfBody.end() && b.IsDynamic()) { person = &a; body = &b; who = pa->second; }
-        else if (pb != g_personOfBody.end() && a.IsDynamic()) { person = &b; body = &a; who = pb->second; n = -n; }
+        if (pa != g_personOfBody.end() && b.IsDynamic()) { person = &a; body = &b; who = pa->second.who; }
+        else if (pb != g_personOfBody.end() && a.IsDynamic()) { person = &b; body = &a; who = pb->second.who; n = -n; }
         else return;
-        s.mIsSensor = true;
         JPH::RVec3 p = m.mRelativeContactPointsOn2.empty() ? m.mBaseOffset
                        : body == &b ? m.GetWorldSpaceContactPointOn2(0) : m.GetWorldSpaceContactPointOn1(0);
+        auto car = g_carOfBody.find(body->GetID().GetIndexAndSequenceNumber());
+        if (car != g_carOfBody.end()) {
+            s.mIsSensor = true;
+            JPH::Vec3 carVelocity = body->GetPointVelocity(p);
+            JPH::Vec3 relative = carVelocity - person->GetPointVelocity(p);
+            // Only the car's own approach creates a vehicle blow. An animated hand sweeping into a parked
+            // car can have a high relative speed; that must not turn the stationary car into an attacker.
+            float closing = -carVelocity.Dot(n);
+            if (closing <= 1.5f || carVelocity.LengthSq() <= 1.5f * 1.5f) return;
+            auto old = std::find_if(g_vehicleContacts.begin(), g_vehicleContacts.end(), [&](const VehicleContact &c) {
+                return c.who == who && c.car == car->second;
+            });
+            VehicleContact contact{who, car->second, F(JPH::Vec3(p)), F(relative), closing};
+            if (old != g_vehicleContacts.end()) { if (closing > old->closing) *old = contact; }
+            else if (g_vehicleContacts.size() < 256) g_vehicleContacts.push_back(contact);
+            return;
+        }
+        if (g_personForce <= 0) return;
+        s.mIsSensor = true;
         uint64_t key = (uint64_t)person->GetID().GetIndexAndSequenceNumber() << 32 | body->GetID().GetIndexAndSequenceNumber();
         g_personTouches[key] = PersonTouch{person->GetID(), body->GetID(), who, n, p, m.mPenetrationDepth};
     }
@@ -202,13 +240,6 @@ private:
         if (it == g_passCar.end()) return false;
         auto car = g_carOfBody.find(other.GetID().GetIndexAndSequenceNumber());
         return car != g_carOfBody.end() && car->second == it->second;
-    }
-    static void Note(const JPH::Body &a, const JPH::Body &b) {
-        const JPH::Body *dyn = a.IsDynamic() ? &a : b.IsDynamic() ? &b : nullptr;
-        const JPH::Body *kin = a.IsKinematic() ? &a : b.IsKinematic() ? &b : nullptr;
-        if (!dyn || !kin) return;
-        auto it = g_carOfBody.find(kin->GetID().GetIndexAndSequenceNumber());
-        if (it != g_carOfBody.end()) g_carTouches.push_back({dyn->GetID(), it->second});
     }
 };
 
@@ -222,12 +253,13 @@ struct World {
     std::unique_ptr<JPH::PhysicsSystem> system;
     V3 origin{};
 };
-std::unique_ptr<World> g_w;
+// Explicitly owned by Start/Stop. During process detach the ragdoll entries in another translation unit still
+// need this world for their destructors. Windows reclaims the world at process exit, regardless of CRT order.
+World *g_w;
 bool g_typesRegistered;
 // The water bodies float in (SetWaterQuery) and the bodies that float (SetFloat).
 WaterFn g_water;
-struct Float { float buoyancy, linearDrag, angularDrag; bool wet = false; float px = 0, pz = 0; };
-std::vector<Splash> g_splashes;
+struct Float { float buoyancy, linearDrag, angularDrag; bool wet = false; };
 std::unordered_map<uint32_t, Float> g_floats;   // by body id
 unsigned g_inWater;
 
@@ -366,6 +398,7 @@ void ApplyScenery() {
 // for the step (CollectCarKicks compares).
 struct Kinematic {
     JPH::BodyID body; unsigned version = 0, seen = 0; V3 pos{};
+    unsigned reactionTick = 0;
     JPH::Quat rot = JPH::Quat::sIdentity();
     bool dynamic = false;
     bool still = false;   // a kinematic part left where it is (ApplyKinematics): its velocity zeroed once
@@ -374,9 +407,17 @@ struct Kinematic {
 std::unordered_map<const void *, Kinematic> g_kinematic;   // by mover key
 unsigned g_tick;
 
+void NoteCarReaction(const void *car) {
+    auto it = g_kinematic.find(car);
+    if (it != g_kinematic.end()) it->second.reactionTick = g_tick;
+}
+
 // A mover's triangles (`hull`, three points each), both windings: seen from inside too. A car's cabin for the people
 // in it, and the whole of a vehicle with no body of its own mass (Mover::hullAsMesh: a tram, hollow).
 JPH::RefConst<JPH::Shape> TwoSidedMesh(const smoke::Mover &m);
+
+using HullCache = std::unordered_map<uint64_t, JPH::RefConst<JPH::Shape>>;
+std::unordered_map<const void *, HullCache> g_cookedHulls;
 
 // `wheels`: which of the compound's sub-shapes are the mover's wheel parts (a part whose hull fails is not one).
 JPH::RefConst<JPH::Shape> CarShape(const smoke::Mover &m, uint64_t *wheels = nullptr) {
@@ -395,18 +436,30 @@ JPH::RefConst<JPH::Shape> CarShape(const smoke::Mover &m, uint64_t *wheels = nul
         return r.IsValid() ? r.Get() : nullptr;
     }
     if (!m.hullParts || m.hullParts->empty()) return nullptr;
+    HullCache next;
+    HullCache &previous = g_cookedHulls[m.key];
     JPH::StaticCompoundShapeSettings cs;
     for (size_t i = 0; i < m.hullParts->size(); i++) {
         const std::vector<V3> &part = (*m.hullParts)[i];
-        JPH::Array<JPH::Vec3> pts;
-        pts.reserve(part.size());
-        for (const V3 &p : part) pts.push_back(J(p));
-        JPH::ConvexHullShapeSettings hs(pts, 0.01f);
-        JPH::ShapeSettings::ShapeResult r = hs.Create();
-        if (!r.IsValid()) continue;
+        const uint64_t revision = m.hullRevisions ? (*m.hullRevisions)[i] : 0;
+        JPH::RefConst<JPH::Shape> hull;
+        auto cached = previous.find(revision);
+        if (revision && cached != previous.end()) hull = cached->second;
+        else {
+            JPH::Array<JPH::Vec3> pts;
+            pts.reserve(part.size());
+            for (const V3 &p : part) pts.push_back(J(p));
+            JPH::ConvexHullShapeSettings hs(pts, 0.01f);
+            if (m.nativeWheels && i < m.nativeWheels->size()) hs.mUserData = (*m.nativeWheels)[i];
+            auto result = hs.Create();
+            if (result.IsValid()) hull = result.Get();
+        }
+        if (revision) next.emplace(revision, hull);
+        if (!hull) continue;
         if (wheels && i < 64 && (m.wheelParts >> i & 1) && cs.mSubShapes.size() < 64) *wheels |= 1ull << cs.mSubShapes.size();
-        cs.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), r.Get());
+        cs.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), hull);
     }
+    previous.swap(next);
     if (cs.mSubShapes.empty()) return nullptr;
     JPH::ShapeSettings::ShapeResult r = cs.Create();
     return r.IsValid() ? r.Get() : nullptr;
@@ -431,55 +484,79 @@ bool PoseOf(const smoke::Mover &m, V3 *pos, JPH::Quat *rot, unsigned *version) {
     return false;
 }
 
+Kinematic *KinematicFor(const smoke::Mover &m, const V3 &pos, const JPH::Quat &rot, unsigned version, bool *created) {
+    JPH::BodyInterface &bi = Bodies();
+    *created = false;
+    bool car = m.kind != smoke::Mover::CAPSULE;
+    auto it = g_kinematic.find(m.key);
+    if (car && it != g_kinematic.end() && it->second.version != version && it->second.dynamic == (m.mass > 0)) {
+        uint64_t wheels = 0;
+        auto shape = CarShape(m, &wheels);
+        if (!shape) return nullptr;
+        Kinematic &k = it->second;
+        bi.SetShape(k.body, shape, false, JPH::EActivation::Activate);
+        if (k.dynamic) {
+            // SetShape's default density would overwrite the game's vehicle mass.
+            auto properties = shape->GetMassProperties();
+            properties.ScaleToMass(m.mass);
+            JPH::BodyLockWrite lock(g_w->system->GetBodyLockInterfaceNoLock(), k.body);
+            auto *motion = lock.GetBody().GetMotionProperties();
+            motion->SetMassProperties(motion->GetAllowedDOFs(), properties);
+            g_wheelParts[k.body.GetIndexAndSequenceNumber()] = wheels;
+        }
+        k.version = version;
+    }
+    if (it != g_kinematic.end() && it->second.version != version) {
+        g_carOfBody.erase(it->second.body.GetIndexAndSequenceNumber());
+        g_personOfBody.erase(it->second.body.GetIndexAndSequenceNumber());
+        g_wheelParts.erase(it->second.body.GetIndexAndSequenceNumber());
+        bi.RemoveBody(it->second.body);
+        bi.DestroyBody(it->second.body);
+        g_kinematic.erase(it);
+        it = g_kinematic.end();
+    }
+    if (it != g_kinematic.end()) return &it->second;
+    JPH::RefConst<JPH::Shape> shape;
+    uint64_t wheels = 0;
+    if (car) shape = CarShape(m, &wheels);
+    else shape = new JPH::CapsuleShape(std::max(0.5f * Len(m.p1 - m.p0), 0.01f), std::max(m.r, 0.01f));
+    if (!shape) return nullptr;
+    bool dyn = car && m.mass > 0;
+    JPH::BodyCreationSettings s(shape, J(pos), rot, dyn ? JPH::EMotionType::Dynamic : JPH::EMotionType::Kinematic,
+                                car ? (dyn ? kCarBody : kKinematic) : kLiving);
+    s.mFriction = car ? 0.5f : 0.7f;
+    s.mRestitution = 0.0f;
+    s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+    s.mMassPropertiesOverride.mMass = dyn ? m.mass : car ? 1200.0f : 5.0f;
+    if (dyn) {
+        s.mGravityFactor = 0.0f;   // the game holds it up
+        s.mLinearDamping = 0.0f;
+        s.mAngularDamping = 0.0f;
+        s.mAllowSleeping = false;
+        s.mMotionQuality = JPH::EMotionQuality::LinearCast;
+    }
+    JPH::BodyID id = bi.CreateAndAddBody(s, JPH::EActivation::Activate);
+    if (id.IsInvalid()) return nullptr;
+    if (car) g_carOfBody[id.GetIndexAndSequenceNumber()] = m.key;
+    else g_personOfBody[id.GetIndexAndSequenceNumber()] = {m.owner ? m.owner : m.key, m.partMass};
+    if (dyn && wheels) g_wheelParts[id.GetIndexAndSequenceNumber()] = wheels;
+    Kinematic nk{id, version, g_tick, pos};
+    nk.rot = rot;
+    nk.dynamic = dyn;
+    *created = true;
+    return &g_kinematic.emplace(m.key, nk).first->second;
+}
+
 void ApplyKinematics(float dt, const std::vector<smoke::Mover> &movers) {
     JPH::BodyInterface &bi = Bodies();
     g_tick++;
     for (const smoke::Mover &m : movers) {
         V3 pos; JPH::Quat rot; unsigned version;
         if (!m.key || !PoseOf(m, &pos, &rot, &version)) continue;
-        bool car = m.kind != smoke::Mover::CAPSULE;
-        auto it = g_kinematic.find(m.key);
-        if (it != g_kinematic.end() && it->second.version != version) {   // new shape: made again
-            g_carOfBody.erase(it->second.body.GetIndexAndSequenceNumber());
-            g_personOfBody.erase(it->second.body.GetIndexAndSequenceNumber());
-            g_wheelParts.erase(it->second.body.GetIndexAndSequenceNumber());
-            bi.RemoveBody(it->second.body);
-            bi.DestroyBody(it->second.body);
-            g_kinematic.erase(it);
-            it = g_kinematic.end();
-        }
-        if (it == g_kinematic.end()) {
-            JPH::RefConst<JPH::Shape> shape;
-            uint64_t wheels = 0;
-            if (car) shape = CarShape(m, &wheels);
-            else shape = new JPH::CapsuleShape(std::max(0.5f * Len(m.p1 - m.p0), 0.01f), std::max(m.r, 0.01f));
-            if (!shape) continue;
-            bool dyn = car && m.mass > 0;
-            JPH::BodyCreationSettings s(shape, J(pos), rot, dyn ? JPH::EMotionType::Dynamic : JPH::EMotionType::Kinematic,
-                                        dyn ? kCarBody : kKinematic);
-            s.mFriction = car ? 0.5f : 0.7f;   // painted metal; clothes (a driven car's wheels: WheelContact)
-            s.mRestitution = 0.0f;
-            s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-            s.mMassPropertiesOverride.mMass = dyn ? m.mass : car ? 1200.0f : 5.0f;   // a kinematic body's is unused
-            if (dyn) {
-                s.mGravityFactor = 0.0f;   // the game holds it up
-                s.mLinearDamping = 0.0f;
-                s.mAngularDamping = 0.0f;
-                s.mAllowSleeping = false;
-                s.mMotionQuality = JPH::EMotionQuality::LinearCast;   // fast: no body passes through it
-            }
-            JPH::BodyID id = bi.CreateAndAddBody(s, JPH::EActivation::Activate);
-            if (id.IsInvalid()) continue;
-            if (car) g_carOfBody[id.GetIndexAndSequenceNumber()] = m.key;
-            else g_personOfBody[id.GetIndexAndSequenceNumber()] = m.owner ? m.owner : m.key;
-            if (dyn && wheels) g_wheelParts[id.GetIndexAndSequenceNumber()] = wheels;
-            Kinematic nk{id, version, g_tick, pos};
-            nk.rot = rot;
-            nk.dynamic = dyn;
-            g_kinematic[m.key] = nk;
-            continue;
-        }
-        Kinematic &k = it->second;
+        bool created;
+        Kinematic *entry = KinematicFor(m, pos, rot, version, &created);
+        if (!entry || created) continue;
+        Kinematic &k = *entry;
         // A jump the game made (a teleport, a respawn) is not a motion: no velocity from it.
         bool jump = dt <= 0 || Len(pos - k.pos) > 30.0f * dt + 2.0f;
         if (k.dynamic) {
@@ -500,8 +577,8 @@ void ApplyKinematics(float dt, const std::vector<smoke::Mover> &movers) {
                 v = J(pos - k.pos) * (1.0f / dt) + w.Cross(comOffset);
             }
             bi.SetLinearAndAngularVelocity(k.body, v, w);
-            k.vSet = v;
-            k.wSet = w;
+            // Jolt clamps the input here. Compare the solver result to what it actually received.
+            bi.GetLinearAndAngularVelocity(k.body, k.vSet, k.wSet);
         } else if (jump) {
             bi.SetPositionAndRotation(k.body, J(pos), rot, JPH::EActivation::Activate);
             k.still = false;
@@ -524,6 +601,7 @@ void ApplyKinematics(float dt, const std::vector<smoke::Mover> &movers) {
     }
     for (auto it = g_kinematic.begin(); it != g_kinematic.end();) {
         if (it->second.seen == g_tick) { ++it; continue; }
+        g_cookedHulls.erase(it->first);
         g_carOfBody.erase(it->second.body.GetIndexAndSequenceNumber());
         g_personOfBody.erase(it->second.body.GetIndexAndSequenceNumber());
         g_wheelParts.erase(it->second.body.GetIndexAndSequenceNumber());
@@ -569,7 +647,13 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
         V3 pos; JPH::Quat rot; unsigned version;
         if (!PoseOf(m, &pos, &rot, &version)) continue;
         auto it = g_cabins.find(m.key);
-        if (it != g_cabins.end() && it->second.version != version) { DropCabin(it); it = g_cabins.end(); }
+        if (it != g_cabins.end() && it->second.version != version) {
+            // Keep the seat constraint attached to the same cabin body as a door opens.
+            if (auto shape = TwoSidedMesh(m)) {
+                bi.SetShape(it->second.body, shape, false, JPH::EActivation::Activate);
+                it->second.version = version;
+            }
+        }
         if (it == g_cabins.end()) {
             JPH::RefConst<JPH::Shape> shape = TwoSidedMesh(m);
             if (!shape) continue;
@@ -606,66 +690,76 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
     g_cabinWanted.clear();
 }
 
-// ---- the cars' reaction: the horizontal momentum the dynamic bodies touching a car gained during the step is
-// what the car lost (estimated: the ground's friction on the same bodies is counted with it)
-std::vector<Push> g_pushes;
-struct Before { JPH::BodyID id; JPH::Vec3 v; float mass; };
-std::vector<Before> g_before;
+struct IncomingMotion { JPH::Vec3 linear, angular; JPH::RVec3 centre; JPH::Vec3 assembly; uint64_t group; };
+std::unordered_map<uint32_t,IncomingMotion> g_incoming;
+// Work supplied by a kinematic walker is not energy an independently flying body brought into that walker.
+// Carry this attribution through joint redistribution/rebound; dissipate it in proportion to measured kinetic
+// energy loss. A later external impulse increases measured energy without increasing the walker's contribution.
+struct AssemblyAccount {
+    float energy=0, incomingEnergy=0;
+    std::unordered_map<const void *,float> work, incomingWork;
+};
+std::unordered_map<uint64_t,AssemblyAccount> g_accounts;
 
 void RememberVelocities() {
-    g_before.clear();
-    JPH::BodyIDVector active;
-    g_w->system->GetActiveBodies(JPH::EBodyType::RigidBody, active);
+    g_incoming.clear();
+    JPH::BodyIDVector bodies;
+    g_w->system->GetBodies(bodies);
+    struct Assembly { JPH::Vec3 momentum=JPH::Vec3::sZero(); float mass=0, energy=0; };
+    std::unordered_map<uint64_t,Assembly> assemblies;
     const JPH::BodyLockInterfaceNoLock &locks = g_w->system->GetBodyLockInterfaceNoLock();
-    for (const JPH::BodyID &id : active) {
+    for (const JPH::BodyID &id : bodies) {
         JPH::BodyLockRead lock(locks, id);
         if (!lock.Succeeded()) continue;
         const JPH::Body &b = lock.GetBody();
         if (!b.IsDynamic()) continue;
         float im = b.GetMotionProperties()->GetInverseMass();
-        g_before.push_back({id, b.GetLinearVelocity(), im > 0 ? 1.0f / im : 0.0f});
+        float mass=im>0 ? 1.0f/im : 0;
+        // Jolt assigns the same owner to every part of a ragdoll. Other loose bodies form their own assembly.
+        uint64_t group=b.GetUserData() ? (b.GetUserData()<<32)|b.GetCollisionGroup().GetGroupID()
+                                       : (uint64_t(1)<<63)|id.GetIndexAndSequenceNumber();
+        auto &assembly=assemblies[group];
+        assembly.momentum+=b.GetLinearVelocity()*mass; assembly.mass+=mass;
+        const auto *properties=b.GetMotionProperties();
+        JPH::Vec3 omega=(b.GetRotation()*properties->GetInertiaRotation()).Conjugated()*b.GetAngularVelocity();
+        JPH::Vec3 inverse=properties->GetInverseInertiaDiagonal();
+        float rotational=0;
+        for (int k=0;k<3;k++) if (inverse[k]>1e-8f) rotational+=omega[k]*omega[k]/inverse[k];
+        assembly.energy+=.5f*(mass*b.GetLinearVelocity().LengthSq()+rotational);
+        g_incoming.emplace(id.GetIndexAndSequenceNumber(),IncomingMotion{b.GetLinearVelocity(),b.GetAngularVelocity(),
+                           b.GetCenterOfMassPosition(),JPH::Vec3::sZero(),group});
+    }
+    for (auto &kv:g_incoming) {
+        const auto &a=assemblies.at(kv.second.group);
+        kv.second.assembly=a.mass>0 ? a.momentum/a.mass : JPH::Vec3::sZero();
+    }
+    for (auto it=g_accounts.begin();it!=g_accounts.end();) {
+        if (!assemblies.count(it->first)) it=g_accounts.erase(it); else ++it;
+    }
+    for (const auto &kv:assemblies) {
+        auto &account=g_accounts[kv.first];
+        float retained=account.energy>1e-6f ? std::min(1.f,kv.second.energy/account.energy) : 0;
+        for (auto it=account.work.begin();it!=account.work.end();) {
+            it->second*=retained;
+            if (it->second<1e-4f) it=account.work.erase(it); else ++it;
+        }
+        account.energy=account.incomingEnergy=kv.second.energy;
+        account.incomingWork=account.work;
     }
 }
 
 // What the step did to each driven car (see CarKicks): its velocity and turning now against what it was given.
 void CollectCarKicks() {
-    g_carKicks.clear();
     JPH::BodyInterface &bi = Bodies();
     for (auto &kv : g_kinematic) {
         const Kinematic &k = kv.second;
-        if (!k.dynamic || !bi.IsAdded(k.body)) continue;
+        if (!k.dynamic || k.reactionTick != g_tick || !bi.IsAdded(k.body)) continue;
         JPH::Vec3 dv = bi.GetLinearVelocity(k.body) - k.vSet, dw = bi.GetAngularVelocity(k.body) - k.wSet;
         if (dv.LengthSq() < 1e-6f && dw.LengthSq() < 1e-6f) continue;
         JPH::RVec3 c = bi.GetCenterOfMassPosition(k.body);
         g_carKicks.push_back(CarKick{kv.first, V3{dv.GetX(), dv.GetY(), dv.GetZ()}, V3{dw.GetX(), dw.GetY(), dw.GetZ()},
                                      V3{(float)c.GetX(), (float)c.GetY(), (float)c.GetZ()} + g_w->origin});
     }
-}
-
-void CollectPushes() {
-    g_pushes.clear();
-    if (g_carTouches.empty()) return;
-    std::sort(g_carTouches.begin(), g_carTouches.end(), [](const auto &a, const auto &b) {
-        return a.first.GetIndexAndSequenceNumber() != b.first.GetIndexAndSequenceNumber()
-                   ? a.first.GetIndexAndSequenceNumber() < b.first.GetIndexAndSequenceNumber()
-                   : a.second < b.second;
-    });
-    g_carTouches.erase(std::unique(g_carTouches.begin(), g_carTouches.end()), g_carTouches.end());
-    JPH::BodyInterface &bi = Bodies();
-    for (const Before &b : g_before) {
-        std::vector<const void *> cars;
-        for (auto &t : g_carTouches) if (t.first == b.id) cars.push_back(t.second);
-        if (cars.empty()) continue;
-        JPH::Vec3 dv = bi.GetLinearVelocity(b.id) - b.v;
-        V3 dp{dv.GetX() * b.mass, 0.0f, dv.GetZ() * b.mass};
-        V3 share = dp * (-1.0f / (float)cars.size());
-        for (const void *c : cars) {
-            auto it = std::find_if(g_pushes.begin(), g_pushes.end(), [&](const Push &p) { return p.car == c; });
-            if (it == g_pushes.end()) g_pushes.push_back({c, share});
-            else it->impulse = it->impulse + share;
-        }
-    }
-    g_carTouches.clear();
 }
 
 // ---- focus and re-centring
@@ -698,15 +792,19 @@ void RemoveAll() {
     for (auto &kv : g_kinematic) { bi.RemoveBody(kv.second.body); bi.DestroyBody(kv.second.body); }
     g_statics.clear();
     g_kinematic.clear();
+    g_cookedHulls.clear();
     g_carOfBody.clear();
     g_passCar.clear();
     g_personOfBody.clear();
     g_personTouches.clear();
+    g_pushStats = {};
+    g_incoming.clear();
+    g_accounts.clear();
     g_carKicks.clear();
     g_wheelParts.clear();
+    g_wheelSupport.clear();
+    g_vehicleContacts.clear();
     g_meshes.clear();
-    g_carTouches.clear();
-    g_pushes.clear();
 }
 
 V3 RoundOrigin(const V3 &p) {
@@ -754,7 +852,7 @@ bool Start(LogFn log, const V3 &around, std::string *err) {
     w->system->SetContactListener(&w->contacts);
     // A round origin near the player: coordinates inside Jolt stay within a few hundred metres.
     w->origin = RoundOrigin(around);
-    g_w = std::move(w);
+    g_w = w.release();
     g_freshWorld = true;
     g_sceneryScans = g_sceneryEpoch = ~0u;
     g_appliedScan = ~0u;
@@ -768,7 +866,8 @@ void Stop() {
     g_inWater = 0;
     if (g_w) {
         RemoveAll();
-        g_w.reset();
+        delete g_w;
+        g_w = nullptr;
     }
     scenery::ClearFocus(scenery::kRagdoll);
     if (g_typesRegistered) {
@@ -793,55 +892,11 @@ void AddFocus(const V3 &lo, const V3 &hi) {
 // ---- water
 // Buoyancy and drag for every floating body with water under it: the surface over its centre of mass, tilted with
 // the waves (Jolt cuts the body's shape with that plane for the submerged volume).
-// A car (the game moves it; it is kinematic here) in the water: its footprint along its motion, as deep as it sits,
-// moving with it (a car driving into the river throws a wave; one sinking pushes the water aside).
-std::unordered_map<uint32_t, V3> g_carWas;   // by body: where its middle was the last step
-std::unordered_set<uint32_t> g_carWet;       // the cars whose underside was in the water the last step
-void CarsInWater(float dt) {
-    JPH::BodyInterface &bi = Bodies();
-    std::unordered_map<uint32_t, V3> now;
-    std::unordered_set<uint32_t> wet;
-    for (auto &kv : g_carOfBody) {
-        JPH::BodyID id(kv.first);
-        if (!bi.IsAdded(id)) continue;
-        JPH::AABox box = bi.GetTransformedShape(id).GetWorldSpaceBounds();
-        V3 c = ToWorld(F(box.GetCenter()));
-        now[kv.first] = c;
-        float y;
-        V3 n, flow;
-        if (!g_water(c.x, c.y, c.z, &y, &n, &flow)) continue;
-        float lo = box.mMin.GetY() + g_w->origin.y, hi = box.mMax.GetY() + g_w->origin.y;
-        if (!(lo < y && hi > y - 0.2f)) continue;
-        wet.insert(kv.first);
-        auto was = g_carWas.find(kv.first);
-        V3 p = was != g_carWas.end() ? was->second : c;
-        // Falling in: a splash as hard as it came down (a car's mass: the game's own is not read here).
-        float vy = dt > 0 && was != g_carWas.end() ? (c.y - p.y) / dt : 0;
-        if (!g_carWet.count(kv.first) && vy < -0.5f) {
-            float ex0 = box.GetExtent().GetX(), ez0 = box.GetExtent().GetZ();
-            g_splashes.push_back({c.x, c.z, c.x, c.z, std::max(ex0, ez0), std::min(ex0, ez0), std::min(y - lo, 1.5f), 0, false, kv.first,
-                                  -vy, 1300.0f});
-        }
-        V3 d{c.x - p.x, 0, c.z - p.z};
-        float ex = box.GetExtent().GetX(), ez = box.GetExtent().GetZ();
-        // Its size along its motion and across (the box is the world's: take the larger along the way it drives).
-        float along = Len(d) > 1e-3f && std::fabs(d.x) > std::fabs(d.z) ? ex : ez, across = along == ex ? ez : ex;
-        g_splashes.push_back({c.x, c.z, p.x, p.z, along, across, std::min(y - lo, 1.5f), dt, true, kv.first});
-    }
-    g_carWas.swap(now);
-    g_carWet.swap(wet);
-}
-
 bool IsCarBody(uint32_t body) { return g_carOfBody.count(body) != 0; }
 
 void ApplyWater(float dt) {
     g_inWater = 0;
-    // a step's splashes are for that step's TakeSplashes; nobody took them: gone (kept, a body in the river added
-    // fifteen a tick for as long as it floated)
-    g_splashes.clear();
-    if (!g_water) return;
-    CarsInWater(dt);
-    if (g_floats.empty()) return;
+    if (!g_water || g_floats.empty()) return;
     JPH::BodyInterface &bi = Bodies();
     JPH::Vec3 gravity = g_w->system->GetGravity();
     for (auto it = g_floats.begin(); it != g_floats.end();) {
@@ -855,26 +910,9 @@ void ApplyWater(float dt) {
         bool wet = false;
         if (g_water(c.x, c.y, c.z, &y, &n, &flow)) {
             JPH::AABox box = bi.GetTransformedShape(id).GetWorldSpaceBounds();
-            float lo = box.mMin.GetY() + g_w->origin.y, hi = box.mMax.GetY() + g_w->origin.y;
+            float lo = box.mMin.GetY() + g_w->origin.y;
             if (lo < y) {
                 wet = true;
-                V3 v = F(bi.GetLinearVelocity(id));
-                float mass = 1.0f;
-                {
-                    JPH::BodyLockRead lock(g_w->system->GetBodyLockInterfaceNoLock(), id);
-                    if (lock.Succeeded() && lock.GetBody().GetMotionPropertiesUnchecked())
-                        mass = 1.0f / std::max(lock.GetBody().GetMotionPropertiesUnchecked()->GetInverseMass(), 1e-4f);
-                }
-                float ex = std::max(box.GetExtent().GetX(), 0.03f), ez = std::max(box.GetExtent().GetZ(), 0.03f);
-                // Falling in: the surface pushed down by the body's momentum, over its size.
-                if (!f.wet && v.y < -0.5f && hi > y - 1.0f)
-                    g_splashes.push_back({c.x, c.z, c.x, c.z, std::max(ex, ez), std::max(ex, ez),
-                                          std::min(std::max(0.012f * -v.y * std::sqrt(mass), 0.01f), 0.6f), 0, false, it->first, -v.y, mass});
-                // In the surface: its footprint, as deep as it sits (capped), moving with it.
-                if (f.wet && hi > y - 0.1f)
-                    g_splashes.push_back({c.x, c.z, f.px, f.pz, ex, ez, std::min(y - lo, 0.6f), dt, true, it->first});
-                f.px = c.x;
-                f.pz = c.z;
                 if (bi.ApplyBuoyancyImpulse(id, J(V3{c.x, y, c.z} - g_w->origin), J(n), f.buoyancy, f.linearDrag, f.angularDrag, J(flow), gravity, dt))
                     g_inWater++;
             }
@@ -884,11 +922,10 @@ void ApplyWater(float dt) {
     }
 }
 
-// The pushes of living people (see g_personOfBody), from the contacts of the last step, per contact:
-// - the impact: a collision of the body's part (its effective mass at that point, rotation included) with the
-//   person's part, which has g_personMass behind it instead of an infinite one: a step kicks a body about;
-// - the steady push: a fifth of the overlap out per step, all of one person's at most g_personForce * dt (a person
-//   leaning on a body can push no harder than his feet hold on the ground).
+// Living animation is kinematic: it cannot lose momentum to a corpse. Resolve its finite segment mass locally,
+// and share ONE locomotion impulse allowance across every contact of that person, impacts included. Previously
+// each touching part supplied a fresh 20 kg impact every frame outside the force budget: an FPS-dependent motor.
+// A dynamic body's own incoming momentum is a separate, dissipative reaction, not walker-supplied energy.
 void ApplyPersonPushes(float dt) {
     g_personBlows.clear();
     if (g_personTouches.empty()) return;
@@ -910,25 +947,54 @@ void ApplyPersonPushes(float dt) {
         }
         float w = invM + t.n.Dot(inr);
         if (w <= 1e-6f) continue;
-        float closing = (bi.GetPointVelocity(t.person, t.point) - bi.GetPointVelocity(t.body, t.point)).Dot(t.n);
+        auto incoming=g_incoming.find(t.body.GetIndexAndSequenceNumber());
+        if (incoming==g_incoming.end()) continue;
+        const IncomingMotion &motion=incoming->second;
+        JPH::Vec3 bodyV=motion.linear+motion.angular.Cross(JPH::Vec3(t.point-motion.centre));
+        float currentNormal = bi.GetPointVelocity(t.body,t.point).Dot(t.n);
+        float closing = bi.GetPointVelocity(t.person, t.point).Dot(t.n) - currentNormal;
         float depth = std::min(std::max(t.depth, 0.0f), 0.1f);
-        float impact = g_personMass > 0 && closing > 0 ? closing / (w + 1.0f / g_personMass) : 0.0f;   // N s
+        auto part = g_personOfBody.find(t.person.GetIndexAndSequenceNumber());
+        if (part == g_personOfBody.end()) continue;
+        float mass = std::min(part->second.mass, g_personMass);
+        float inverseMass = mass > 0 ? w + 1.f / mass : 0;
+        float impact = inverseMass > 0 ? std::max(closing, 0.f) / inverseMass : 0.f;
         // the blow into the person: the same impact with the body's own approach only (t.n points at the body), from a
         // body that moves as a thrown one does (1.5 m/s and more where it touches): a body lying in a walker's way is
         // shoved slowly by his own feet and bounces back at him (seen 2026-10-22: two of five people walking past
         // corpses fell over them, 487 such blows in four minutes)
-        JPH::Vec3 bodyV = bi.GetPointVelocity(t.body, t.point);
-        float approach = -bodyV.Dot(t.n);
-        if (g_personMass > 0 && approach > 0 && bodyV.LengthSq() > 1.5f * 1.5f && g_personBlows.size() < 256) {
-            float Jin = approach / (w + 1.0f / g_personMass);
+        // A limb spinning after a footstep is not an incoming thrown body. Attribute a blow to the assembly's
+        // incoming translation, sampled before any person push; contact iteration must not manufacture attacks.
+        auto &account=g_accounts.at(motion.group);
+        auto supplied=account.incomingWork.find(t.who);
+        float ownWork=supplied==account.incomingWork.end() ? 0 : supplied->second;
+        float independent=account.incomingEnergy>1e-6f ? std::sqrt(std::max(0.f,1.f-ownWork/account.incomingEnergy)) : 0;
+        JPH::Vec3 incomingVelocity=motion.assembly*independent;
+        float approach = std::min(-bodyV.Dot(t.n),-incomingVelocity.Dot(t.n));
+        if (inverseMass > 0 && approach > 0 && incomingVelocity.LengthSq() > 1.5f * 1.5f && g_personBlows.size() < 256) {
+            float Jin = approach / inverseMass;
             g_personBlows.push_back(PersonBlow{t.who, F(-t.n * Jin), F(JPH::Vec3(t.point)) + g_w->origin,
                                                t.body.GetIndexAndSequenceNumber()});
         }
         auto budget = left.try_emplace(t.who, g_personForce * dt).first;
-        float steady = std::min(0.2f * depth / dt / w, budget->second);
-        budget->second -= steady;
-        float J = impact + std::max(steady, 0.0f);
+        float reaction = inverseMass > 0 ? std::min(impact, std::max(-currentNormal, 0.f) / inverseMass) : 0.f;
+        float requested = impact - reaction + 0.2f * depth / dt / w;
+        float locomotion = std::min(requested, std::max(budget->second, 0.f));
+        budget->second -= locomotion;
+        g_pushStats.contacts++;
+        g_pushStats.requested += requested;
+        g_pushStats.delivered += locomotion;
+        g_pushStats.reaction += reaction;
+        g_pushStats.maxPartMass = std::max(g_pushStats.maxPartMass, mass);
+        g_pushStats.peakForce = std::max(g_pushStats.peakForce, (g_personForce * dt - budget->second) / dt);
+        float J = reaction + locomotion;
         if (J <= 0) continue;
+        // Exact kinetic work of this impulse, including rotation at the contact point (w is inverse effective mass).
+        float work=J*bi.GetPointVelocity(t.body,t.point).Dot(t.n)+.5f*J*J*w;
+        float after=std::max(0.f,account.energy+work);
+        if (work>0) account.work[t.who]+=work;
+        else if (account.energy>1e-6f) for (auto &entry:account.work) entry.second*=after/account.energy;
+        account.energy=after;
         bi.AddImpulse(t.body, t.n * J, t.point);
     }
     g_personTouches.clear();
@@ -936,7 +1002,19 @@ void ApplyPersonPushes(float dt) {
 
 void SetPersonPush(float maxForce, float mass) { g_personForce = maxForce; g_personMass = mass; }
 
+std::string PersonPushState() {
+    return Fmt("{\"contacts\":%u,\"requested_ns\":%.4f,\"delivered_ns\":%.4f,\"reaction_ns\":%.4f,"
+               "\"peak_force_n\":%.3f,\"force_limit_n\":%.3f,\"max_segment_kg\":%.3f}",
+               g_pushStats.contacts, g_pushStats.requested, g_pushStats.delivered, g_pushStats.reaction,
+               g_pushStats.peakForce, g_personForce, g_pushStats.maxPartMass);
+}
+
 void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player) {
+    g_carContacts.clear();
+    g_carContactsDropped = 0;
+    g_carKicks.clear();       // a paused or failed step has no reaction to deliver
+    g_wheelSupport.clear();
+    g_vehicleContacts.clear();
     g_personBlows.clear();   // (a paused tick has none)
     if (!g_w) return;
     Recentre(player);
@@ -945,16 +1023,15 @@ void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player) {
     ApplyKinematics(dt, movers);
     ApplyCabins(dt, movers);
     if (dt <= 0) return;   // the game is paused: the bodies wait
-    dt = std::min(dt, 1.0f / 20.0f);
+    // Integrate the same mission interval used for mover velocities and recovery timers.
+    // The host bounds mission ticks below 200 ms. Keep each collision substep at most 1/120 s.
     int collisionSteps = std::max(1, (int)std::ceil(dt * 120.0f - 1e-3f));
     double t0 = Now();
     RememberVelocities();
-    g_carTouches.clear();
     ApplyPersonPushes(dt);
     ApplyWater(dt);
-    g_carContacts.clear();
     JPH::EPhysicsUpdateError e = g_w->system->Update(dt, collisionSteps, g_w->temp.get(), g_w->jobs.get());
-    CollectPushes();
+    for (VehicleContact &c : g_vehicleContacts) c.at += g_w->origin;
     CollectCarKicks();
     g_stepMs = g_stepMs * 0.9 + (Now() - t0) * 0.1;
     g_steps++;
@@ -1039,6 +1116,11 @@ std::string DescribeCar(const void *car) {
 }
 
 const std::vector<CarContactInfo> &CarContacts() { return g_carContacts; }
+unsigned CarContactsDropped() { return g_carContactsDropped; }
+uint32_t WheelSupport(const void *car) {
+    const auto found = g_wheelSupport.find(car);
+    return found != g_wheelSupport.end() ? found->second : 0;
+}
 
 int CarPartOf(const JPH::BodyID &car, unsigned subShapeId) {
     if (!Running()) return -1;
@@ -1057,6 +1139,16 @@ const void *KinematicOwner(const JPH::BodyID &id) {
 
 bool HasKinematic(const void *key) { return g_kinematic.count(key) != 0; }
 
+bool EnsureVehicle(const smoke::Mover &m) {
+    if (!Running() || !m.key || m.kind != smoke::Mover::HULL) return false;
+    V3 pos;
+    JPH::Quat rot;
+    unsigned version;
+    if (!PoseOf(m, &pos, &rot, &version)) return false;
+    bool created;
+    return KinematicFor(m, pos, rot, version, &created) != nullptr;
+}
+
 void SetImpactListener(ImpactFn fn) { g_impact = fn; }
 
 void RequestCabin(const void *car) { if (car) g_cabinWanted.insert(car); }
@@ -1067,29 +1159,11 @@ JPH::BodyID CabinBody(const void *car) {
 void SetCabinGoneListener(CabinGoneFn fn) { g_cabinGone = fn; }
 void SetCabinJumpListener(CabinJumpFn fn) { g_cabinJump = fn; }
 
-const std::vector<Push> &CarPushes() { return g_pushes; }
 const std::vector<CarKick> &CarKicks() { return g_carKicks; }
 const std::vector<PersonBlow> &PersonBlows() { return g_personBlows; }
+const std::vector<VehicleContact> &VehicleContacts() { return g_vehicleContacts; }
 
-// The vehicle whose body is the first solid thing (the street, a vehicle; not a body nor a person) along `way` from
-// `at` (world), or null.
-const void *FirstVehicle(const V3 &at, const V3 &way) {
-    class Solid final : public JPH::ObjectLayerFilter {
-    public:
-        bool ShouldCollide(JPH::ObjectLayer l) const override { return l == kStatic || l == kKinematic || l == kCarBody; }
-    } solid;
-    JPH::RRayCast ray(J(at - g_w->origin), J(way));
-    JPH::RayCastResult hit;
-    if (!System()->GetNarrowPhaseQueryNoLock().CastRay(ray, hit, {}, solid)) return nullptr;
-    auto car = g_carOfBody.find(hit.mBodyID.GetIndexAndSequenceNumber());
-    return car == g_carOfBody.end() ? nullptr : car->second;
-}
 
-const void *VehicleAround(const V3 &at, float down, float up) {
-    if (!Running() || down <= 0 || up <= 0) return nullptr;
-    const void *below = FirstVehicle(at, {0, -down, 0});
-    return below && FirstVehicle(at, {0, up, 0}) == below ? below : nullptr;
-}
 
 void SetWaterQuery(WaterFn fn) { g_water = fn; }
 bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
@@ -1100,10 +1174,6 @@ void SetFloat(const JPH::BodyID &id, float buoyancy, float linearDrag, float ang
     if (!id.IsInvalid()) g_floats[id.GetIndexAndSequenceNumber()] = Float{buoyancy, linearDrag, angularDrag};
 }
 void ClearFloat(const JPH::BodyID &id) { g_floats.erase(id.GetIndexAndSequenceNumber()); }
-void TakeSplashes(std::vector<Splash> &out) {
-    out.insert(out.end(), g_splashes.begin(), g_splashes.end());
-    g_splashes.clear();
-}
 unsigned BodiesInWater() { return g_inWater; }
 
 void MovingBounds(float cx, float cz, float reach, std::vector<Bounds> &out) {

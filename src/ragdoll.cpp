@@ -1,10 +1,13 @@
 #include "ragdoll.h"
+#include "anatomy.h"
 #include "game.h"
 #include "collision.h"
 #include "mod.h"
 #include <windows.h>
 #include <cstdio>
 #include <algorithm>
+#include <cstring>
+#include <unordered_map>
 
 // The ragdoll's binding to the game: the skeleton read from the model's frames, the 15 body parts made from it
 // (their masses, inertia and capsules), the blows that change their velocities, and the bones written back from the
@@ -22,18 +25,58 @@ QuatMakeFn QuatMake() {
     return fn;
 }
 
-V3 Origin(void *frame) { const float *m = game::WorldMatrix(frame); return {m[12], m[13], m[14]}; }
-
-// Row of a frame's world rotation that best matches `want` (sign-corrected), made perpendicular to `axis`.
-V3 BestRow(void *frame, const V3 &want, const V3 &axis) {
-    M3 r = M3::FromWorld(game::WorldMatrix(frame));
-    V3 best = r.r[0]; float bestDot = 0;
-    for (auto &row : r.r) {
-        V3 v = Norm(row - axis * Dot(row, axis));
-        float d = Dot(v, want);
-        if (std::fabs(d) > std::fabs(bestDot)) { bestDot = d; best = v; }
+void ReadPose(Ragdoll::PoseSnap *pose) {
+    for (int i = 0; i < 20; ++i) {
+        const float *m = game::WorldMatrix(pose->frames[i]);
+        pose->rot[i] = M3::FromWorld(m);
+        pose->org[i] = {m[12], m[13], m[14]};
     }
-    return bestDot < 0 ? -best : best;
+    Ragdoll::PointsFromPose(pose->rot, pose->org, pose->pts);
+}
+
+// Keep only the small rest skeleton; the SDK releases all parsed meshes immediately after calibration.
+bool ReferencePose(void *model, Ragdoll::PoseSnap *out, std::string *err) {
+    static std::unordered_map<std::string, Ragdoll::PoseSnap> cache;
+    char file[512]{};
+    if (!mod::H->model_file(mod::M, model, file, sizeof file)) { *err = "no model file for skeleton calibration"; return false; }
+    auto found = cache.find(file);
+    if (found != cache.end()) { *out = found->second; return true; }
+    int handle = mod::H->model_open(mod::M, file);
+    if (!handle) { *err = std::string("cannot read rest skeleton: ") + file; return false; }
+    int count = mod::H->model_nodes(mod::M, handle, nullptr, 0);
+    if (count <= 0 || count > 4096) { mod::H->model_close(mod::M, handle); *err = "invalid rest skeleton node count"; return false; }
+    std::vector<MmlModelNode> nodes(count);
+    mod::H->model_nodes(mod::M, handle, nodes.data(), count);
+    mod::H->model_close(mod::M, handle);
+    std::vector<M3> world(count);
+    std::vector<V3> pos(count);
+    for (int i=0;i<count;i++) {
+        const auto &n = nodes[i];
+        if (n.parent >= i || n.parent < -1) { *err = "rest skeleton parent order is invalid"; return false; }
+        float q[16]; QuatMatrix({n.rot[0],n.rot[1],n.rot[2],n.rot[3]},q);
+        M3 local = M3::Raw(q);
+        for (int k=0;k<3;k++) local.r[k] = local.r[k]*n.scale[k];
+        V3 p{n.pos[0],n.pos[1],n.pos[2]};
+        world[i] = n.parent < 0 ? local : local * world[n.parent];
+        pos[i] = n.parent < 0 ? p : pos[n.parent]+world[n.parent].Apply(p);
+    }
+    const char *names[] = {"r_thigh","r_shin","r_foot","l_thigh","l_shin","l_foot","back1","back2","back3",
+                          "neck","r_shoulder","r_arm","r_elbow","r_hand","l_shoulder","l_arm","l_elbow","l_hand"};
+    Ragdoll::PoseSnap pose{};
+    int pelvis = -1;
+    for (int b=0;b<18;b++) {
+        int index=-1;
+        for (int i=0;i<count;i++) if (!std::strcmp(nodes[i].name,names[b])) { index=i; break; }
+        if (index<0) { *err=std::string("rest skeleton lacks ")+names[b]; return false; }
+        pose.rot[b]=world[index]; pose.rot[b].Orthonormalize(); pose.org[b]=pos[index];
+        if (b==0) pelvis=nodes[index].parent;
+    }
+    if (pelvis<0) { *err="rest skeleton lacks pelvis"; return false; }
+    pose.rot[18]=world[pelvis]; pose.rot[18].Orthonormalize(); pose.org[18]=pos[pelvis];
+    pose.rot[19]=M3::Identity(); pose.fwd={0,0,1};
+    Ragdoll::PointsFromPose(pose.rot,pose.org,pose.pts);
+    cache.emplace(file,pose); *out=pose;
+    return true;
 }
 
 float Clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -143,7 +186,7 @@ void Ragdoll::SetCapsule(int id, const V3 &a, const V3 &b, float radius) {
     bd.invInertia = {1.0f / I.x, 1.0f / I.y, 1.0f / I.z};
 }
 
-void Ragdoll::Setup(const V3 *worldPts, const V3 &fwd) {
+void Ragdoll::Setup(const V3 *worldPts, const V3 &fwd, const M3 *rot20) {
     // Simulate around a local origin: world coordinates in Lost Heaven reach ~2000 m, where a float
     // step is ~0.1 mm and velocities derived as dx/h at 600 Hz would carry ~0.1 m/s of rounding noise.
     origin = worldPts[PELVIS];
@@ -151,41 +194,41 @@ void Ragdoll::Setup(const V3 *worldPts, const V3 &fwd) {
     for (int i = 0; i < COUNT; i++) { initPos[i] = worldPts[i]; lp[i] = worldPts[i] - origin; }
     const V3 *pts = lp;
     initFwd = fwd;
+    for (int i=0;i<20;i++) initRot[i]=rot20 ? rot20[i] : M3::Identity();
 
     // Anatomical frames (x right, y up, z forward).
-    V3 pr = Norm(pts[RHIP] - pts[LHIP], {1, 0, 0});
-    V3 pf = Norm(Cross(pr, pts[BACK1] - pts[PELVIS]), fwd);
-    if (Dot(pf, fwd) < 0) pf = -pf;
-    V3 cr = Norm(pts[RCLAV] - pts[LCLAV], pr);
-    V3 cf = Norm(Cross(cr, pts[NECK] - pts[BACK3]), fwd);
-    if (Dot(cf, fwd) < 0) cf = -cf;
+    TrunkAxes axes = TrunkAxes::From(pts, fwd);
+    V3 pr = axes.pelvisRight, pf = axes.pelvisFront;
+    V3 cr = axes.chestRight, cf = axes.chestFront;
+    if (rot20) { pr=rot20[18].r[0]; pf=rot20[18].r[2]; cr=rot20[8].r[0]; cf=rot20[8].r[2]; }
+    auto front = [&](int frame,const V3 &fallback) { return rot20 ? rot20[frame].r[2] : fallback; };
 
     MakeBody(B_PELVIS, pts[LHIP], pts[RHIP], pf, 0.12f, 11.0f);
-    MakeBody(B_ABDOMEN, pts[BACK1], pts[BACK2], pf, 0.12f, 7.0f);
-    MakeBody(B_CHESTLOW, pts[BACK2], pts[BACK3], cf, 0.13f, 7.0f);
+    MakeBody(B_ABDOMEN, pts[BACK1], pts[BACK2], front(6,pf), 0.12f, 7.0f);
+    MakeBody(B_CHESTLOW, pts[BACK2], pts[BACK3], front(7,cf), 0.13f, 7.0f);
     MakeBody(B_CHEST, pts[BACK3], pts[NECK], cf, 0.15f, 14.0f);
     {   // the ribcage is wide: collide with a capsule from shoulder to shoulder at chest height
         V3 mid = pts[BACK3] * 0.4f + pts[NECK] * 0.6f;
         SetCapsule(B_CHEST, mid - cr * 0.10f, mid + cr * 0.10f, 0.14f);
     }
     MakeBody(B_HEAD, pts[NECK], pts[HEAD], Norm(pts[NOSE] - pts[NECK]), 0.10f, 5.0f);
-    MakeBody(B_RUARM, pts[RARM], pts[RELB], cf, 0.055f, 2.2f);
+    MakeBody(B_RUARM, pts[RARM], pts[RELB], front(11,cf), 0.055f, 2.2f);
     MakeBody(B_RFARM, pts[RELB], pts[RTIP], pts[RTHUMB] - pts[RHAND], 0.045f, 1.8f);
-    MakeBody(B_LUARM, pts[LARM], pts[LELB], cf, 0.055f, 2.2f);
+    MakeBody(B_LUARM, pts[LARM], pts[LELB], front(15,cf), 0.055f, 2.2f);
     MakeBody(B_LFARM, pts[LELB], pts[LTIP], pts[LTHUMB] - pts[LHAND], 0.045f, 1.8f);
-    MakeBody(B_RTHIGH, pts[RHIP], pts[RKNEE], pf, 0.075f, 8.0f);
-    MakeBody(B_RSHIN, pts[RKNEE], pts[RANKLE], pf, 0.06f, 3.5f);
-    MakeBody(B_RFOOT, pts[RANKLE], pts[RTOE], pts[RKNEE] - pts[RANKLE], 0.045f, 1.2f);
-    MakeBody(B_LTHIGH, pts[LHIP], pts[LKNEE], pf, 0.075f, 8.0f);
-    MakeBody(B_LSHIN, pts[LKNEE], pts[LANKLE], pf, 0.06f, 3.5f);
-    MakeBody(B_LFOOT, pts[LANKLE], pts[LTOE], pts[LKNEE] - pts[LANKLE], 0.045f, 1.2f);
+    MakeBody(B_RTHIGH, pts[RHIP], pts[RKNEE], front(0,pf), 0.075f, 8.0f);
+    MakeBody(B_RSHIN, pts[RKNEE], pts[RANKLE], front(1,pf), 0.06f, 3.5f);
+    MakeBody(B_RFOOT, pts[RANKLE], pts[RTOE], rot20 ? rot20[2].r[1] : pts[RKNEE] - pts[RANKLE], 0.045f, 1.2f);
+    MakeBody(B_LTHIGH, pts[LHIP], pts[LKNEE], front(3,pf), 0.075f, 8.0f);
+    MakeBody(B_LSHIN, pts[LKNEE], pts[LANKLE], front(4,pf), 0.06f, 3.5f);
+    MakeBody(B_LFOOT, pts[LANKLE], pts[LTOE], rot20 ? rot20[5].r[1] : pts[LKNEE] - pts[LANKLE], 0.045f, 1.2f);
 }
 
-bool Ragdoll::Capture(void *model, const V3 *dirIn, V3 *pts, V3 *fwdOut, void **frames, std::string *err) {
+bool Ragdoll::Snapshot(void *model, const V3 *dirIn, PoseSnap *out, std::string *err) {
     if (!model) { *err = "no model frame"; return false; }
     static const char *names[] = {"r_thigh", "r_shin", "r_foot", "l_thigh", "l_shin", "l_foot", "back1", "back2", "back3",
                                   "neck", "r_shoulder", "r_arm", "r_elbow", "r_hand", "l_shoulder", "l_arm", "l_elbow", "l_hand"};
-    void **f = frames;
+    void **f = out->frames;
     for (int i = 0; i < 18; i++) {
         f[i] = game::FindChild(model, names[i]);
         if (!f[i]) { *err = std::string("joint not found: ") + names[i]; return false; }
@@ -203,37 +246,32 @@ bool Ragdoll::Capture(void *model, const V3 *dirIn, V3 *pts, V3 *fwdOut, void **
     else { const float *m = game::WorldMatrix(model); dir = {m[8], m[9], m[10]}; }
     dir.y = 0;
     V3 fwd = Norm(dir, {0, 0, 1});
-    *fwdOut = fwd;
-    PointsFromFrames(frames, fwd, pts);
+    out->fwd = fwd;
+    ReadPose(out);
     return true;
 }
 
-void Ragdoll::PointsFromFrames(void *const *f, const V3 &fwd, V3 *pts) {
+void Ragdoll::PointsFromPose(const M3 *rot, const V3 *org, V3 *pts) {
     enum { RTH, RSH, RFT, LTH, LSH, LFT, B1, B2, B3, NK, RCL, RAR, REL, RHA, LCL, LAR, LEL, LHA };
-    void *pelvis = f[18];
-    pts[PELVIS] = Origin(pelvis);
-    pts[BACK1] = Origin(f[B1]);
-    pts[BACK2] = Origin(f[B2]);
-    pts[BACK3] = Origin(f[B3]);
-    pts[NECK] = Origin(f[NK]);
-    V3 headDir = Norm(pts[NECK] - pts[BACK3]);
+    pts[PELVIS] = org[18];
+    pts[BACK1] = org[B1]; pts[BACK2] = org[B2]; pts[BACK3] = org[B3]; pts[NECK] = org[NK];
+    V3 headDir = rot[NK].r[1];
     pts[HEAD] = pts[NECK] + headDir * 0.20f;
-    pts[NOSE] = pts[NECK] + headDir * 0.10f + fwd * 0.10f;
-    auto arm = [&](int clav, int armP, int elb, int hand, int tip, int thumb, void *fc, void *fa, void *fe, void *fh) {
-        pts[clav] = Origin(fc); pts[armP] = Origin(fa); pts[elb] = Origin(fe); pts[hand] = Origin(fh);
+    pts[NOSE] = pts[NECK] + headDir * 0.10f + rot[NK].r[2] * 0.10f;
+    auto arm = [&](int clav, int armP, int elb, int hand, int tip, int thumb, int fc, int fa, int fe, int fh) {
+        pts[clav] = org[fc]; pts[armP] = org[fa]; pts[elb] = org[fe]; pts[hand] = org[fh];
         V3 fore = Norm(pts[hand] - pts[elb]);
         pts[tip] = pts[hand] + fore * 0.10f;
-        pts[thumb] = pts[hand] + BestRow(fh, fwd, fore) * 0.05f;
+        pts[thumb] = pts[hand] + rot[fe].r[2] * 0.05f;
     };
-    arm(RCLAV, RARM, RELB, RHAND, RTIP, RTHUMB, f[RCL], f[RAR], f[REL], f[RHA]);
-    arm(LCLAV, LARM, LELB, LHAND, LTIP, LTHUMB, f[LCL], f[LAR], f[LEL], f[LHA]);
-    auto leg = [&](int hip, int knee, int ankle, int toe, void *ft, void *fs, void *ff) {
-        pts[hip] = Origin(ft); pts[knee] = Origin(fs); pts[ankle] = Origin(ff);
-        V3 shin = Norm(pts[ankle] - pts[knee]);
-        pts[toe] = pts[ankle] + BestRow(ff, fwd, shin) * 0.14f + V3{0, -0.04f, 0};
+    arm(RCLAV, RARM, RELB, RHAND, RTIP, RTHUMB, RCL, RAR, REL, RHA);
+    arm(LCLAV, LARM, LELB, LHAND, LTIP, LTHUMB, LCL, LAR, LEL, LHA);
+    auto leg = [&](int hip, int knee, int ankle, int toe, int ft, int fs, int ff) {
+        pts[hip] = org[ft]; pts[knee] = org[fs]; pts[ankle] = org[ff];
+        pts[toe] = pts[ankle] + rot[ff].r[2] * 0.14f - rot[ff].r[1] * 0.04f;
     };
-    leg(RHIP, RKNEE, RANKLE, RTOE, f[RTH], f[RSH], f[RFT]);
-    leg(LHIP, LKNEE, LANKLE, LTOE, f[LTH], f[LSH], f[LFT]);
+    leg(RHIP, RKNEE, RANKLE, RTOE, RTH, RSH, RFT);
+    leg(LHIP, LKNEE, LANKLE, LTOE, LTH, LSH, LFT);
 }
 
 bool Ragdoll::SnapshotNow(PoseSnap *out) const {
@@ -244,11 +282,7 @@ bool Ragdoll::SnapshotNow(PoseSnap *out) const {
     fwd = Norm(fwd, initFwd);
     for (int i = 0; i < 20; i++) out->frames[i] = frames[i];
     out->fwd = fwd;
-    PointsFromFrames(frames, fwd, out->pts);
-    for (int i = 0; i < 20; i++) {
-        out->rot[i] = M3::FromWorld(game::WorldMatrix(frames[i]));
-        out->org[i] = Origin(frames[i]);
-    }
+    ReadPose(out);
     return true;
 }
 
@@ -261,8 +295,13 @@ static const int kBodyPoints[Ragdoll::BCOUNT][2] = {
 
 // Gives every body the motion the animation had: linear velocity from the move of its capsule centre and
 // angular velocity from the turn of its axis, between an earlier pose and the start pose.
-void Ragdoll::SetMotionFrom(const V3 *prevWorld, float dt) {
-    if (!prevWorld || dt <= 1e-4f) return;
+void Ragdoll::SetMotionFrom(const V3 *prevWorld, float dt, const V3 *rootVelocity) {
+    if (!prevWorld || dt <= 1e-4f) {
+        if (rootVelocity) for (Body &b : body) b.v = *rootVelocity;
+        return;
+    }
+    V3 momentum{};
+    float mass = 0;
     for (int b = 0; b < BCOUNT; b++) {
         int i = kBodyPoints[b][0], j = kBodyPoints[b][1];
         V3 c0 = (prevWorld[i] + prevWorld[j]) * 0.5f, c1 = (initPos[i] + initPos[j]) * 0.5f;
@@ -273,20 +312,25 @@ void Ragdoll::SetMotionFrom(const V3 *prevWorld, float dt) {
         V3 w = s > 1e-6f ? axis * (std::atan2(s, c) / s / dt) : V3{0, 0, 0};
         // A pose snap (animation cut, teleport) must not fling the body.
         float vl = Len(v), wl = Len(w);
-        if (vl > 12.0f) v = v * (12.0f / vl);
+        if (!rootVelocity && vl > 12.0f) v = v * (12.0f / vl);
         if (wl > 20.0f) w = w * (20.0f / wl);
         body[b].v = v;
         body[b].w = w;
+        if (rootVelocity) {
+            momentum += v * SegmentMass[b];
+            mass += SegmentMass[b];
+        }
     }
-}
-
-bool Ragdoll::Snapshot(void *model, const V3 *dir, PoseSnap *out, std::string *err) {
-    if (!Capture(model, dir, out->pts, &out->fwd, out->frames, err)) return false;
-    for (int i = 0; i < 20; i++) {
-        out->rot[i] = M3::FromWorld(game::WorldMatrix(out->frames[i]));
-        out->org[i] = Origin(out->frames[i]);
+    if (!rootVelocity) return;
+    // Animation can swing the limbs without giving the whole body a push. Only native locomotion supplies
+    // centre-of-mass velocity. Scale relative speeds together to keep their net momentum at zero.
+    const V3 mean = momentum * (1.0f / mass);
+    float fastest = 12.0f;
+    for (Body &b : body) {
+        b.v -= mean;
+        fastest = std::max(fastest, Len(b.v));
     }
-    return true;
+    for (Body &b : body) b.v = *rootVelocity + b.v * (12.0f / fastest);
 }
 
 V3 Ragdoll::ClosestToLine(const V3 &a, const V3 &b) const {
@@ -314,7 +358,8 @@ bool Ragdoll::Init(void *key, void *mdl, const V3 *dir, std::string *err, const 
     pelvisFrame = f[PEL];
     rootFrame = f[ROOT];
     for (int i = 0; i < 20; i++) frames[i] = f[i];
-    Setup(ps.pts, ps.fwd);
+    if (!ReferencePose(model, &reference, err)) return false;
+    Setup(ps.pts, ps.fwd, ps.rot);
     SetMotionFrom(prevPts, prevDt);
 
     // Bone links, parent-first. Clavicles ride on the chest, hands on the forearms. The binding of each bone
@@ -345,16 +390,47 @@ V3 Ragdoll::AxisPoint(int b, float t) const {
 
 V3 Ragdoll::Center() const { return body[B_CHEST].x + origin; }
 
-void Ragdoll::Impulse(const V3 &dir, const V3 &at, float speed, float radius, float wholeBody) {
-    V3 d = Norm(dir);
-    for (auto &bd : body) {
-        float w = wholeBody;
-        float r = Len(bd.x + origin - at);
-        if (radius > 0 && r < radius) w += 1.0f - r / radius;
-        bd.v += d * (speed * w);
+int Ragdoll::BulletBody(int shape) {
+    if (shape >= 0 && shape < BCOUNT) return shape;
+    if (shape == BCOUNT) return B_RFARM;
+    if (shape == BCOUNT + 1) return B_LFARM;
+    return -1;
+}
+
+bool Ragdoll::HandShape(int forearm, V3 *elbow, V3 *wrist, V3 *tip) const {
+    int hand = forearm == B_LFARM ? 17 : 13;
+    V3 axis = reference.rot[hand].T().Apply(Norm(reference.org[hand] - reference.org[hand - 1]));
+    for (const BoneLink &link : bones) {
+        if (link.frame != frames[hand]) continue;
+        *elbow = body[forearm].a;
+        *wrist = link.originLocal;
+        *tip = *wrist + link.offset.Apply(axis) * 0.10f;
+        return true;
     }
-    sleeping = false; sleepTimer = 0;
-    velocityEdited = true;
+    return false;
+}
+
+void Ragdoll::BulletCapsules(MmlCapsule *caps) const {
+    auto capsule = [&](int i, const V3 &a, const V3 &b, float r) {
+        caps[i] = {{a.x, a.y, a.z}, {b.x, b.y, b.z}, r};
+    };
+    for (int b = 0; b < BCOUNT; b++) {
+        V3 a, e;
+        float r;
+        BodyCapsule(b, &a, &e, &r);
+        capsule(b, a, e, r);
+    }
+    // The skinned wrist can bend away from the forearm. Use its actual bound frame for the palm rather than
+    // extending the sleeve in a straight line. The palm and forearm share the same rigid body.
+    for (int side = 0; side < 2; side++) {
+        int fore = side ? B_LFARM : B_RFARM;
+        const Body &bd = body[fore];
+        V3 elbow, wrist, tip;
+        if (!HandShape(fore, &elbow, &wrist, &tip)) continue;
+        auto world = [&](const V3 &p) { return origin + bd.x + Rotate(bd.q, p); };
+        capsule(fore, world(elbow), world(wrist), bd.radius);
+        capsule(BCOUNT + side, world(wrist), world(tip), PalmRadius);
+    }
 }
 
 bool Ragdoll::Blast(const V3 &centre, float radius, float speed, float lift) {
@@ -375,13 +451,14 @@ bool Ragdoll::Blast(const V3 &centre, float radius, float speed, float lift) {
     return true;
 }
 
-void Ragdoll::Kick(const V3 &J, const V3 &at, float whole, float radius, float maxPart) {
+float Ragdoll::Kick(const V3 &J, const V3 &at, float whole, float radius, float maxPart, int part) {
     float M = 0;
     for (const Body &bd : body) if (bd.invMass > 0) M += 1.0f / bd.invMass;
-    if (M <= 0) return;
+    if (M <= 0) return 0;
     float w[BCOUNT] = {}, wsum = 0, nearestD = 1e30f;
     int nearest = 0;
-    for (int b = 0; b < BCOUNT; b++) {
+    if (part >= 0 && part < BCOUNT) { w[part] = 1; wsum = 1; }
+    for (int b = 0; part < 0 && b < BCOUNT; b++) {
         if (body[b].invMass <= 0) continue;
         V3 a, e;
         float r;
@@ -400,6 +477,7 @@ void Ragdoll::Kick(const V3 &J, const V3 &at, float whole, float radius, float m
     }
     V3 local = J * (1.0f - whole), spill{0, 0, 0};
     const float maxSpin = 2.0f * maxPart;
+    float partDv = 0;
     for (int b = 0; b < BCOUNT; b++) {
         if (w[b] <= 0) continue;
         Body &bd = body[b];
@@ -414,6 +492,7 @@ void Ragdoll::Kick(const V3 &J, const V3 &at, float whole, float radius, float m
             Jb = dvKept * (1.0f / bd.invMass);
         }
         V3 dv = Jb * bd.invMass;
+        if (b == part) partDv = Len(dv);
         kickV[b] = kickV[b] + dv;
         bd.v = bd.v + dv;
         // the spin of an off-centre blow, held the same way (a film's blow on a 2 kg forearm would spin it at
@@ -428,6 +507,7 @@ void Ragdoll::Kick(const V3 &J, const V3 &at, float whole, float radius, float m
     for (Body &bd : body) bd.v = bd.v + dvAll;
     sleeping = false; sleepTimer = 0;
     velocityEdited = true;
+    return partDv;
 }
 
 

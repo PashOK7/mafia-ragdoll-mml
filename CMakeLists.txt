@@ -55,3 +55,17 @@ target_link_options(ragdoll PRIVATE /MAP:${CMAKE_BINARY_DIR}/ragdoll.map)   # (a
 add_custom_command(TARGET ragdoll POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/mod/mod.json ${dest}/mod.json
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/mod/config.json ${dest}/config.json)
+
+# Small geometry regression; opt-in so it adds no work to normal mod builds.
+add_executable(ragdoll_trunk_axes EXCLUDE_FROM_ALL tests/trunk_axes.cpp)
+target_include_directories(ragdoll_trunk_axes PRIVATE ${CMAKE_SOURCE_DIR}/src ${MML_ROOT}/sdk/include/mml/game)
+
+add_executable(ragdoll_pedestrian_motion EXCLUDE_FROM_ALL tests/pedestrian_motion.cpp src/ragdoll.cpp src/collision.cpp)
+target_include_directories(ragdoll_pedestrian_motion PRIVATE ${CMAKE_SOURCE_DIR}/src ${MML_ROOT}/sdk/include ${MML_ROOT}/sdk/include/mml/game)
+
+add_executable(ragdoll_pedestrian_position EXCLUDE_FROM_ALL tests/pedestrian_position.cpp)
+target_include_directories(ragdoll_pedestrian_position PRIVATE ${CMAKE_SOURCE_DIR}/src ${MML_ROOT}/sdk/include/mml/game)
+
+add_executable(ragdoll_world_step EXCLUDE_FROM_ALL tests/world_step.cpp src/scenery.cpp src/jolt_world.cpp)
+target_include_directories(ragdoll_world_step PRIVATE ${CMAKE_SOURCE_DIR}/src ${MML_ROOT}/sdk/include ${MML_ROOT}/sdk/include/mml/game)
+target_link_libraries(ragdoll_world_step PRIVATE Jolt)

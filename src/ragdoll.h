@@ -4,6 +4,8 @@
 #include "mathx.h"
 #include "collision.h"
 
+struct MmlCapsule;
+
 // A ragdoll's binding to the game: 15 body parts made from the human's skeleton (their masses, inertia and
 // capsules), each driving one joint frame of the Mafia human skeleton. The parts move in Jolt (jolt_ragdoll: the
 // joints, the muscles, the contacts); here their state (pose, velocities), the blows that change it, and the bones
@@ -27,6 +29,9 @@ public:
         B_RTHIGH, B_RSHIN, B_RFOOT, B_LTHIGH, B_LSHIN, B_LFOOT,
         BCOUNT
     };
+    // The same adult segment masses for dynamic bodies and living animated contact proxies (78 kg total).
+    inline static constexpr float SegmentMass[BCOUNT] = {
+        11.5f, 7.5f, 8.0f, 11.0f, 6.0f, 2.2f, 2.2f, 2.2f, 2.2f, 8.0f, 3.5f, 1.1f, 8.0f, 3.5f, 1.1f};
 
     inline static unsigned serials = 0;
     unsigned serial = ++serials;   // unique per ragdoll (a new one may take a dropped one's address)
@@ -36,10 +41,12 @@ public:
     uint32_t keyVtable = 0;    // the actor's vtable when the ragdoll started (detects a reused address)
     bool puppet = false;       // started by command on a living human (no death)
     bool knockdown = false;    // a living human knocked over by a car: handed back to the game once it lies still
+    bool vehicleImpact = false; // car impacts use collision forces, with no animation-driven muscle target
+    void *impactVehicle = nullptr; // keep the striking vehicle discoverable until it leaves the body's area
     bool sleeping = false;     // at rest (Jolt's sleep)
     int restWrites = 0;        // the pose written at rest so far (core's AtRest: after two, the bones are left be)
     bool shapeAtRest = false;  // its capsules given to the loader's bullets while asleep (kept there: not again)
-    float sleepTimer = 0;
+    float sleepTimer = 0;      // time below the get-up motion threshold, including while the solver is awake
     float age = 0;
 
     // prevPts/prevDt: an earlier pose of the same human (world points) and the time since, so the ragdoll
@@ -53,9 +60,9 @@ public:
               const PoseSnap *start = nullptr);
     // Closest point of the body to a line (a bullet's path), world.
     V3 ClosestToLine(const V3 &a, const V3 &b) const;
-    static bool Capture(void *model, const V3 *dir, V3 *pts, V3 *fwd, void **frames20, std::string *err);
-    // The skeleton points from the 20 frames Capture found (joints, pelvis, root), helper points along `fwd`.
-    static void PointsFromFrames(void *const *frames20, const V3 &fwd, V3 *pts);
+    // Skeleton points and helper tips follow the complete bone frames; fwd remains an informational heading.
+    static void PointsFromPose(const M3 *rot20, const V3 *org20, V3 *pts);
+    PoseSnap reference{};   // the model file's rest skeleton, independent of the animation at death
     // The pose the model's frames hold now (the 20 frames found at Init), facing the way the physical pelvis does.
     bool SnapshotNow(PoseSnap *out) const;
     // The pose the bodies hold now, as frames 0..18 of `frames` (PoseSnap's order; 18 the pelvis): each one's world
@@ -68,15 +75,15 @@ public:
     static void PlaceFrame(void *frame, const M3 &rot, const V3 &pos);
     void *const *Frames() const { return frames; }   // the skeleton's 20 frames (PoseSnap's order)
     void *Model() const { return model; }
+    const V3 *InitialPoints() const { return initPos; }
     // The pose the game's animation gave the model after our last write (render hook), for the muscles: `anim`
     // holds it, `animSerial` counts the poses taken.
     PoseSnap anim{};
     unsigned animSerial = 0;
-    // Set by Impulse (and anything else that edits the parts' velocities): the physics takes them over.
+    // Set when bullets or blasts edit the parts' velocities: the physics takes them over.
     bool velocityEdited = false;
-    void SetMotionFrom(const V3 *prevWorld, float dt);
-    void Setup(const V3 *pts, const V3 &fwd);   // the parts only (also used by the offline Jolt bench)
-    void Impulse(const V3 &dir, const V3 &at, float speed, float radius, float wholeBody);
+    void SetMotionFrom(const V3 *prevWorld, float dt, const V3 *rootVelocity = nullptr);
+    void Setup(const V3 *pts, const V3 &fwd, const M3 *rot20 = nullptr);   // parts and full skeletal orientation
     // A blast at `centre`: each part thrown away from it (and up by `lift` of its speed), `speed` m/s at the centre
     // falling off to 0 at `radius` as (1 - d/radius)^1.5; the nearer side more, so the body turns. False: out of reach.
     bool Blast(const V3 &centre, float radius, float speed, float lift);
@@ -86,7 +93,14 @@ public:
     // most `maxPart` m/s and spin it by at most 2 * maxPart rad/s: the rest of its share goes to the whole body, so
     // the body takes all of J. (Nine pellets on one forearm, each held alone, once spun it past its joint's limits
     // in one step: the joint was caught on the wrong side and stayed twisted.)
-    void Kick(const V3 &J, const V3 &at, float whole, float radius, float maxPart);
+    // When the bullet ray already selected a part, its local share goes to that part alone.
+    float Kick(const V3 &J, const V3 &at, float whole, float radius, float maxPart, int part = -1);
+    static constexpr int BulletShapeCount() { return BCOUNT + 2; }
+    static int BulletBody(int shape);
+    void BulletCapsules(MmlCapsule *caps) const;
+    // Elbow, wrist and palm tip in the forearm's rigid-body space, shared by bullet and ground contact.
+    bool HandShape(int forearm, V3 *elbow, V3 *wrist, V3 *tip) const;
+    static constexpr float PalmRadius = 0.045f;
     void Apply();              // write bone transforms into the frames
     std::string Describe() const;
     std::string Diagnose() const;
@@ -142,6 +156,7 @@ private:
     V3 origin{0, 0, 0};   // world position of the local simulation frame
     V3 initPos[COUNT];
     V3 initFwd{0, 0, 1};
+    M3 initRot[20];
 
     static V3 Rotate(const Quat &q, const V3 &v);
     static V3 InvRotate(const Quat &q, const V3 &v);

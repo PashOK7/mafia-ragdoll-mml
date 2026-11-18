@@ -10,6 +10,8 @@ namespace vehicles {
 // The vehicles (cars, trams) within [lo, hi] (world) as movers: a hull of their own model's parts (a car's mass from
 // its C_car: the rigid-body world makes it a body of that mass; a tram's exact mesh, kinematic).
 void GatherVehicles(const V3 &lo, const V3 &hi, std::vector<smoke::Mover> &out);
+// A known striking vehicle, even before discovery's next refresh. Uses the same native model geometry.
+bool MoverOf(void *car, smoke::Mover *out);
 // The vehicles within `radius` of a point (actors of type 4 or 8), from the loader's world_near.
 void ListVehicles(const V3 &at, float radius, std::vector<void *> &out);
 void Clear();                 // the mission's world goes: every body read so far

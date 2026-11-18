@@ -1,4 +1,4 @@
-// The static world the bodies meet, from the visual models the game draws (not from the game's 2002 collision boxes):
+// The static world the bodies meet, from the visual models the game draws and the native collision slabs:
 // the loader's scene_focus / scene_pieces (its walk of the scene, its scans every 0.25 s, the meshes read from LS3D's
 // own buffers), turned into pieces the rigid-body world cooks once a shape. mafia-ragdoll's scenery.h, the part
 // jolt_world uses.

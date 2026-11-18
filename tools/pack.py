@@ -1,38 +1,42 @@
-"""pack.py: the players' archive of the mod.
-
-    python tools/pack.py
-
-From the build's output (build/x86/out/mml/mods/ragdoll/: ragdoll.dll, mod.json, config.json; no PDB, no linker
-files) into build/dist/mafia-ragdoll-<version>-<date>.zip, laid out as the game's folder wants it
-(mml/mods/ragdoll/...), with the README beside. The version is mod.json's. Build the Release preset first.
-"""
-import datetime
+"""Build both ragdoll player downloads. --mod-only does not require built MML binaries."""
+import argparse
+import importlib.util
 import json
 import os
-import sys
-import zipfile
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, 'build', 'x86', 'out', 'mml', 'mods', 'ragdoll')
-FILES = ('ragdoll.dll', 'mod.json', 'config.json')
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / 'build/x86/out/mml/mods/ragdoll'
+# Pin the baseline at packaging time. The installed mod negotiates services through the SDK.
+TESTED_BASE = 'd70fff2e2392d9551e1a6e555d937155aec3668c83a262e9374c16e4167b56d5'
 
 
 def main():
-    missing = [f for f in FILES if not os.path.exists(os.path.join(OUT, f))]
-    if missing:
-        print('not built: %s (cmake --build --preset x86-release)' % ', '.join(missing))
-        return 1
-    version = json.load(open(os.path.join(OUT, 'mod.json'), encoding='utf-8'))['version']
-    dist = os.path.join(ROOT, 'build', 'dist')
-    os.makedirs(dist, exist_ok=True)
-    name = os.path.join(dist, 'mafia-ragdoll-%s-%s.zip' % (version, datetime.date.today().isoformat()))
-    with zipfile.ZipFile(name, 'w', zipfile.ZIP_DEFLATED) as z:
-        for f in FILES:
-            z.write(os.path.join(OUT, f), 'mml/mods/ragdoll/' + f)
-        z.write(os.path.join(ROOT, 'README.md'), 'mml/mods/ragdoll/README.md')
-    print(name, '%.1f MB' % (os.path.getsize(name) / 1e6))
-    return 0
+    parser = argparse.ArgumentParser(description=__doc__)
+    choices = parser.add_mutually_exclusive_group()
+    choices.add_argument('--mod-only', action='store_true')
+    choices.add_argument('--with-loader', action='store_true', help='build only the clean-install download')
+    parser.add_argument('--loader-root', type=Path, default=os.environ.get('MML_ROOT', ROOT.parent / 'MafiaModLoader'))
+    args = parser.parse_args()
+    loader = args.loader_root.resolve()
+    spec = importlib.util.spec_from_file_location('player_release', loader / 'tools/player_release.py')
+    release = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(release)
+
+    version = json.loads((OUT / 'mod.json').read_text(encoding='utf-8'))['version']
+    name = f'mafia-ragdoll-{version}'
+    dist = ROOT / 'build/dist' / f'{name}-player'
+    prefix = 'mml/mods/ragdoll/'
+    files = {prefix + n: OUT / n for n in ('ragdoll.dll', 'mod.json', 'config.json')}
+    files[prefix + 'README.md'] = ROOT / 'README.md'
+    files[prefix + 'licenses/Jolt.txt'] = loader / 'third_party/_deps/jolt/LICENSE'
+    if not args.with_loader:
+        print(release.write_zip(dist / f'{name}-mod-only.zip', files))
+    if not args.mod_only:
+        path, base = release.base_archive(loader, expected_content=TESTED_BASE)
+        bundle = {**base, **files, 'INSTALL-RAGDOLL.txt': ROOT / 'docs/INSTALL.txt'}
+        print(release.write_zip(dist / f'{name}-with-{path.name}', bundle))
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    main()

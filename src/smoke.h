@@ -32,11 +32,14 @@ struct Mover {
     // HULL: the same points split by model part: a compound of one convex hull per part (a single hull of a whole
     // car fills the space under its bumpers)
     const std::vector<std::vector<V3>> *hullParts = nullptr;
+    const std::vector<uint64_t> *hullRevisions = nullptr; // identity of each unchanged cooked hull
     unsigned shapeVersion = 0;   // HULL: changes when the points change (the shape is cooked again)
     bool hullIsTriangles = false;   // HULL: `hull` is a triangle list (three points per triangle)
     const void *owner = nullptr;    // the human a body-part capsule belongs to
+    float partMass = 0;             // CAPSULE: that anatomical segment's mass, not the whole person's
     float mass = 0;                 // HULL of a car: its mass (kg): a body of that mass meeting the bodies both ways
     uint64_t wheelParts = 0;        // HULL of a car: which of hullParts are its wheels (bit i: part i)
+    const std::vector<uint32_t> *nativeWheels = nullptr; // per hull part: native wheel index + 1, 0 for other parts
     // HULL of a vehicle with no body of its own mass (a tram): its exact shape, `hull`'s triangles from both sides
     bool hullAsMesh = false;
 };

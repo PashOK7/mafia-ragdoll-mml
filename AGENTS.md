@@ -1,7 +1,7 @@
 # mafia-ragdoll-mml: guide for AI agents
 
 Physics ragdolls for **Mafia: The City of Lost Heaven** (2002; builds 1.2 and 1.0) as a **MafiaModLoader mod**
-(`ragdoll`). A private repository. Its reference is mafia-ragdoll (`../mafia-ragdoll`, read only: a host of its own,
+(`ragdoll`). Its reference is mafia-ragdoll (`../mafia-ragdoll`, read only: a host of its own,
 its PhysX smoke and water are not a part of this); its physics (`ragdoll`, `jolt_ragdoll`, `jolt_world`, `knock`,
 `collision`, `tunables`) is ported as it was, its binding to the game is MafiaModLoader's services.
 

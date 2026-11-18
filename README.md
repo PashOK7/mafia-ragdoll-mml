@@ -7,6 +7,12 @@ people trip over a body thrown at them.
 
 The physics is [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 5.6, the one MafiaModLoader pins.
 
+## Download
+
+For a clean installation, use the bundle with MafiaModLoader. If the game already
+has a compatible loader, use the smaller mod-only archive. Extract either ZIP once
+into the folder containing Game.exe. [Download the latest release](https://github.com/PashOK7/mafia-ragdoll-mml/releases/latest).
+
 ## What it does
 
 - **Death.** Whoever dies near the player (a person of a mission, a traffic pedestrian, the player) becomes a ragdoll
@@ -14,13 +20,14 @@ The physics is [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 5.6, the on
   bullet where it struck, a car at its speed, an explosion. The game's death animation, while it plays, is the
   muscles' target for a moment; then the body goes limp.
 - **Explosions.** A grenade, a car blowing up or a mission's explosion throws every body within its reach away from
-  it, each part by its own distance, so a body turns over as it flies; the living near it are knocked down.
-- **Knock-downs.** A car (at about 7 m/s or more) knocks a living man over as a ragdoll; once he lies still he gets
+  it, each part by its own distance. Tommy can also ragdoll when the game gives him a heavy blast fall.
+- **Knock-downs.** The game signals a vehicle hit on a mission character or the player. The mod also checks traffic
+  pedestrians against moving cars when the native sweep misses. After a hard hit the victim falls and gets
   up with the game's own get-up, from the back or the front, blended from the pose his body was left in. A body
   thrown at someone knocks him over the same way. Nobody alive in a car's seat is knocked down: the game keeps him
   there.
 - **Bodies in the world.** The street, the buildings, the kerbs and the cars around are in the physics (the loader
-  gives the scene's meshes and the cars' models); a body never falls through a street that is not loaded yet (it
+  gives the scene's meshes and the cars' models, including changes to door positions); a body never falls through a street that is not loaded yet (it
   waits for it). Bullets that hit a body lying on the ground push it and are taken from the game's own test, so a
   shot body moves where it was struck. Cars driven over or into bodies are slowed by them.
 - **In cars.** Someone killed in his seat slumps there and stays in the cabin while the car drives, turns, brakes or
@@ -33,31 +40,44 @@ The physics is [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 5.6, the on
 
 ## Install
 
-1. Install MafiaModLoader (its release archive) into the game's folder.
-2. Unpack this mod's archive into the game's folder (it holds `mml\mods\ragdoll\`).
-3. Start the game. The mod is on by default; its settings are in the game's **Options > Mods > Ragdolls**.
+For a clean game, extract **with-MafiaModLoader** into the folder containing Game.exe
+and start Mafia. This installs both the ragdoll and MML 2026.11.18 (host 71d2377a).
+
+If a compatible loader is already installed, extract **mod-only** into the same game
+folder. This updates only `mml/mods/ragdoll/` and preserves the installed loader.
+The mod is on by default. Its settings are in **Options > Mods > Ragdolls**.
+Other mods can be installed alongside it in `mml/mods/`.
+
+Getting up on a tram or elevated train uses the walking floor of the carriage under Tommy's feet.
+In the first-person passenger view his model is hidden. If he falls through a doorway, the game
+returns him to world coordinates. A fall over open air keeps its downward speed.
 
 ## Settings (Options > Mods > Ragdolls)
 
 | Tab | Setting | What |
 |---|---|---|
-| Bodies | Ragdolls | the whole mod on or off |
+| Bodies | Ragdolls | off releases living actors and stops the physics world. On resumes tracking and adopts nearby dead bodies |
 | | Cars knock down | cars knock living people over as ragdolls (the player too) |
 | | Cars feel bodies | cars are slowed by the bodies they push |
 | | Bullets push bodies | bullets strike the bodies on the ground |
-| | Blasts knock down | an explosion knocks the living near it over as ragdolls |
+| | Blasts knock Tommy down | a native heavy blast fall uses ragdoll physics for the player |
 | | Watched within | how far from the player people's poses are kept (a death starts from them) |
 | | Bodies drawn | the bodies' capsules drawn over the world (to see what the physics sees) |
-| Forces | Car's push | the share of a car's speed given to a body where it strikes it |
-| | Bullet's push, Whole body share, Spread of a blow, Fastest part | how hard a bullet pushes, how much of it moves the whole body, how far around the hit it spreads, the fastest it makes one part |
+| Forces | Bullet's push, Whole body share, Spread of a blow, Fastest part | how hard a bullet pushes, how much of it moves the whole body, how far around the hit it spreads, the fastest it makes one part |
 | | Strongest shot | the most momentum one hit gives a body (a script's huge damage stays a shot) |
 | | Last shots kept | a living man's last bullets given to his body when he dies within this time |
 | | Blast's push | how hard an explosion throws the bodies within its reach |
 | Camera | Camera on the body | the ragdoll camera on or off |
 | | Mouse turn, Nearest, Furthest, Softness, Back to the game's, Starts further by | how it turns, how near and far the wheel brings it, how softly it follows, how long it blends back, where it starts |
 
-The same keys are in `mod\ragdoll\config.json` (the defaults); what is changed in the game is kept in
+The same keys are in `mod/config.json` (the defaults); what is changed in the game is kept in
 `mml\data\ragdoll\config.json`.
+
+## To do
+
+- Add ragdoll physics for dogs.
+- Give the tram driver and passengers ragdoll reactions.
+- Let Tommy pull a dead driver out of the car when stealing it.
 
 ## Cost
 
@@ -75,7 +95,8 @@ cmake --build --preset x86-release
 
 The mod is in `build\x86\out\mml\mods\ragdoll\`. `python tools\deploy.py` copies it into the labs named in
 MafiaModLoader's `mml.config.json` and reloads it in a running game; `python tools\pack.py` makes the players'
-archive (`build\dist\mafia-ragdoll-<version>-<date>.zip`). Agents: read `AGENTS.md`.
+downloads in `build/dist/mafia-ragdoll-<version>-player/`. The default builds both.
+Use `--mod-only` or `--with-loader` to select one. Agents: read `AGENTS.md`.
 
 ## Credits
 

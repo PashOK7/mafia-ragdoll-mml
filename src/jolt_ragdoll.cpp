@@ -1,6 +1,7 @@
 // Ragdolls on Jolt Physics (see jolt_ragdoll.h).
 #include "fmt.h"
 #include "jolt_ragdoll.h"
+#include "anatomy.h"
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Ragdoll/Ragdoll.h>
@@ -12,6 +13,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
@@ -23,6 +25,7 @@
 #include <cstring>
 #include <unordered_map>
 #include "jolt_world.h"
+#include "vehicles.h"
 
 // The Ragdoll's insides, for this file only (Ragdoll names it a friend).
 struct JoltBridge {
@@ -32,6 +35,7 @@ struct JoltBridge {
     static const V3 *Points(const Ragdoll *r) { return r->initPos; }
     static V3 Facing(const Ragdoll *r) { return r->initFwd; }
     static V3 Origin(const Ragdoll *r) { return r->origin; }
+    static const M3 *Rotations(const Ragdoll *r) { return r->initRot; }
     static V3 Rot(const Ragdoll::Quat &q, const V3 &v) { return Ragdoll::Rotate(q, v); }
     static V3 InvRot(const Ragdoll::Quat &q, const V3 &v) { return Ragdoll::InvRotate(q, v); }
 };
@@ -71,11 +75,11 @@ Tunable g_tune[kTunes] = {   // each row names its id: Init refuses a table out 
      "how a body floats (1: as a human body, the chest with air in it high, the limbs low; below 1 sinks; new ragdolls)"},
     {kWaterDrag, "waterdrag", 0.6f, 0, 3, 0, "Water", "how much the water slows a body and its limbs (new ragdolls)"},
     {kPushForce, "pushforce", 700, 0, 3000, 0, "Living people",
-     "N: the most a living person (Tommy or anyone) leans on a body with, steadily: about what his feet hold on the ground. "
+     "N: one living person's total effort across all contacts, including steps and overlap pushes: ground traction. "
      "0: as hard as the game moves him (infinite strength: the old way)"},
     {kPushMass, "pushmass", 20, 0, 100, 0, "Living people",
-     "kg behind each part of a living person when it strikes a body (a step, a kick): how hard his walking knocks bodies "
-     "about. 0: no impacts, the steady push only"},
+     "kg: upper bound on each anatomical segment's impact mass; actual masses match the ragdoll's segments. "
+     "0: no impacts, the steady push only"},
 };
 // How each part floats against its own weight: the chest holds the lungs' air, bone and muscle in the limbs sink.
 // By mass the body comes to 1.06: a human body with air in its lungs is a little lighter than water, so it floats
@@ -98,8 +102,8 @@ enum B {
 const int kParent[BODIES] = {-1, PELVIS, ABDOMEN, CHESTLOW, CHEST, CHEST, RUARM, CHEST, LUARM, PELVIS, RTHIGH, RSHIN, PELVIS, LTHIGH, LSHIN};
 const char *const kName[BODIES] = {"pelvis", "abdomen", "chestlow", "chest", "head", "r_upperarm", "r_forearm", "l_upperarm",
                                    "l_forearm", "r_thigh", "r_shin", "r_foot", "l_thigh", "l_shin", "l_foot"};
-// An adult's segment masses (kg, after Dempster and Winter; 78 kg in all). The forearms carry the hands.
-const float kMass[BODIES] = {11.5f, 7.5f, 8.0f, 11.0f, 6.0f, 2.2f, 2.2f, 2.2f, 2.2f, 8.0f, 3.5f, 1.1f, 8.0f, 3.5f, 1.1f};
+// Shared with the living contact proxies; forearms include the hands.
+constexpr auto &kMass = Ragdoll::SegmentMass;
 
 // One joint's anatomy. Ball: the swing around a neutral direction, `flex` towards the joint's forward axis and
 // `side` across it, and the twist about the bone; hinge: its range from straight. `friction` (N m) resists any
@@ -116,6 +120,7 @@ struct Entry {
     JPH::Ref<JPH::Ragdoll> ragdoll;
     bool hinge[BODIES] = {};
     V3 hingeAxisParent[BODIES] = {};      // hinge: its axis in the parent body's frame
+    V3 hingeNormalParent[BODIES] = {}, hingeNormalChild[BODIES] = {};
     JPH::Quat target[BODIES];             // ball: child rotation relative to the parent, the muscles' target
     float targetAngle[BODIES] = {};       // hinge: the target angle
     float muscle[BODIES] = {};            // N m at full strength
@@ -145,37 +150,20 @@ V3 Tilt(const V3 &c, const V3 &towards, float deg) {
 
 // The swing-twist joint between `parent` and `child` at `anchor` (Jolt space). `c`: the neutral direction of the
 // child's bone (world), `f`: the joint's forward axis (world, the direction the child's own z axis has in the
-// neutral pose). Limits that do not hold the start pose are widened to it, so the body does not jump at the start.
-JPH::Ref<JPH::SwingTwistConstraintSettings> Ball(const Ragdoll *r, int parent, int child, const V3 &anchor, V3 c, V3 f,
+// neutral pose). Calibrate in the file's rest skeleton, then carry each joint frame with its own posed body.
+// A death animation never redefines the anatomy or permanently widens its limits.
+JPH::Ref<JPH::SwingTwistConstraintSettings> Ball(const Ragdoll *r, const Ragdoll *reference, int parent, int child, const V3 &anchor, V3 c, V3 f,
                                                  const Anatomy &a) {
-    (void)parent;
+    const auto &rp = JoltBridge::B(reference,parent);
+    const auto &pb = JoltBridge::B(r,parent);
     const JoltBridge::Body &cb = JoltBridge::B(r, child);
     V3 bone = Norm(JoltBridge::Rot(cb.q, {1, 0, 0}));
-    V3 z2 = Orth(JoltBridge::Rot(cb.q, {0, 0, 1}), bone);
+    V3 z2 = JoltBridge::Rot(cb.q, {0, 0, 1});
     c = Norm(c);
     f = Orth(f, c);
-    V3 n = Cross(c, f);
     float flex = a.flex * kDeg, side = a.side * kDeg, lo = a.twistLo * kDeg, hi = a.twistHi * kDeg;
-    // The start swing in the joint's frame: towards f is limited by the normal half angle, towards n by the plane one.
-    float bx = Dot(bone, c), by = Dot(bone, f), bz = Dot(bone, n);
-    float swing = std::acos(std::max(-1.0f, std::min(1.0f, bx))), sl = std::sqrt(by * by + bz * bz);
-    if (sl > 1e-5f) {
-        float az = swing * by / sl, ay = swing * bz / sl;
-        float k = (az * az) / (flex * flex) + (ay * ay) / (side * side);
-        if (k > 1.0f) {
-            float g = std::sqrt(k) * 1.05f;
-            flex = std::min(flex * g, 170 * kDeg);
-            side = std::min(side * g, 170 * kDeg);
-        }
-    }
-    // The start twist: the child's z against the joint's forward axis carried along by the swing.
-    JPH::Quat sw = JPH::Quat::sFromTo(J(c), J(bone));
-    V3 fs = F(sw * J(f));
-    float twist = std::atan2(Dot(Cross(fs, z2), bone), Dot(fs, z2));
-    lo = std::min(lo, twist - 3 * kDeg);
-    hi = std::max(hi, twist + 3 * kDeg);
-    lo = std::max(lo, -3.1f);
-    hi = std::min(hi, 3.1f);
+    c = JoltBridge::Rot(pb.q,JoltBridge::InvRot(rp.q,c));
+    f = JoltBridge::Rot(pb.q,JoltBridge::InvRot(rp.q,f));
 
     JPH::Ref<JPH::SwingTwistConstraintSettings> s = new JPH::SwingTwistConstraintSettings;
     s->mSpace = JPH::EConstraintSpace::WorldSpace;
@@ -194,24 +182,25 @@ JPH::Ref<JPH::SwingTwistConstraintSettings> Ball(const Ragdoll *r, int parent, i
 }
 
 // The hinge between `parent` and `child` at `anchor`: positive angles bend the child's bone about `axis` (world).
-JPH::Ref<JPH::HingeConstraintSettings> Hinge(const Ragdoll *r, int parent, int child, const V3 &anchor, const V3 &axis,
+JPH::Ref<JPH::HingeConstraintSettings> Hinge(const Ragdoll *r, const Ragdoll *reference, int parent, int child, const V3 &anchor, const V3 &axis,
                                              const Anatomy &a, float *startAngle) {
     const JoltBridge::Body &pb = JoltBridge::B(r, parent), &cb = JoltBridge::B(r, child);
+    const auto &rp = JoltBridge::B(reference,parent), &rc = JoltBridge::B(reference,child);
     V3 h = Norm(axis);
-    V3 n1 = Orth(JoltBridge::Rot(pb.q, {1, 0, 0}), h), n2 = Orth(JoltBridge::Rot(cb.q, {1, 0, 0}), h);
-    float phi = std::atan2(Dot(h, Cross(n1, n2)), Dot(n1, n2));
+    V3 n = Orth(JoltBridge::Rot(rp.q, {1, 0, 0}), h);
+    V3 h1=JoltBridge::Rot(pb.q,JoltBridge::InvRot(rp.q,h)), h2=JoltBridge::Rot(cb.q,JoltBridge::InvRot(rc.q,h));
+    V3 n1=JoltBridge::Rot(pb.q,JoltBridge::InvRot(rp.q,n)), n2=JoltBridge::Rot(cb.q,JoltBridge::InvRot(rc.q,n));
+    float phi = std::atan2(Dot(h1, Cross(n1, n2)), Dot(n1, n2));
     *startAngle = phi;
     JPH::Ref<JPH::HingeConstraintSettings> s = new JPH::HingeConstraintSettings;
     s->mSpace = JPH::EConstraintSpace::WorldSpace;
     s->mPoint1 = s->mPoint2 = J(anchor);
-    s->mHingeAxis1 = s->mHingeAxis2 = J(h);
+    s->mHingeAxis1 = J(h1); s->mHingeAxis2 = J(h2);
     // The normals are the two bones: Jolt's angle 0 is where they meet, so the angle is the bend from straight.
     s->mNormalAxis1 = J(n1);
     s->mNormalAxis2 = J(n2);
-    s->mLimitsMin = std::max(-3.1f, std::min(a.flex * kDeg, phi - 2 * kDeg));
-    s->mLimitsMax = std::min(3.1f, std::max(a.side * kDeg, phi + 2 * kDeg));
-    s->mLimitsMin = std::min(s->mLimitsMin, 0.0f);
-    s->mLimitsMax = std::max(s->mLimitsMax, 0.0f);
+    s->mLimitsMin = a.flex * kDeg;
+    s->mLimitsMax = a.side * kDeg;
     s->mMaxFrictionTorque = a.friction * T(kJointFriction);
     s->mMotorSettings = JPH::MotorSettings(JPH::ESpringMode::FrequencyAndDamping, T(kMuscleHz), 1.0f);
     return s;
@@ -239,7 +228,19 @@ JPH::RefConst<JPH::Shape> ShapeOf(const Ragdoll *r, int b, const V3 &up) {
     case CHEST: return box({0.5f * L + 0.04f, 0.175f, 0.12f}, {0, 0, 0}, 0.05f);
     case HEAD: return new JPH::RotatedTranslatedShape(JPH::Vec3(0.1f * L, 0, 0.02f), JPH::Quat::sIdentity(), new JPH::SphereShape(0.10f));
     case RUARM: case LUARM: return capsule(0.05f);
-    case RFARM: case LFARM: return capsule(0.042f);
+    case RFARM: case LFARM: {
+        V3 elbow, wrist, tip;
+        if (!r->HandShape(b, &elbow, &wrist, &tip)) return capsule(0.042f);
+        JPH::StaticCompoundShapeSettings compound;
+        auto addCapsule = [&](const V3 &a, const V3 &e, float radius) {
+            JPH::Quat axis = JPH::Quat::sFromTo(JPH::Vec3::sAxisY(), J(Norm(e - a, {0, 1, 0})));
+            compound.AddShape(J((a + e) * 0.5f), axis, new JPH::CapsuleShape(std::max(0.01f, Len(e - a) * 0.5f), radius));
+        };
+        addCapsule(elbow, wrist, bd.radius);
+        addCapsule(wrist, tip, Ragdoll::PalmRadius);
+        auto result = compound.Create();
+        return result.IsValid() ? result.Get() : capsule(0.042f);
+    }
     case RTHIGH: case LTHIGH: return capsule(0.075f);
     case RSHIN: case LSHIN: return capsule(0.055f);
     case RFOOT: case LFOOT: return box({0.5f * L + 0.02f, 0.045f, 0.035f}, {0, 0, -0.02f}, 0.02f);
@@ -253,7 +254,7 @@ void TargetsFrom(const Ragdoll &pose, Entry &e) {
         const JoltBridge::Body &pb = JoltBridge::B(&pose, kParent[b]), &cb = JoltBridge::B(&pose, b);
         if (e.hinge[b]) {
             V3 h = Norm(JoltBridge::Rot(pb.q, e.hingeAxisParent[b]));
-            V3 n1 = Orth(JoltBridge::Rot(pb.q, {1, 0, 0}), h), n2 = Orth(JoltBridge::Rot(cb.q, {1, 0, 0}), h);
+            V3 n1 = JoltBridge::Rot(pb.q,e.hingeNormalParent[b]), n2 = JoltBridge::Rot(cb.q,e.hingeNormalChild[b]);
             e.targetAngle[b] = std::atan2(Dot(h, Cross(n1, n2)), Dot(n1, n2));
         } else {
             e.target[b] = (J(pb.q).Conjugated() * J(cb.q)).Normalized();
@@ -263,6 +264,7 @@ void TargetsFrom(const Ragdoll &pose, Entry &e) {
 
 // The muscles' strength now: from the moment of death (or of the impact) down to nothing.
 float Strength(const Ragdoll *r, float age) {
+    if (r->vehicleImpact) return 0;
     float s0 = r->knockdown ? T(kKnockStrength) : T(kDeathStrength), fade = r->knockdown ? T(kKnockFade) : T(kDeathFade);
     if (age >= fade || s0 <= 0) return 0;
     float u = 1.0f - age / fade;
@@ -291,7 +293,7 @@ void Muscles(Ragdoll *r, Entry &e, float dt) {
     if (!r->knockdown && T(kFollowAnim) > 0.5f && r->animSerial != e.animSeen) {
         e.animSeen = r->animSerial;
         Ragdoll pose;
-        pose.Setup(r->anim.pts, r->anim.fwd);
+        pose.Setup(r->anim.pts, r->anim.fwd, r->anim.rot);
         TargetsFrom(pose, e);
     }
     for (int b = 1; b < BODIES; b++) {
@@ -314,9 +316,10 @@ void Muscles(Ragdoll *r, Entry &e, float dt) {
     e.motorsOn = true;
 }
 
-void ReadBack(Ragdoll *r, Entry &e) {
+void ReadBack(Ragdoll *r, Entry &e, float dt) {
     JPH::BodyInterface &bi = jolt_world::Bodies();
     V3 shift = jolt_world::Origin() - JoltBridge::Origin(r);   // Jolt space -> the ragdoll's local frame
+    bool quiet = r->knockdown && !e.holding;
     for (int b = 0; b < BODIES; b++) {
         JPH::BodyID id = e.ragdoll->GetBodyID(b);
         JPH::RVec3 p;
@@ -327,8 +330,14 @@ void ReadBack(Ragdoll *r, Entry &e) {
         bd.q = F(q);
         bd.v = F(bi.GetLinearVelocity(id));
         bd.w = F(bi.GetAngularVelocity(id));
+        if (quiet) {
+            // Include rotation at a point 20 cm from the centre so a spinning limb still delays recovery.
+            constexpr float kMaxRecoverySpeed = 0.25f;
+            quiet = Dot(bd.v, bd.v) + 0.04f * Dot(bd.w, bd.w) <= kMaxRecoverySpeed * kMaxRecoverySpeed;
+        }
     }
-    r->sleeping = !e.ragdoll->IsActive(false);
+    r->sleeping = !e.holding && !e.ragdoll->IsActive(false);
+    r->sleepTimer = quiet ? r->sleepTimer + dt : 0;
 }
 
 bool g_inOrder;
@@ -453,11 +462,16 @@ void Clear() {
     g_entries.clear();
 }
 
-bool Add(Ragdoll *r, std::string *err, const void *seatedIn) {
+bool Add(Ragdoll *r, std::string *err, const void *seatedIn, const void *struckBy) {
     if (Has(r)) return true;
     Remove(r);
     V3 rorigin = JoltBridge::Origin(r);
     if (!jolt_world::Running() && !jolt_world::Start(g_log, rorigin, err)) return false;
+    if (struckBy) {
+        smoke::Mover vehicle;
+        if (!vehicles::MoverOf(const_cast<void *>(struckBy), &vehicle) || !jolt_world::EnsureVehicle(vehicle))
+            RLOG("ragdoll %p: striking vehicle %p has no native collision shape yet; no artificial impulse", r->actor, struckBy);
+    }
     jolt_world::SetCabinGoneListener(OnCabinGone);
     jolt_world::SetCabinJumpListener(OnCabinJump);
     V3 shift = rorigin - jolt_world::Origin();   // the ragdoll's local frame -> Jolt space
@@ -467,16 +481,16 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn) {
 
     // Anatomical frames, as Ragdoll::Setup makes them (x right, y up, z forward).
     using RP = Ragdoll;
-    V3 pr = Norm(P[RP::RHIP] - P[RP::LHIP], {1, 0, 0});
-    V3 pf = Norm(Cross(pr, P[RP::BACK1] - P[RP::PELVIS]), fwd);
-    if (Dot(pf, fwd) < 0) pf = -pf;
+    Ragdoll neutral;
+    neutral.Setup(r->reference.pts,r->reference.fwd,r->reference.rot);
+    const V3 *N = r->reference.pts;
+    TrunkAxes axes = TrunkAxes::From(N, r->reference.fwd);
+    V3 pr = axes.pelvisRight, pf = axes.pelvisFront;
     V3 pu = Cross(pf, pr);
-    V3 cr = Norm(P[RP::RCLAV] - P[RP::LCLAV], pr);
-    V3 cf = Norm(Cross(cr, P[RP::NECK] - P[RP::BACK3]), fwd);
-    if (Dot(cf, fwd) < 0) cf = -cf;
+    V3 cr = axes.chestRight, cf = axes.chestFront;
     V3 cu = Cross(cf, cr);
-    auto axisOf = [&](int b, const V3 &local) { return Norm(JoltBridge::Rot(JoltBridge::B(r, b).q, local)); };
-    auto dir = [&](int a, int b) { return Norm(P[b] - P[a]); };
+    auto axisOf = [&](int b, const V3 &local) { return Norm(JoltBridge::Rot(JoltBridge::B(&neutral, b).q, local)); };
+    auto dir = [&](int a, int b) { return Norm(N[b] - N[a]); };
 
     Entry e;
     e.serial = r->serial;
@@ -489,7 +503,7 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn) {
     for (int b = 0; b < BODIES; b++) {
         const JoltBridge::Body &bd = JoltBridge::B(r, b);
         JPH::RagdollSettings::Part &p = rs->mParts[b];
-        p.SetShape(ShapeOf(r, b, pu));
+        p.SetShape(ShapeOf(r, b, JoltBridge::Rotations(r)[18].r[1]));
         p.mPosition = J(shift + bd.x);
         p.mRotation = J(bd.q);
         p.mMotionType = JPH::EMotionType::Dynamic;
@@ -510,15 +524,19 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn) {
     }
     // The joints, child by child.
     auto ball = [&](int child, int point, const V3 &c, const V3 &f, const Anatomy &a) {
-        rs->mParts[child].mToParent = Ball(r, kParent[child], child, toJ(P[point]), c, f, a);
+        rs->mParts[child].mToParent = Ball(r, &neutral, kParent[child], child, toJ(P[point]), c, f, a);
         e.muscle[child] = a.muscle;
     };
     auto hinge = [&](int child, int point, V3 axis, const V3 &fallback, const Anatomy &a) {
         if (Len(axis) < 0.3f) axis = fallback;
         float start;
-        rs->mParts[child].mToParent = Hinge(r, kParent[child], child, toJ(P[point]), axis, a, &start);
+        rs->mParts[child].mToParent = Hinge(r, &neutral, kParent[child], child, toJ(P[point]), axis, a, &start);
         e.hinge[child] = true;
-        e.hingeAxisParent[child] = JoltBridge::InvRot(JoltBridge::B(r, kParent[child]).q, Norm(axis));
+        const auto &rp=JoltBridge::B(&neutral,kParent[child]), &rc=JoltBridge::B(&neutral,child);
+        V3 h=Norm(axis), n=Orth(JoltBridge::Rot(rp.q,{1,0,0}),h);
+        e.hingeAxisParent[child] = JoltBridge::InvRot(rp.q,h);
+        e.hingeNormalParent[child] = JoltBridge::InvRot(rp.q,n);
+        e.hingeNormalChild[child] = JoltBridge::InvRot(rc.q,n);
         e.muscle[child] = a.muscle;
     };
     // Spine and neck: straight on from the segment below, leaning a little forward.
@@ -564,7 +582,7 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn) {
     e.ragdoll = rag;
     // The muscles' first target: the pose of the moment (the death, the impact).
     Ragdoll startPose;
-    startPose.Setup(P, fwd);
+    startPose.Setup(P, fwd, JoltBridge::Rotations(r));
     TargetsFrom(startPose, e);
     e.animSeen = r->animSerial;
     e.car = seatedIn;
@@ -575,13 +593,16 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn) {
     if (!seatedIn) {
         const void *hull = nullptr;
         for (int b = 0; b < BODIES && !hull; b++) hull = jolt_world::HullAround(rag->GetBodyID(b), 0.01f);
-        if (hull) {
+        // A car impact necessarily starts at (and may slightly penetrate) the hull. That is not a doorway
+        // occupant: disabling the striking hull lets the whole car pass through its victim.
+        if (hull && hull != struckBy) {
             e.passCar = hull;
             for (int b = 0; b < BODIES; b++) jolt_world::SetPassThrough(rag->GetBodyID(b), hull);
             jolt_world::RequestCabin(hull);
             RLOG("ragdoll %p starts inside car %p's hull (its open door): it meets the car's cabin, not the hull, until it is out",
                  r->actor, hull);
         }
+        if (hull && hull == struckBy) RLOG("ragdoll %p: striking car %p stays solid at initial contact", r->actor, hull);
     }
     // Nothing to land on yet: held still until the static world around it comes (or 5 s, Step).
     if (!jolt_world::StaticReady(GroundBox(r), GroundBox(r, true))) {
@@ -676,7 +697,7 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
     jolt_world::Step(dt, movers, player);
     for (Ragdoll *r : all) {
         auto it = g_entries.find(r);
-        if (it != g_entries.end()) ReadBack(r, it->second);
+        if (it != g_entries.end()) ReadBack(r, it->second, dt);
     }
 }
 

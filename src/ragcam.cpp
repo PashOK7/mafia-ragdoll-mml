@@ -93,6 +93,7 @@ void Orbit(float dt, V3 *eye, V3 *fwd) {
 }
 
 int View(MmlViewCamera *c, void *) {
+    if (H->mission_state() == MML_MISSION_LOADING) return 0;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     float dt = std::clamp(static_cast<float>(now.QuadPart - g_last.QuadPart) / static_cast<float>(g_freq.QuadPart), 0.0f, 0.1f);

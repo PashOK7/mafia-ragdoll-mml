@@ -25,7 +25,7 @@ void Init(LogFn log);
 // `seatedIn`: the car it dies sitting in. Its body then lives in the car's cabin (jolt_world kCabin: the car's own
 // triangles), held to its seat by the pelvis (a few centimetres and degrees of play), so it slumps against the
 // seat, the door and the wheel and is thrown about as the car moves.
-bool Add(Ragdoll *r, std::string *err, const void *seatedIn = nullptr);
+bool Add(Ragdoll *r, std::string *err, const void *seatedIn = nullptr, const void *struckBy = nullptr);
 void Remove(Ragdoll *r);
 bool Has(const Ragdoll *r);
 bool OwnsBody(uint32_t body);   // a Jolt body (its index and sequence number) is a part of a ragdoll

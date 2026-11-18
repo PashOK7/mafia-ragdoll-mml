@@ -2,7 +2,7 @@
 //
 // Events: EXPLOSION (a blast throws the bodies near it), MISSION_TICK (the ragdolls' tick, after the game's world moved), RENDER_BEGIN (the bones written over the
 // game's animation), HUMAN_HIT and PEDESTRIAN_HIT (a death, a knock-down, a bullet's push), ACTOR_DESTROYED,
-// MISSION_CLOSE, CONFIG_CHANGED (the settings, from config.json or the game's Options > Mods).
+// MISSION_CLOSE, GAME_LOADED, CONFIG_CHANGED (the settings, from config.json or the game's Options > Mods).
 // Commands (the bridge's `ragdoll.<name>`): state, start {actor | pedestrian}, drop {actor | pedestrian}, jolt, knock,
 // camera.
 #include <windows.h>
@@ -43,14 +43,17 @@ using namespace mod;
 namespace {
 
 void OnEvent(const MmlEvent *ev, void *) {
+    const bool loading = H->mission_state() == MML_MISSION_LOADING;
     switch (ev->type) {
-    case MML_EVENT_MISSION_TICK: core::Tick(ev->dt); break;
-    case MML_EVENT_RENDER_BEGIN: if (ev->world) core::Render(); break;
+    case MML_EVENT_MISSION_TICK: if (!loading) core::Tick(ev->dt); break;
+    case MML_EVENT_RENDER_BEGIN: if (ev->world && !loading) core::Render(); break;
+    case MML_EVENT_RENDER_WORLD: if (ev->world && !loading) core::Rendered(); break;
     case MML_EVENT_HUMAN_HIT:
-    case MML_EVENT_PEDESTRIAN_HIT: core::OnHit(*ev); break;
+    case MML_EVENT_PEDESTRIAN_HIT: if (!loading) core::OnHit(*ev); break;
     case MML_EVENT_ACTOR_DESTROYED: core::OnActorDestroyed(ev->actor); break;
-    case MML_EVENT_EXPLOSION: if (ev->explosion) core::OnExplosion(*ev->explosion); break;
-    case MML_EVENT_MISSION_CLOSE: core::OnMissionClose(); break;
+    case MML_EVENT_EXPLOSION: if (ev->explosion && !loading) core::OnExplosion(*ev->explosion); break;
+    case MML_EVENT_MISSION_CLOSE: core::OnWorldReset("mission close"); break;
+    case MML_EVENT_GAME_LOADED: core::OnWorldReset("game loaded"); break;
     case MML_EVENT_CONFIG_CHANGED: core::Settings(); break;
     default: break;
     }
@@ -70,7 +73,9 @@ int Command(const char *args, MmlReply *r, void *user) {
     if (!strcmp(name, "state")) { Reply(r, core::State()); return 0; }
     if (!strcmp(name, "camera")) { Reply(r, ragcam::State()); return 0; }
     bool ok = false;
-    std::string out = core::Exec(name, !strcmp(name, "start") || !strcmp(name, "drop") ? Address(args) : std::string(args ? args : ""), &ok);
+    const bool address = !strcmp(name, "start") || !strcmp(name, "drop") || !strcmp(name, "inspect") ||
+                         !strcmp(name, "handover") || !strcmp(name, "trajectory") || !strcmp(name, "vehicle");
+    std::string out = core::Exec(name, address ? Address(args) : std::string(args ? args : ""), &ok);
     if (!ok) { H->reply_error(r, out.c_str()); return 1; }
     Reply(r, out);
     return 0;
@@ -93,15 +98,21 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
         H->log(M, MML_LOG_ERROR, "not a Mafia build the ragdolls know (Game.exe %s, LS3DF.dll %s)", game::ExeName(), game::Ls3dName());
         return 1;
     }
-    for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT,
-                           MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_CLOSE, MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION})
+    for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_RENDER_WORLD, MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT,
+                           MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_CLOSE, MML_EVENT_GAME_LOADED,
+                           MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION})
         H->subscribe(M, t, OnEvent, nullptr);
     static const char *const kCommands[][2] = {
         {"state", "the ragdolls: each one's actor, kind, age, pelvis; the people tracked, the world, the counts"},
         {"start", "a ragdoll on someone alive (a puppet), by his address: {\"actor\": \"0x...\"} or {\"pedestrian\": \"0x...\"}"},
         {"drop", "the ragdoll taken off someone (a living one gets up): {\"actor\": \"0x...\"}"},
         {"jolt", "the rigid-body world and the ragdolls' bodies, described"},
+        {"inspect", "read-only physics joints, initial pose and render errors: {actor | pedestrian: 0x...}"},
+        {"handover", "retained car-contact poses for 3.5 s; stages 1/2 tick apply, 3/4 render apply, 5 world drawn: {actor | pedestrian}"},
+        {"trajectory", "last car contact or {pedestrian: 0x...}; native, physics and drawn pose samples including failed ragdolls"},
+        {"vehicle", "read-only physical car shape: current car or {car: 0x...}"},
         {"knock", "the knock-downs by bodies: the last decisions"},
+        {"dodge", "diagnostic A/B for this load only: {mode: native | fixed}; retains ragdoll physics"},
         {"camera", "the ragdoll camera: following the player's body or not, its orbit, the frames drawn from it"},
     };
     for (auto &c : kCommands) H->command(M, c[0], c[1], Command, const_cast<char *>(c[0]));

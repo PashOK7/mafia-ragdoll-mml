@@ -1,0 +1,15 @@
+Mafia Ragdoll for Mafia: The City of Lost Heaven (2002), game versions 1.0 and 1.2
+
+For a clean game, close Mafia and extract the with-MafiaModLoader ZIP into the
+folder containing Game.exe. Start Mafia. Settings are under Options > Mods > Ragdolls.
+
+For a game with a compatible MafiaModLoader already installed, extract the mod-only
+ZIP into the folder containing Game.exe. It updates only mml/mods/ragdoll and
+preserves the installed loader.
+
+The clean-game base identifies its host in mml/base-version.txt. The mod-only
+download works with the tested host and compatible later builds. Add other mods
+under mml/mods. The full MML runtime and the optional FFmpeg video package are
+distributed separately. The base uses the game's native video player.
+
+To remove just the ragdoll, close Mafia and remove mml/mods/ragdoll.
