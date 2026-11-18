@@ -30,12 +30,12 @@ def main():
     files = {prefix + n: OUT / n for n in ('ragdoll.dll', 'mod.json', 'config.json')}
     files[prefix + 'README.md'] = ROOT / 'README.md'
     files[prefix + 'licenses/Jolt.txt'] = loader / 'third_party/_deps/jolt/LICENSE'
-    if not args.with_loader:
-        print(release.write_zip(dist / f'{name}-mod-only.zip', files))
     if not args.mod_only:
-        path, base = release.base_archive(loader, expected_content=TESTED_BASE)
+        _, base = release.base_archive(loader, expected_content=TESTED_BASE)
         bundle = {**base, **files, 'INSTALL-RAGDOLL.txt': ROOT / 'docs/INSTALL.txt'}
-        print(release.write_zip(dist / f'{name}-with-{path.name}', bundle))
+        print(release.write_zip(dist / f'1-{name}-with-MML-{release.RELEASE}.zip', bundle))
+    if not args.with_loader:
+        print(release.write_zip(dist / f'2-{name}-mod-only-if-MML-is-installed.zip', files))
 
 
 if __name__ == '__main__':

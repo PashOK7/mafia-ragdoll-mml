@@ -40,10 +40,10 @@ into the folder containing Game.exe. [Download the latest release](https://githu
 
 ## Install
 
-For a clean game, extract **with-MafiaModLoader** into the folder containing Game.exe
-and start Mafia. This installs both the ragdoll and MML 2026.11.18 (host 71d2377a).
+For a clean game, extract the first ZIP (**with MML 0.1**) into the folder containing
+Game.exe and start Mafia. It installs both the ragdoll and the loader.
 
-If a compatible loader is already installed, extract **mod-only** into the same game
+If a compatible loader is already installed, extract the second ZIP (**mod-only**) into the same game
 folder. This updates only `mml/mods/ragdoll/` and preserves the installed loader.
 The mod is on by default. Its settings are in **Options > Mods > Ragdolls**.
 Other mods can be installed alongside it in `mml/mods/`.

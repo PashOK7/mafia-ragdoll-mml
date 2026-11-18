@@ -542,3 +542,6 @@ confined to mml/mods/ragdoll. Both installation layouts were checked by extracti
 The README links to MafiaModLoader and the player downloads. The requested backlog covers
 dogs, tram drivers and passengers, and dragging a dead driver out when stealing a car.
 The release assets use the tested one-extraction layout for both supported game builds.
+
+The November 18 download labels put the bundle with MML 0.1 first. The second ZIP is
+marked for players who already have the loader. Both retain the 0.1.0 ragdoll DLL.
