@@ -249,12 +249,11 @@ std::string TrajectoryJson(const CarHandover &entry) {
     return out + "]}";
 }
 
-bool SaveTrajectory(const CarHandover &entry, const char *name) {
+bool WriteTrace(const char *name, const std::string &data) {
     const std::string path = std::string(H->mod_data_dir(M)) + name;
     const std::string temporary = path + ".new";
     wchar_t destination[1024], source[1024];
     if (!mml_widen(path.c_str(), destination, 1024) || !mml_widen(temporary.c_str(), source, 1024)) return false;
-    const std::string data = TrajectoryJson(entry);
     FILE *file = mml_fopen(temporary.c_str(), "wb");
     if (!file) return false;
     const bool written = fwrite(data.data(), 1, data.size(), file) == data.size();
@@ -262,6 +261,85 @@ bool SaveTrajectory(const CarHandover &entry, const char *name) {
     if (written && closed && MoveFileExW(source, destination, MOVEFILE_REPLACE_EXISTING)) return true;
     DeleteFileW(source);
     return false;
+}
+
+bool SaveTrajectory(const CarHandover &entry, const char *name) {
+    return WriteTrace(name, TrajectoryJson(entry));
+}
+
+struct PullSample {
+    float t, error;
+    V3 left, right, coat, chest, pelvis, feet[2], origin, side;
+    V3 head, drawnHead, drawnNose;
+    Ragdoll::Quat neck;
+    bool hands, carPose, drawn;
+};
+
+struct PullTrace {
+    Ragdoll *body = nullptr;
+    void *car = nullptr;
+    V3 left{}, right{};
+    float t = 0, settling = 0, wheelEdge = 0;
+    bool hands = false;
+    std::vector<PullSample> rows;
+} g_pull;
+
+void EndPullTrace(const char *reason) {
+    if (!g_pull.body) return;
+    std::string out = Fmt("{\"end\":\"%s\",\"outer_tyre_x_m\":%.4f,\"samples\":[", reason, g_pull.wheelEdge);
+    for (const auto &s : g_pull.rows) {
+        if (out.back() != '[') out += ',';
+        out += Fmt("{\"t\":%.5f,\"gap\":%.5f", s.t, s.error);
+        out += ",\"left\":" + (s.hands ? TracePoint(s.left) : "null") + ",\"right\":" + (s.hands ? TracePoint(s.right) : "null");
+        out += ",\"coat\":" + (s.error >= 0 ? TracePoint(s.coat) : "null") + ",\"chest\":" + TracePoint(s.chest);
+        out += ",\"pelvis\":" + TracePoint(s.pelvis) + ",\"feet\":[" + TracePoint(s.feet[0]) + "," + TracePoint(s.feet[1]) + "]";
+        out += ",\"head\":" + TracePoint(s.head);
+        out += Fmt(",\"neck_q\":[%.6f,%.6f,%.6f,%.6f]", s.neck.w, s.neck.x, s.neck.y, s.neck.z);
+        out += ",\"drawn_head\":" + (s.drawn ? TracePoint(s.drawnHead) : "null");
+        out += ",\"drawn_nose\":" + (s.drawn ? TracePoint(s.drawnNose) : "null");
+        out += ",\"car\":" + (s.carPose ? TracePoint(s.origin) : "null") + ",\"side\":" + (s.carPose ? TracePoint(s.side) : "null") + "}";
+    }
+    if (!WriteTrace("driver-pull.json", out + "]}")) LOG("could not save driver-pull.json");
+    g_pull = {};
+}
+
+void BeginPullTrace(Ragdoll *body, const void *car) {
+    EndPullTrace("next pull");
+    g_pull.body = body;
+    g_pull.car = const_cast<void *>(car);
+    g_pull.rows.reserve(400);
+    smoke::Mover mover;
+    if (!vehicles::MoverOf(g_pull.car, &mover) || !mover.hullParts) return;
+    const float side = Dot(body->BodyPos(Ragdoll::B_PELVIS) - mover.c, mover.ax[0]) >= 0 ? 1.f : -1.f;
+    for (size_t i = 0; i < mover.hullParts->size() && i < 64; ++i)
+        if (mover.wheelParts & (uint64_t(1) << i))
+            for (const V3 &p : (*mover.hullParts)[i])
+                if (side * p.x > side * g_pull.wheelEdge) g_pull.wheelEdge = p.x;
+}
+
+void SamplePull(float dt) {
+    if (!g_pull.body || dt <= 0) return;
+    const auto &body = *g_pull.body;
+    PullSample s{};
+    s.t = g_pull.t += dt;
+    s.hands = g_pull.hands;
+    s.left = g_pull.left;
+    s.right = g_pull.right;
+    g_pull.hands = false;
+    s.error = jolt_ragdoll::GripDistance(&body, &s.coat);
+    s.head = body.BodyPos(Ragdoll::B_HEAD);
+    s.neck = body.NeckRotation();
+    s.chest = body.BodyPos(Ragdoll::B_CHEST);
+    s.pelvis = body.BodyPos(Ragdoll::B_PELVIS);
+    s.feet[0] = body.BodyPos(Ragdoll::B_LFOOT);
+    s.feet[1] = body.BodyPos(Ragdoll::B_RFOOT);
+    V3 axes[3];
+    s.carPose = g_pull.car && vehicles::Pose(g_pull.car, &s.origin, axes);
+    if (s.carPose) s.side = axes[0];
+    g_pull.rows.push_back(s);
+    if (!body.carExtraction) g_pull.settling += dt;
+    if (g_pull.settling >= 1.5f) EndPullTrace("completed");
+    else if (g_pull.rows.size() >= 2048) EndPullTrace("sample limit");
 }
 
 void TracePedestrian(CarHandover &entry, TrajectoryStage stage, uint64_t now) {
@@ -357,6 +435,7 @@ void WatchRagdoll(const Ragdoll *rd) {
 
 void Unshape(void *actor) { H->bullet_shape(M, actor, nullptr, 0); }
 void StopHandoverPose(void *actor) {
+    if (g_pull.body && g_pull.body->actor == actor) EndPullTrace("body removed");
     for (auto &entry : g_handovers) if (entry.actor == actor) entry.body = nullptr;
 }
 
@@ -792,6 +871,16 @@ bool SafeCarReactions() {
     return Guarded(f);
 }
 
+// intern_ThrowMeFromCar reparents the victim to the world, clears the vehicle and plays
+// one of four dead-occupant tracks (1.2: 588B40, 1.0: 4A90B0). The player's paired
+// pull lasts longer than the victim's clip, so keep the grip until Tommy lets go.
+constexpr int kHumanPlaying = 0x70; // C_human::PersonAnim, also read by MML human_anim_state
+bool BeingPulledFromCar(void *human) {
+    if (game::at<void *>(human, game::kHumanVehicle)) return false;
+    const int clip = game::at<int>(human, kHumanPlaying);
+    return clip >= 312 && clip <= 315;
+}
+
 // ---- making a ragdoll
 Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy = nullptr) {
     if (Ragdoll *r = Find(actor)) return r;
@@ -1070,7 +1159,7 @@ void TrackPoses(float dt) {
         if (h != pl && Dot(d, d) > r2) continue;
         if (alive) g_failed.erase(h);
         // every dead body near the player is a ragdoll, however it died: a corpse is never left frozen in its last pose
-        if (!alive && g_cfg.enabled && !Find(h) && !g_failed.count(h)) {
+        if (!alive && g_cfg.enabled && !Find(h) && !g_failed.count(h) && (ped || !BeingPulledFromCar(h))) {
             std::string err;
             if (Start(h, false, &err)) LOG("dead body %p adopted", h);
             else { LOG("dead body %p not adopted: %s", h, err.c_str()); g_failed.insert(h); }
@@ -1261,6 +1350,27 @@ void TickBody(float dt) {
             EraseAt(i);
             continue;
         }
+        if (!rd->pedestrian && IsDead(rd->actor) && (rd->carExtraction || BeingPulledFromCar(rd->actor))) {
+            void *player = game::Player();
+            const int clip = player ? game::at<int>(player, kHumanPlaying) : 0;
+            const bool pulling = clip == 306 || clip == 307;
+            if (pulling && !rd->carExtraction) {
+                if (const void *car = jolt_ragdoll::SeatedCar(rd)) BeginPullTrace(rd, car);
+            }
+            rd->carExtraction = pulling;
+            V3 pose[Ragdoll::COUNT];
+            if (!rd->carExtraction) jolt_ragdoll::FinishPull(rd);
+            else if (SafeCapture(player, pose)) {
+                if (g_pull.body == rd) {
+                    g_pull.left = pose[Ragdoll::LHAND];
+                    g_pull.right = pose[Ragdoll::RHAND];
+                    g_pull.hands = true;
+                }
+                const V3 hands = (pose[Ragdoll::RHAND] + pose[Ragdoll::LHAND]) * .5f;
+                if (FinitePoint(hands) && FinitePoint(pose[Ragdoll::PELVIS]))
+                    jolt_ragdoll::PullFromSeat(rd, player, pose[Ragdoll::LHAND], pose[Ragdoll::RHAND], pose[Ragdoll::PELVIS], dt);
+            }
+        }
         if (AliveAgain(rd)) {
             LOG("%s %p alive again", rd->pedestrian ? "pedestrian" : "person", rd->actor);
             EraseAt(i);
@@ -1282,6 +1392,7 @@ void TickBody(float dt) {
         }
     }
     if (joltOk) {
+        SamplePull(dt);
         TracePedestrians(TrajectoryStage::Physics);
         for (auto &entry : g_handovers) {
             if (entry.started && entry.body && entry.body->age <= 3.5f) {
@@ -1642,6 +1753,15 @@ void Rendered() {
     if (!g_cfg.enabled) return;
     TracePedestrians(TrajectoryStage::WorldDrawn);
     auto read = [&] {
+        if (g_pull.body && !g_pull.rows.empty() && !g_pull.rows.back().drawn) {
+            Ragdoll::PoseSnap pose{};
+            if (g_pull.body->SnapshotNow(&pose)) {
+                auto &row = g_pull.rows.back();
+                row.drawnHead = pose.pts[Ragdoll::HEAD];
+                row.drawnNose = pose.pts[Ragdoll::NOSE];
+                row.drawn = true;
+            }
+        }
         for (const auto &kv : g_poses) {
             void *actor = kv.first;
             if (g_tick - kv.second.seen > 1 || !IsPed(actor) || Find(actor) || IsDead(actor)) continue;
@@ -1709,6 +1829,7 @@ void OnHit(const MmlEvent &ev) {
     Ragdoll *rd = Find(human);
     if (!rd) {
         bool died = wasAlive && !alive;
+        if (died && !IsPed(human) && BeingPulledFromCar(human)) return;
         // (someone alive in a car's seat is the game's: a crash's hit on its driver, type 5, made him a ragdoll that
         // got up on the street under his own car, still seated, and died there)
         // A gentle car touch is a native stagger, not a physical fall. In particular, do not re-knock a person
@@ -1763,6 +1884,7 @@ void OnExplosion(const MmlExplosion &x) {
 }
 
 void OnActorDestroyed(void *actor) {
+    if (g_pull.car == actor) g_pull.car = nullptr;
     for (auto &body : g_ragdolls) if (body->impactVehicle == actor) body->impactVehicle = nullptr;
     if (Find(actor)) Drop(actor);
     knock::Forget(actor);
@@ -1810,6 +1932,7 @@ bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
 }
 
 void OnWorldReset(const char *reason) {
+    EndPullTrace("world reset");
     for (auto &entry : g_handovers) { entry.traceEnded = true; PersistTrajectory(entry); }
     ragcam::Stop();
     g_playerRisingUntil = 0;
@@ -1910,6 +2033,7 @@ void Start() {
 }
 
 void Stop() {
+    EndPullTrace("unload");
     ragcam::Stop();
     for (auto &r : g_ragdolls) Unshape(r->actor);
     g_ragdolls.clear();
@@ -1954,10 +2078,10 @@ std::string State() {
         for (int b = 0; b < Ragdoll::BodyCount(); b++) fastest = std::max(fastest, Len(r->BodyVel(b)));
         V3 ch = r->BodyPos(Ragdoll::B_CHEST), hd = r->BodyPos(Ragdoll::B_HEAD);
         list += Fmt("%s{\"actor\":\"0x%08X\",\"pedestrian\":%s,\"knockdown\":%s,\"puppet\":%s,\"sleeping\":%s,\"vehicle_impact\":%s,\"age\":%.2f,"
-                    "\"pelvis\":[%.3f,%.3f,%.3f],\"chest\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f],\"fastest_part\":%.4f,\"quiet_s\":%.3f}",
+                    "\"pelvis\":[%.3f,%.3f,%.3f],\"chest\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f],\"fastest_part\":%.4f,\"quiet_s\":%.3f,\"grip_distance\":%.4f}",
                     list.empty() ? "" : ",", (unsigned)(uintptr_t)r->actor, r->pedestrian ? "true" : "false", r->knockdown ? "true" : "false",
                     r->puppet ? "true" : "false", r->sleeping ? "true" : "false", r->vehicleImpact ? "true" : "false", r->age, p.x, p.y, p.z, ch.x, ch.y, ch.z,
-                    hd.x, hd.y, hd.z, fastest, r->sleepTimer);
+                    hd.x, hd.y, hd.z, fastest, r->sleepTimer, jolt_ragdoll::GripDistance(r.get()));
     }
     std::string supports;
     for (const auto &[car, track] : g_carTracks) {

@@ -38,6 +38,7 @@ public:
     void *actor = nullptr;     // identity: a C_human, or a traffic pedestrian element (not an actor)
     void *model = nullptr;     // the model frame whose skeleton is driven
     bool pedestrian = false;   // `actor` is a pedestrian manager element
+    bool carExtraction = false; // follow the puller's track, which outlasts the victim's track
     uint32_t keyVtable = 0;    // the actor's vtable when the ragdoll started (detects a reused address)
     bool puppet = false;       // started by command on a living human (no death)
     bool knockdown = false;    // a living human knocked over by a car: handed back to the game once it lies still
@@ -129,6 +130,10 @@ public:
     V3 rootPos{};              // where Apply last put the model root (world)
 
     struct Quat { float w = 1, x = 0, y = 0, z = 0; };
+    Quat NeckRotation() const {
+        const Quat &chest = body[B_CHEST].q;
+        return Mul({chest.w, -chest.x, -chest.y, -chest.z}, body[B_HEAD].q);
+    }
 
 private:
     struct Body {

@@ -8,13 +8,17 @@
 #include <Jolt/Skeleton/Skeleton.h>
 #include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/SixDOFConstraint.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/EmptyShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
@@ -131,6 +135,12 @@ struct Entry {
     JPH::Ref<JPH::Constraint> seat;         // the pelvis held to the seat
     const void *passCar = nullptr;          // born inside this car's hull (killed in its open door): passes through it
     float passClear = 0;                    // s since no part is inside that hull any more
+    JPH::Ref<JPH::PointConstraint> grip;   // the part of the coat that Tommy actually reached
+    JPH::BodyID handAnchor;
+    bool reached = false;
+    V3 lastHands{}, initialSlack{}, grabHands{}, outward{};
+    float initialSpan = 0, tightestSpan = 0;
+    float gripAge = 0;
     // Held still until the static world around it is there (after a core reload, in a part of the city just
     // reached): its parts asleep, the velocities they had kept for when it goes.
     bool holding = false;
@@ -342,6 +352,19 @@ void ReadBack(Ragdoll *r, Entry &e, float dt) {
 
 bool g_inOrder;
 
+void ReleaseGrip(Entry &e, const Ragdoll *r, bool endAction = true) {
+    if (endAction) jolt_world::SetHolder(r, nullptr);
+    if (e.grip && jolt_world::Running()) jolt_world::System()->RemoveConstraint(e.grip);
+    e.grip = nullptr;
+    if (!e.handAnchor.IsInvalid() && jolt_world::Running()) {
+        auto &bi = jolt_world::Bodies();
+        bi.RemoveBody(e.handAnchor);
+        bi.DestroyBody(e.handAnchor);
+    }
+    e.handAnchor = JPH::BodyID();
+    e.reached = false;
+}
+
 void Unseat(Entry &e) {
     if (e.seat) { jolt_world::System()->RemoveConstraint(e.seat); e.seat = nullptr; }
     if (e.car && e.ragdoll) {   // free now: an ordinary body again
@@ -443,9 +466,117 @@ void EndPass(Entry &e) {
     e.passClear = 0;
 }
 
+// Keep collisions with the cabin and the street while the body crosses the outer hull.
+static void ReleaseSeat(Entry &e) {
+    if (!e.car) return;
+    e.passCar = e.car;
+    for (int b = 0; b < BODIES; b++) jolt_world::SetPassThrough(e.ragdoll->GetBodyID(b), e.car);
+    jolt_world::RequestCabin(e.car);
+    Unseat(e);
+}
+
+void FinishPull(Ragdoll *r) {
+    auto it = g_entries.find(r);
+    if (it == g_entries.end()) return;
+    ReleaseSeat(it->second); // The engine also vacates the seat if the player is interrupted.
+    ReleaseGrip(it->second, r);
+}
+
+void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &right, const V3 &player, float dt) {
+    auto it = g_entries.find(r);
+    if (it == g_entries.end() || dt <= 0) return;
+    Entry &e = it->second;
+    if (!e.car && !e.grip) return;
+
+    JPH::BodyInterface &bi = jolt_world::Bodies();
+
+    const V3 hands = (left + right) * .5f;
+    const float span = Len(right - left);
+    if (!e.grip) {
+        const V3 chest = r->BodyPos(Ragdoll::B_CHEST);
+        const bool withinReach = Len(hands - chest) < .95f && Dot(hands - player, chest - player) > 0;
+        const bool withdrawing = e.reached && Dot(hands - e.lastHands, player - chest) > 0;
+        e.lastHands = hands;
+        e.reached = withinReach;
+        if (!withinReach || !withdrawing) return;
+
+        // The same animation reaches the jacket at different heights in each car.
+        // Bind once to the closest trunk surface along a ray towards each segment.
+        // Pulling the upper chest down to a hand at belt height jerks the neck.
+        const auto start = J(jolt_world::ToJolt(hands));
+        JPH::BodyID grabbed;
+        JPH::RVec3 contact = start;
+        float best = FLT_MAX;
+        for (int part : {CHEST, CHESTLOW, ABDOMEN, PELVIS}) {
+            auto id = e.ragdoll->GetBodyID(part);
+            JPH::RRayCast ray{start, JPH::Vec3(bi.GetCenterOfMassPosition(id) - start)};
+            JPH::RayCastResult hit;
+            if (!bi.GetTransformedShape(id).CastRay(ray, hit)) continue;
+            auto point = ray.GetPointOnRay(hit.mFraction);
+            float distanceSq = (point - start).LengthSq();
+            if (distanceSq < best) { best = distanceSq; grabbed = id; contact = point; }
+        }
+        if (grabbed.IsInvalid()) return;
+        JPH::PointConstraintSettings settings;
+        settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+        settings.mPoint1 = settings.mPoint2 = contact;
+        // The hands keep their purchase when several limbs press against the sill.
+        settings.mConstraintPriority = 1;
+        settings.mNumPositionStepsOverride = 8;
+        JPH::BodyCreationSettings anchor(new JPH::EmptyShape, settings.mPoint1, JPH::Quat::sIdentity(),
+                                         JPH::EMotionType::Kinematic, jolt_world::kKinematic);
+        e.handAnchor = bi.CreateAndAddBody(anchor, JPH::EActivation::Activate);
+        if (e.handAnchor.IsInvalid()) return;
+        auto *joint = bi.CreateConstraint(&settings, e.handAnchor, grabbed);
+        if (!joint) { ReleaseGrip(e, r); return; }
+        ReleaseSeat(e);
+        e.grip = static_cast<JPH::PointConstraint *>(joint);
+        jolt_world::System()->AddConstraint(e.grip);
+        jolt_world::SetHolder(r, holder);
+        e.initialSlack = F(JPH::Vec3(contact - start));
+        e.gripAge = 0;
+        e.grabHands = hands;
+        e.outward = Norm({player.x - chest.x, 0, player.z - chest.z}, {0, 0, 0});
+        e.initialSpan = e.tightestSpan = span;
+    } else if (Len(hands - e.lastHands) > 1.5f) {
+        ReleaseGrip(e, r); // the player was teleported across the scene
+        return;
+    }
+
+    // When the hands open on the outward stroke the driver keeps the momentum
+    // of that stroke. Holding into the returning hands draws the hips back onto the sill.
+    e.tightestSpan = std::min(e.tightestSpan, span);
+    if (Dot(hands - e.grabHands, e.outward) > .45f && e.tightestSpan < .8f * e.initialSpan && span > e.tightestSpan + .004f) {
+        ReleaseGrip(e, r, false); // ignore contact with Tommy until his native action actually finishes
+        return;
+    }
+    e.lastHands = hands;
+    e.gripAge += dt;
+    const float slack = std::max(0.f, 1.f - e.gripAge / .18f);
+    const V3 target = hands + e.initialSlack * (slack * slack * (3.f - 2.f * slack));
+    bi.MoveKinematic(e.handAnchor, J(jolt_world::ToJolt(target)), JPH::Quat::sIdentity(), dt);
+    bi.ActivateBody(e.grip->GetBody2()->GetID());
+}
+
+const void *SeatedCar(const Ragdoll *r) {
+    auto it = g_entries.find(r);
+    return it == g_entries.end() ? nullptr : it->second.car;
+}
+
+float GripDistance(const Ragdoll *r, V3 *contact) {
+    auto it = g_entries.find(r);
+    if (it == g_entries.end() || !it->second.grip) return -1.f;
+    const Entry &e = it->second;
+    const auto transform = jolt_world::Bodies().GetCenterOfMassTransform(e.grip->GetBody2()->GetID());
+    const V3 point = jolt_world::ToWorld(F(transform * e.grip->GetLocalSpacePoint2()));
+    if (contact) *contact = point;
+    return Len(point - e.lastHands);
+}
+
 void Remove(Ragdoll *r) {
     auto it = g_entries.find(r);
     if (it == g_entries.end()) return;
+    ReleaseGrip(it->second, r);
     EndPass(it->second);
     if (it->second.seat) { jolt_world::System()->RemoveConstraint(it->second.seat); it->second.seat = nullptr; }
     if (it->second.ragdoll) it->second.ragdoll->RemoveFromPhysicsSystem(false);
@@ -454,6 +585,7 @@ void Remove(Ragdoll *r) {
 
 void Clear() {
     for (auto &kv : g_entries) {
+        ReleaseGrip(kv.second, kv.first);
         EndPass(kv.second);
         if (kv.second.seat && jolt_world::Running()) jolt_world::System()->RemoveConstraint(kv.second.seat);
         kv.second.seat = nullptr;
@@ -627,6 +759,7 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
         const Ragdoll *r = it->first;
         bool live = std::find(all.begin(), all.end(), r) != all.end() && r->serial == it->second.serial;
         if (live) { ++it; continue; }
+        ReleaseGrip(it->second, r);
         EndPass(it->second);
         if (it->second.seat) { jolt_world::System()->RemoveConstraint(it->second.seat); it->second.seat = nullptr; }
         if (it->second.ragdoll) it->second.ragdoll->RemoveFromPhysicsSystem(false);

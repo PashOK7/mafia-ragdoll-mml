@@ -26,6 +26,11 @@ void Init(LogFn log);
 // triangles), held to its seat by the pelvis (a few centimetres and degrees of play), so it slumps against the
 // seat, the door and the wheel and is thrown about as the car moves.
 bool Add(Ragdoll *r, std::string *err, const void *seatedIn = nullptr, const void *struckBy = nullptr);
+// Move a seated corpse with the player's grip during the native extraction track.
+void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &right, const V3 &player, float dt);
+void FinishPull(Ragdoll *r);
+const void *SeatedCar(const Ragdoll *r);
+float GripDistance(const Ragdoll *r, V3 *contact = nullptr); // metres to the hands, or -1 when released
 void Remove(Ragdoll *r);
 bool Has(const Ragdoll *r);
 bool OwnsBody(uint32_t body);   // a Jolt body (its index and sequence number) is a part of a ragdoll

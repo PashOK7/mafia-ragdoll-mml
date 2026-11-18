@@ -89,6 +89,7 @@ std::unordered_map<uint32_t, const void *> g_passCar;     // dynamic body id -> 
 // give them infinite strength: they bulldozed bodies as if weightless and forced pinned limbs past their joints.
 // Their contacts with dynamic bodies are sensors instead; each tick the touched bodies get the impulse that stops
 // them closing in on the person and lets them out of the overlap, at most `g_personForce` N per person.
+std::unordered_map<const void *, const void *> g_holder;
 struct PersonPart { const void *who; float mass; };
 std::unordered_map<uint32_t, PersonPart> g_personOfBody;   // capsule -> its person and anatomical mass
 struct PersonTouch { JPH::BodyID person, body; const void *who; JPH::Vec3 n; JPH::RVec3 point; float depth; };
@@ -130,6 +131,7 @@ public:
         PersonContact(a, b, m, s);
         WheelContact(a, b, m, s);
         DrivenCarContact(a, b, m, s);
+        SlidingCabinContact(a, b, s);
         if (!g_impact || m.mRelativeContactPointsOn1.empty()) return;
         JPH::RVec3 p = m.GetWorldSpaceContactPointOn1(0);
         JPH::Vec3 n = m.mWorldSpaceNormal;   // from a towards b
@@ -144,6 +146,7 @@ public:
         PersonContact(a, b, m, s);
         WheelContact(a, b, m, s);
         DrivenCarContact(a, b, m, s);
+        SlidingCabinContact(a, b, s);
     }
     // A body passing through a car's hull (SetPassThrough) does not meet that car's hull bodies; it meets the car's
     // cabin, which is not one of them.
@@ -230,10 +233,27 @@ private:
             else if (g_vehicleContacts.size() < 256) g_vehicleContacts.push_back(contact);
             return;
         }
+        if (!g_holder.empty()) {
+            auto held = g_holder.find(reinterpret_cast<const void *>(static_cast<uintptr_t>(body->GetUserData())));
+            if (held != g_holder.end() && held->second == who) {
+                s.mIsSensor = true;
+                return;
+            }
+        }
         if (g_personForce <= 0) return;
         s.mIsSensor = true;
         uint64_t key = (uint64_t)person->GetID().GetIndexAndSequenceNumber() << 32 | body->GetID().GetIndexAndSequenceNumber();
         g_personTouches[key] = PersonTouch{person->GetID(), body->GetID(), who, n, p, m.mPenetrationDepth};
+    }
+    // A coat and trousers sliding over the seat and sill during a carjack.
+    static void SlidingCabinContact(const JPH::Body &a, const JPH::Body &b, JPH::ContactSettings &s) {
+        if (g_holder.empty() || (a.GetObjectLayer() != kCabin && b.GetObjectLayer() != kCabin)) return;
+        const bool cabinA = a.GetObjectLayer() == kCabin;
+        const auto &body = cabinA ? b : a;
+        if (!g_holder.count(reinterpret_cast<const void *>(static_cast<uintptr_t>(body.GetUserData())))) return;
+        const auto pass = g_passCar.find(body.GetID().GetIndexAndSequenceNumber());
+        if (pass != g_passCar.end() && CabinBody(pass->second) == (cabinA ? a : b).GetID())
+            s.mCombinedFriction = .3f;
     }
     static bool Passes(const JPH::Body &body, const JPH::Body &other) {
         auto it = g_passCar.find(body.GetID().GetIndexAndSequenceNumber());
@@ -795,6 +815,7 @@ void RemoveAll() {
     g_cookedHulls.clear();
     g_carOfBody.clear();
     g_passCar.clear();
+    g_holder.clear();
     g_personOfBody.clear();
     g_personTouches.clear();
     g_pushStats = {};
@@ -998,6 +1019,11 @@ void ApplyPersonPushes(float dt) {
         bi.AddImpulse(t.body, t.n * J, t.point);
     }
     g_personTouches.clear();
+}
+
+void SetHolder(const void *ragdoll, const void *person) {
+    if (person) g_holder[ragdoll] = person;
+    else g_holder.erase(ragdoll);
 }
 
 void SetPersonPush(float maxForce, float mass) { g_personForce = maxForce; g_personMass = mass; }

@@ -31,7 +31,8 @@ into the folder containing Game.exe. [Download the latest release](https://githu
   waits for it). Bullets that hit a body lying on the ground push it and are taken from the game's own test, so a
   shot body moves where it was struck. Cars driven over or into bodies are slowed by them.
 - **In cars.** Someone killed in his seat slumps there and stays in the cabin while the car drives, turns, brakes or
-  crashes; a car teleported by a mission takes him along.
+  crashes or moves with a mission script. When Tommy pulls a dead driver out, the driver's coat stays in his hands as he draws the torso through the door.
+  The legs follow under their own weight, and the body stays in the street when the car leaves.
 - **The ragdoll camera.** While the player himself is a ragdoll and while he gets up, the camera circles his body:
   the mouse turns it round him, the wheel brings it nearer or further, and it keeps out of walls and cars; it blends
   back into the game's camera once he is up.

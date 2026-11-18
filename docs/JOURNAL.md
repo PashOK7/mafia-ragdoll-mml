@@ -545,3 +545,27 @@ The release assets use the tested one-extraction layout for both supported game 
 
 The November 18 download labels put the bundle with MML 0.1 first. The second ZIP is
 marked for players who already have the loader. Both retain the 0.1.0 ragdoll DLL.
+
+### 2026-11-18 - Pulling a dead driver out of a car (0.1.1)
+
+The native carjack starts paired animation tracks. The victim's track ends before Tommy lets go. Keep the pelvis attached to its seat during the reach, then apply a damped, bounded pull to the chest when Tommy's hands meet the torso and start to withdraw. The legs follow through their joints. The body still collides with the cabin and the street. The player's longer animation governs release.
+
+The real-game regression uses the normal Action command, follows the physical pelvis through the door, checks Tommy's seat and moves the car away from the body. Both labs ran the scenario. The 1.2 lab also ran it with external Mafia Fusion Fix. The existing-ASI bundle adds MML under `scripts/` while preserving the player's proxy DLLs. Local 0.1.1 packages use the MML 0.1 host. The published 0.1.0 assets predate this change.
+
+### 2026-11-18 - Holding a driver through the doorway (0.1.2)
+
+An impulse on the chest left the dead driver behind Tommy's hands. The new grip joins a point on the torso to a collisionless kinematic anchor. The anchor follows both hands through every physics substep. The initial 0.18 s takes up the gap to a slumped driver. The joint lets the chest rotate and carries the pelvis and legs through the ordinary anatomical joints. The mod drops the grip on interruption, teleport, body removal and world teardown.
+
+The Bolt-Thrower exposed a second issue: the moving body registered an impact against its own holder and knocked Tommy out of his animation. Contacts between this body and its holder now skip the walking push and knockdown response during the grip. The regression measures hand-to-coat distance and checks where the former driver lands in both game builds. Added the car explosion response of already-dead occupants to the backlog.
+
+The final two-vehicle lab run passed 16 checks per build. Maximum sampled hand-to-coat error after take-up was 2 mm on the Bolt-Thrower and 35 mm on the freeride car. The owner's installed Community Modpack 1.0 also passed its eight checks with the four original ASIs still loaded. Adding the external Fusion Fix ASI reproduced a separate startup failure.
+
+### 2026-11-18 - Falconer driver extraction (0.1.3)
+
+On the Falconer the hands reach the belt while the previous constraint attaches to the upper chest, roughly 45 cm above the hands. Drawing that gap closed in 0.18 s caused the neck to reverse sharply. At grasp, rays from the hands now locate the surface of the nearest trunk segment. The joint stays on that segment until the hands open during the outward stroke. The body keeps its velocity on release. While the driver slides out, the mod reduces friction only against the occupied cabin.
+
+The mod saves the latest extraction to `mml/data/ragdoll/driver-pull.json`. Run `python tools/analyze_driver_pull.py <capture>` for hand tracking, clearance relative to the outside tyre edge, settling and three-tick head motion. The log includes physical head position and neck rotation relative to the chest. The drawn head and nose points come from the engine's neck matrix after world drawing. Time is in simulation seconds.
+
+At normal speed on the standard Falconer, the 95th-percentile angular deviation of the neck from its neighbours during the grip was 7.43° and 7.54° with the chest attachment (1.0 and 1.2). With the new attachment two runs per build measured 0.40–1.24°. In the final Falconer and Falconer Yellowcar runs on both builds, hand-to-coat separation after take-up peaked below 2 mm. Both feet settled at least 66 cm beyond the outer tyre line. All four scenarios passed the street landing, driver-seat entry and moving-car checks. Captures in the local `build/driver-audit/falconer-final/` directory contain 255 ticks each.
+
+The Bolt Ace Pickup remains a separate geometry case. Its coat point briefly lagged by 11–15 cm in the wider test, despite completing the pull. An earlier Yellowcar run missed the follow-up seat interaction on 1.0. The final Yellowcar runs passed in both labs. The owner's Mafia10Fixes process loaded the final DLL (SHA-256 `bd73fc988e4911bfc27c06e580facbb305ccc3ab6103cfde774093c3e74d4397`).
