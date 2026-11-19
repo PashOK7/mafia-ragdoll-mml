@@ -53,6 +53,11 @@ void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player);
 // and it meets the car's cabin (RequestCabin) like the people in it; null clears. `HullAround`: the car whose hull
 // the body overlaps deeper than `depth` m now (only `onlyCar`'s when given), or null.
 void SetPassThrough(const JPH::BodyID &body, const void *car);
+// Strongest penetration for each segment touching its own cabin during the last step.
+struct PullContact { unsigned part, triangle; float depth; V3 point, normal; };
+void WatchDriver(const void *ragdoll, const void *car);
+const std::vector<PullContact> &DriverContacts();
+unsigned CabinVersion(const void *car);
 const void *HullAround(const JPH::BodyID &body, float depth, const void *onlyCar = nullptr);
 
 // The static world in [lo, hi] (world) is all there: the scenery's last scan took the box whole and every piece of it

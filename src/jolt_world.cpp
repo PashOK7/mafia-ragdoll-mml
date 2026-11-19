@@ -121,6 +121,8 @@ int CarPartOfSub(const JPH::Body &car, const JPH::SubShapeID &sub) {
     return (int)static_cast<const JPH::StaticCompoundShape *>(shape)->GetSubShapeIndexFromID(sub, rest);
 }
 
+const void *g_watchDriver = nullptr, *g_watchCabin = nullptr;
+std::vector<PullContact> g_driverContacts;
 ImpactFn g_impact;
 V3 OriginNow();
 void NoteCarReaction(const void *car);
@@ -132,6 +134,7 @@ public:
         WheelContact(a, b, m, s);
         DrivenCarContact(a, b, m, s);
         SlidingCabinContact(a, b, s);
+        TraceDriver(a, b, m);
         if (!g_impact || m.mRelativeContactPointsOn1.empty()) return;
         JPH::RVec3 p = m.GetWorldSpaceContactPointOn1(0);
         JPH::Vec3 n = m.mWorldSpaceNormal;   // from a towards b
@@ -147,6 +150,7 @@ public:
         WheelContact(a, b, m, s);
         DrivenCarContact(a, b, m, s);
         SlidingCabinContact(a, b, s);
+        TraceDriver(a, b, m);
     }
     // A body passing through a car's hull (SetPassThrough) does not meet that car's hull bodies; it meets the car's
     // cabin, which is not one of them.
@@ -254,6 +258,24 @@ private:
         const auto pass = g_passCar.find(body.GetID().GetIndexAndSequenceNumber());
         if (pass != g_passCar.end() && CabinBody(pass->second) == (cabinA ? a : b).GetID())
             s.mCombinedFriction = .3f;
+    }
+    static void TraceDriver(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m) {
+        if (!g_watchDriver || m.mRelativeContactPointsOn1.empty()) return;
+        const bool cabinA = a.GetObjectLayer() == kCabin;
+        if (!cabinA && b.GetObjectLayer() != kCabin) return;
+        const auto &body = cabinA ? b : a;
+        const auto &cabin = cabinA ? a : b;
+        if (body.GetUserData() != reinterpret_cast<uintptr_t>(g_watchDriver) || cabin.GetID() != CabinBody(g_watchCabin)) return;
+        const unsigned part = body.GetCollisionGroup().GetSubGroupID();
+        auto it = std::find_if(g_driverContacts.begin(), g_driverContacts.end(), [part](const auto &c){ return c.part == part; });
+        if (it != g_driverContacts.end() && it->depth >= m.mPenetrationDepth) return;
+        const auto *mesh = static_cast<const JPH::MeshShape *>(cabin.GetShape());
+        const auto idx = mesh->GetTriangleUserData(cabinA ? m.mSubShapeID1 : m.mSubShapeID2);
+        PullContact contact{part, idx, m.mPenetrationDepth,
+            F(JPH::Vec3(cabinA ? m.GetWorldSpaceContactPointOn1(0) : m.GetWorldSpaceContactPointOn2(0))) + OriginNow(),
+            F(cabinA ? m.mWorldSpaceNormal : -m.mWorldSpaceNormal)};
+        if (it == g_driverContacts.end()) g_driverContacts.push_back(contact);
+        else *it = contact;
     }
     static bool Passes(const JPH::Body &body, const JPH::Body &other) {
         auto it = g_passCar.find(body.GetID().GetIndexAndSequenceNumber());
@@ -652,10 +674,12 @@ JPH::RefConst<JPH::Shape> TwoSidedMesh(const smoke::Mover &m) {
     for (size_t t = 0; t + 2 < m.hull->size(); t += 3) {
         JPH::Float3 a((*m.hull)[t].x, (*m.hull)[t].y, (*m.hull)[t].z), b((*m.hull)[t + 1].x, (*m.hull)[t + 1].y, (*m.hull)[t + 1].z),
             c((*m.hull)[t + 2].x, (*m.hull)[t + 2].y, (*m.hull)[t + 2].z);
-        tris.push_back(JPH::Triangle(a, b, c));
-        tris.push_back(JPH::Triangle(a, c, b));   // seen from inside too
+        const auto triangle = static_cast<unsigned>(t / 3);
+        tris.emplace_back(a, b, c, 0, triangle);
+        tris.emplace_back(a, c, b, 0, triangle);   // seen from inside too
     }
     JPH::MeshShapeSettings ms(tris);
+    ms.mPerTriangleUserData = true;
     JPH::ShapeSettings::ShapeResult r = ms.Create();
     return r.IsValid() ? r.Get() : nullptr;
 }
@@ -666,6 +690,7 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
         if (m.kind != smoke::Mover::HULL || !g_cabinWanted.count(m.key)) continue;
         V3 pos; JPH::Quat rot; unsigned version;
         if (!PoseOf(m, &pos, &rot, &version)) continue;
+        version = m.shapeVersion; // Cabin geometry is always a mesh. Keep its source triangle revision.
         auto it = g_cabins.find(m.key);
         if (it != g_cabins.end() && it->second.version != version) {
             // Keep the seat constraint attached to the same cabin body as a door opens.
@@ -814,6 +839,7 @@ void RemoveAll() {
     g_kinematic.clear();
     g_cookedHulls.clear();
     g_carOfBody.clear();
+    WatchDriver(nullptr, nullptr);
     g_passCar.clear();
     g_holder.clear();
     g_personOfBody.clear();
@@ -1021,6 +1047,13 @@ void ApplyPersonPushes(float dt) {
     g_personTouches.clear();
 }
 
+void WatchDriver(const void *ragdoll, const void *car) {
+    g_watchDriver = ragdoll;
+    g_watchCabin = car;
+    g_driverContacts.clear();
+}
+const std::vector<PullContact> &DriverContacts() { return g_driverContacts; }
+
 void SetHolder(const void *ragdoll, const void *person) {
     if (person) g_holder[ragdoll] = person;
     else g_holder.erase(ragdoll);
@@ -1036,6 +1069,7 @@ std::string PersonPushState() {
 }
 
 void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player) {
+    g_driverContacts.clear();
     g_carContacts.clear();
     g_carContactsDropped = 0;
     g_carKicks.clear();       // a paused or failed step has no reaction to deliver
@@ -1181,6 +1215,10 @@ void RequestCabin(const void *car) { if (car) g_cabinWanted.insert(car); }
 JPH::BodyID CabinBody(const void *car) {
     auto it = g_cabins.find(car);
     return it != g_cabins.end() ? it->second.body : JPH::BodyID();
+}
+unsigned CabinVersion(const void *car) {
+    auto it = g_cabins.find(car);
+    return it != g_cabins.end() ? it->second.version : 0;
 }
 void SetCabinGoneListener(CabinGoneFn fn) { g_cabinGone = fn; }
 void SetCabinJumpListener(CabinJumpFn fn) { g_cabinJump = fn; }

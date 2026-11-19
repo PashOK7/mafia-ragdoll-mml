@@ -2,6 +2,7 @@
 // draws them (the loader's actor_meshes: one convex hull a model part), placed by its model frame. Game thread.
 #pragma once
 #include <vector>
+#include <string>
 #include "mathx.h"
 #include "smoke.h"
 
@@ -20,6 +21,7 @@ void Forget(void *car);       // the car is destroyed
 bool Pose(void *car, V3 *origin, V3 axes[3]);
 // Its model's triangles (three points each, in the axes Pose gives) and its parts (the points of one hull each).
 bool ModelTriangles(void *car, const std::vector<V3> **tris);
+std::string TriangleVisual(void *car, unsigned version, unsigned triangle);
 bool HullParts(void *car, const std::vector<std::vector<V3>> **parts, unsigned *version);
 
 } // namespace vehicles

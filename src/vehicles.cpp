@@ -286,6 +286,23 @@ bool Pose(void *car, V3 *origin, V3 axes[3]) {
     return Guarded(f) && ok;
 }
 
+std::string TriangleVisual(void *car, unsigned version, unsigned triangle) {
+    const auto it = g_bodies.find(car);
+    if (it == g_bodies.end() || version != it->second.version) return {};
+    const size_t vertex = size_t(triangle) * 3;
+    for (const auto &piece : it->second.poses) {
+        if (vertex < piece.first || vertex >= piece.first + piece.count) continue;
+        std::string name;
+        auto read = [&] {
+            const char *s = game::at<char *>(piece.visual, game::kFrameName);
+            if (s) name.assign(s, strnlen(s, 160));
+        };
+        Guarded(read);
+        return name;
+    }
+    return {};
+}
+
 bool ModelTriangles(void *car, const std::vector<V3> **tris) {
     const CarBody *b = Body(car);
     if (!b) return false;

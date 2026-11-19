@@ -46,6 +46,26 @@ def head_motion(rows):
             for name, values in [('neck_deg', angles), ('head_m', physical), ('drawn_nose_m', drawn)] if values}
 
 
+def cabin_resistance(rows, edge):
+    """Count sustained cabin contacts facing against the pull while the grip lags."""
+    names = ('pelvis', 'abdomen', 'lower chest', 'chest', 'head',
+             'right upper arm', 'right forearm', 'left upper arm', 'left forearm',
+             'right thigh', 'right shin', 'right foot', 'left thigh', 'left shin', 'left foot')
+    counts = {}
+    for row in rows:
+        if row['gap'] < .05 or not row['side'] or not edge:
+            continue
+        sign = math.copysign(1, edge)
+        for c in row['cabin_contacts']:
+            if sign * dot(c['normal'], row['side']) > -.25:
+                continue
+            part = c['part']
+            key = (names[part] if 0 <= part < len(names) else str(part), c['mesh'])
+            counts[key] = counts.get(key, 0) + 1
+    return [{'part': part, 'mesh': mesh, 'ticks': count}
+            for (part, mesh), count in sorted(counts.items(), key=lambda item: -item[1])]
+
+
 def analyze(trace):
     rows = trace['samples']
     if any(b['t'] <= a['t'] for a, b in zip(rows, rows[1:])):
@@ -95,6 +115,8 @@ def analyze(trace):
             wobble[i].append(math.dist(mid, [x + u*(y-x) for x, y in zip(prev, nxt)]))
 
     edge = trace['outer_tyre_x_m']
+    if all('cabin_contacts' in row for row in settled):
+        result['opposing_cabin_contacts_while_lagging'] = cabin_resistance(settled, edge)
     final = rows[-1]
     tail = [s for s in rows if s['t'] >= final['t'] - .25]
     result.update(grip_s=end-start, max_tick_s=max(b['t']-a['t'] for a,b in zip(rows, rows[1:])),

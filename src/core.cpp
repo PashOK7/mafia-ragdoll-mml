@@ -267,12 +267,23 @@ bool SaveTrajectory(const CarHandover &entry, const char *name) {
     return WriteTrace(name, TrajectoryJson(entry));
 }
 
+std::string TraceString(const std::string &value) {
+    std::string out = "\"";
+    for (unsigned char c : value) {
+        if (c == '"' || c == '\\') out += '\\';
+        if (c >= 32 && c < 127) out += static_cast<char>(c);
+        else out += Fmt("\\u%04x", unsigned(c));
+    }
+    return out + '"';
+}
+
 struct PullSample {
     float t, error;
     V3 left, right, coat, chest, pelvis, feet[2], origin, side;
     V3 head, drawnHead, drawnNose;
     Ragdoll::Quat neck;
     bool hands, carPose, drawn;
+    std::string cabinContacts;
 };
 
 struct PullTrace {
@@ -280,19 +291,23 @@ struct PullTrace {
     void *car = nullptr;
     V3 left{}, right{};
     float t = 0, settling = 0, wheelEdge = 0;
+    std::string carModel;
     bool hands = false;
     std::vector<PullSample> rows;
 } g_pull;
 
 void EndPullTrace(const char *reason) {
     if (!g_pull.body) return;
-    std::string out = Fmt("{\"end\":\"%s\",\"outer_tyre_x_m\":%.4f,\"samples\":[", reason, g_pull.wheelEdge);
+    jolt_world::WatchDriver(nullptr, nullptr);
+    std::string out = Fmt("{\"end\":\"%s\",\"outer_tyre_x_m\":%.4f,", reason, g_pull.wheelEdge);
+    out += "\"car_model\":" + TraceString(g_pull.carModel) + ",\"samples\":[";
     for (const auto &s : g_pull.rows) {
         if (out.back() != '[') out += ',';
         out += Fmt("{\"t\":%.5f,\"gap\":%.5f", s.t, s.error);
         out += ",\"left\":" + (s.hands ? TracePoint(s.left) : "null") + ",\"right\":" + (s.hands ? TracePoint(s.right) : "null");
         out += ",\"coat\":" + (s.error >= 0 ? TracePoint(s.coat) : "null") + ",\"chest\":" + TracePoint(s.chest);
         out += ",\"pelvis\":" + TracePoint(s.pelvis) + ",\"feet\":[" + TracePoint(s.feet[0]) + "," + TracePoint(s.feet[1]) + "]";
+        out += ",\"cabin_contacts\":[" + s.cabinContacts + "]";
         out += ",\"head\":" + TracePoint(s.head);
         out += Fmt(",\"neck_q\":[%.6f,%.6f,%.6f,%.6f]", s.neck.w, s.neck.x, s.neck.y, s.neck.z);
         out += ",\"drawn_head\":" + (s.drawn ? TracePoint(s.drawnHead) : "null");
@@ -308,6 +323,10 @@ void BeginPullTrace(Ragdoll *body, const void *car) {
     g_pull.body = body;
     g_pull.car = const_cast<void *>(car);
     g_pull.rows.reserve(400);
+    jolt_world::WatchDriver(body, car);
+    char name[512]{};
+    if (MML_HAS(H, model_file) && H->model_file && H->model_file(M, ModelOf(g_pull.car), name, sizeof name))
+        g_pull.carModel = name;
     smoke::Mover mover;
     if (!vehicles::MoverOf(g_pull.car, &mover) || !mover.hullParts) return;
     const float side = Dot(body->BodyPos(Ragdoll::B_PELVIS) - mover.c, mover.ax[0]) >= 0 ? 1.f : -1.f;
@@ -336,7 +355,14 @@ void SamplePull(float dt) {
     V3 axes[3];
     s.carPose = g_pull.car && vehicles::Pose(g_pull.car, &s.origin, axes);
     if (s.carPose) s.side = axes[0];
-    g_pull.rows.push_back(s);
+    for (const auto &contact : jolt_world::DriverContacts()) {
+        if (!s.cabinContacts.empty()) s.cabinContacts += ',';
+        const std::string name = vehicles::TriangleVisual(g_pull.car, jolt_world::CabinVersion(g_pull.car), contact.triangle);
+        s.cabinContacts += Fmt("{\"part\":%u,\"triangle\":%u,\"depth_m\":%.5f,", contact.part, contact.triangle, contact.depth);
+        s.cabinContacts += "\"mesh\":" + TraceString(name) + ",\"point\":" + TracePoint(contact.point) +
+                          ",\"normal\":" + TracePoint(contact.normal) + "}";
+    }
+    g_pull.rows.push_back(std::move(s));
     if (!body.carExtraction) g_pull.settling += dt;
     if (g_pull.settling >= 1.5f) EndPullTrace("completed");
     else if (g_pull.rows.size() >= 2048) EndPullTrace("sample limit");
