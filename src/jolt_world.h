@@ -73,6 +73,7 @@ std::string ReadyReport(const V3 &lo, const V3 &hi);   // why StaticReady says w
 void SetPersonPush(float maxForce, float mass);
 // A body being carried cannot knock its own holder over with the motion the holder gives it.
 void SetHolder(const void *ragdoll, const void *person);
+void ReleaseHolder(const void *ragdoll); // restore holder contacts after the pair separates
 // Aggregate contact diagnostics since world reset; locomotion excludes the body's own incoming reaction.
 std::string PersonPushState();
 // The blows dynamic bodies dealt living people in the last step: the momentum a body brought into a person (N s,

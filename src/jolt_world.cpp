@@ -89,7 +89,8 @@ std::unordered_map<uint32_t, const void *> g_passCar;     // dynamic body id -> 
 // give them infinite strength: they bulldozed bodies as if weightless and forced pinned limbs past their joints.
 // Their contacts with dynamic bodies are sensors instead; each tick the touched bodies get the impulse that stops
 // them closing in on the person and lets them out of the overlap, at most `g_personForce` N per person.
-std::unordered_map<const void *, const void *> g_holder;
+struct Holder { const void *person; bool released, touching; };
+std::unordered_map<const void *, Holder> g_holder;
 struct PersonPart { const void *who; float mass; };
 std::unordered_map<uint32_t, PersonPart> g_personOfBody;   // capsule -> its person and anatomical mass
 struct PersonTouch { JPH::BodyID person, body; const void *who; JPH::Vec3 n; JPH::RVec3 point; float depth; };
@@ -239,7 +240,8 @@ private:
         }
         if (!g_holder.empty()) {
             auto held = g_holder.find(reinterpret_cast<const void *>(static_cast<uintptr_t>(body->GetUserData())));
-            if (held != g_holder.end() && held->second == who) {
+            if (held != g_holder.end() && held->second.person == who) {
+                held->second.touching = true;
                 s.mIsSensor = true;
                 return;
             }
@@ -1058,8 +1060,13 @@ void WatchDriver(const void *ragdoll, const void *car) {
 const std::vector<PullContact> &DriverContacts() { return g_driverContacts; }
 
 void SetHolder(const void *ragdoll, const void *person) {
-    if (person) g_holder[ragdoll] = person;
+    if (person) g_holder[ragdoll] = {person, false, false};
     else g_holder.erase(ragdoll);
+}
+
+void ReleaseHolder(const void *ragdoll) {
+    auto it = g_holder.find(ragdoll);
+    if (it != g_holder.end()) it->second.released = true;
 }
 
 void SetPersonPush(float maxForce, float mass) { g_personForce = maxForce; g_personMass = mass; }
@@ -1093,7 +1100,14 @@ void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player) {
     RememberVelocities();
     ApplyPersonPushes(dt);
     ApplyWater(dt);
+    for (auto &entry : g_holder) entry.second.touching = false;
     JPH::EPhysicsUpdateError e = g_w->system->Update(dt, collisionSteps, g_w->temp.get(), g_w->jobs.get());
+    // Restoring collisions while the driver overlaps Tommy can prop up the
+    // pelvis or push it across the street after the hands have let go.
+    for (auto it = g_holder.begin(); it != g_holder.end();) {
+        if (it->second.released && !it->second.touching) it = g_holder.erase(it);
+        else ++it;
+    }
     for (VehicleContact &c : g_vehicleContacts) c.at += g_w->origin;
     CollectCarKicks();
     g_stepMs = g_stepMs * 0.9 + (Now() - t0) * 0.1;

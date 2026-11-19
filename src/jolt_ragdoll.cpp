@@ -2,6 +2,7 @@
 #include "fmt.h"
 #include "jolt_ragdoll.h"
 #include "anatomy.h"
+#include "vehicles.h"
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Ragdoll/Ragdoll.h>
@@ -135,11 +136,12 @@ struct Entry {
     JPH::Ref<JPH::Constraint> seat;         // the pelvis held to the seat
     const void *passCar = nullptr;          // born inside this car's hull (killed in its open door): passes through it
     float passClear = 0;                    // s since no part is inside that hull any more
-    JPH::Ref<JPH::PointConstraint> grip;   // the part of the coat that Tommy actually reached
+    JPH::Ref<JPH::PointConstraint> grip;   // point on the driver's trunk reached by Tommy's hands
     JPH::BodyID handAnchor;
     bool reached = false;
-    V3 lastHands{}, initialSlack{}, grabHands{}, outward{}, gripAxis{};
-    float initialSpan = 0, tightestSpan = 0;
+    V3 lastHands{}, initialSlack{}, outward{}, gripAxis{};
+    float reachStart = 0, deepestReach = 0, gripStart = 0, lastDepth = 0;
+    float farthestPull = 0;
     float gripAge = 0;
     JPH::SwingTwistConstraint *passiveNeck = nullptr;
     // Held still until the static world around it is there (after a core reload, in a part of the city just
@@ -548,7 +550,8 @@ void FinishPull(Ragdoll *r) {
     auto it = g_entries.find(r);
     if (it == g_entries.end()) return;
     ReleaseSeat(it->second); // The engine also vacates the seat if the player is interrupted.
-    ReleaseGrip(it->second, r);
+    ReleaseGrip(it->second, r, false);
+    jolt_world::ReleaseHolder(r);
 }
 
 void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &right, const V3 &player, float dt) {
@@ -561,13 +564,31 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
 
     const V3 hands = (left + right) * .5f;
     const float span = Len(right - left);
+    // Measure the actual reach and return across the door in the car's frame.
+    // Vertical and fore-aft movement of the hands also occurs while reaching in.
+    const void *car = e.car ? e.car : e.passCar;
+    V3 origin{}, axes[3];
+    float depth = e.lastDepth + Dot(hands - e.lastHands, e.outward);
+    if (car && vehicles::Pose(const_cast<void *>(car), &origin, axes)) {
+        V3 side = axes[0];
+        if (Dot(side, e.reached ? e.outward : player - origin) < 0) side = side * -1.f;
+        e.outward = side;
+        depth = Dot(hands - origin, side);
+    } else if (!e.reached) {
+        return;
+    }
+    const float outwardSpeed = (depth - e.lastDepth) / dt;
+    e.lastDepth = depth;
     if (!e.grip) {
         const V3 chest = r->BodyPos(Ragdoll::B_CHEST);
-        const bool withinReach = Len(hands - chest) < .95f && Dot(hands - player, chest - player) > 0;
-        const bool withdrawing = e.reached && Dot(hands - e.lastHands, player - chest) > 0;
+        if (!e.reached || depth > e.reachStart) {
+            e.reached = true;
+            e.reachStart = e.deepestReach = depth;
+        }
+        e.deepestReach = std::min(e.deepestReach, depth);
         e.lastHands = hands;
-        e.reached = withinReach;
-        if (!withinReach || !withdrawing) return;
+        if (e.reachStart - e.deepestReach < .12f || depth - e.deepestReach < .015f || outwardSpeed <= 0 ||
+            Len(hands - chest) >= .95f || Dot(hands - player, chest - player) <= 0) return;
 
         // The same animation reaches the jacket at different heights in each car.
         // Bind once to the closest trunk surface along a ray towards each segment.
@@ -604,19 +625,21 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
         jolt_world::SetHolder(r, holder);
         e.initialSlack = F(JPH::Vec3(contact - start));
         e.gripAge = 0;
-        e.grabHands = hands;
-        e.outward = Norm({player.x - chest.x, 0, player.z - chest.z}, {0, 0, 0});
-        e.initialSpan = e.tightestSpan = span;
+        e.gripStart = e.farthestPull = depth;
         e.gripAxis = Norm(right - left, {0, 0, 0});
     } else if (Len(hands - e.lastHands) > 1.5f) {
         ReleaseGrip(e, r); // the player was teleported across the scene
         return;
     }
 
-    // When the hands open on the outward stroke the driver keeps the momentum
-    // of that stroke. Holding into the returning hands draws the hips back onto the sill.
-    e.tightestSpan = std::min(e.tightestSpan, span);
-    if (Dot(hands - e.grabHands, e.outward) > .45f && e.tightestSpan < .8f * e.initialSpan && span > e.tightestSpan + .004f) {
+    // The returning hands support the driver's weight while their outward
+    // momentum dissipates. Release as they start separating from the driver.
+    e.farthestPull = std::max(e.farthestPull, depth);
+    const V3 hipVelocity = F(bi.GetLinearVelocity(e.ragdoll->GetBodyID(PELVIS)));
+    const V3 handVelocity = (hands - e.lastHands) * (1.f / dt);
+    const float hipSpeed = outwardSpeed + Dot(hipVelocity - handVelocity, e.outward);
+    if (e.farthestPull - e.gripStart > .45f &&
+        ((outwardSpeed <= 0 && hipSpeed <= 0) || e.farthestPull - depth >= .025f)) {
         ReleaseGrip(e, r, false); // ignore contact with Tommy until his native action actually finishes
         return;
     }
@@ -626,7 +649,7 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
     const V3 target = hands + e.initialSlack * (slack * slack * (3.f - 2.f * slack));
     bi.MoveKinematic(e.handAnchor, J(jolt_world::ToJolt(target)), JPH::Quat::sIdentity(), dt);
     const auto held = e.grip->GetBody2()->GetID();
-    // Two hands can turn the coat as a pair. Resist angular slip perpendicular
+    // Two hands can turn the trunk as a pair. Resist angular slip perpendicular
     // to the line between them, leaving rotation about that line free.
     const V3 axis = Norm(right - left, e.gripAxis);
     if (span > .02f) {
