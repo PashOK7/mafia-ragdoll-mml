@@ -879,8 +879,7 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
     // The seated: their cars' cabins kept, their seats made once the cabin is there.
     for (auto &kv : g_entries) {
         if (!kv.second.car) continue;
-        jolt_world::RequestCabin(kv.second.car);
-        Seat(kv.second);
+        jolt_world::RequestCabin(kv.second.car, kv.first);
     }
     // Bodies passing through a car's hull: its cabin kept while any part is inside the hull; out for half a second
     // (or the car gone from the world): an ordinary body again.
@@ -935,7 +934,10 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
         V3 c = JoltBridge::Origin(r) + JoltBridge::B(r, PELVIS).x;
         jolt_world::AddFocus(c - V3{12, 8, 12}, c + V3{12, 8, 12});
     }
-    jolt_world::Step(dt, movers, player);
+    jolt_world::Step(dt, movers, player, [] {
+        for (auto &[body, entry] : g_entries)
+            if (entry.car && !body->standingInCabin) Seat(entry);
+    });
     for (Ragdoll *r : all) {
         auto it = g_entries.find(r);
         if (it != g_entries.end()) ReadBack(r, it->second, dt);

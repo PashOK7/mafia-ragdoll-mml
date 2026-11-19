@@ -46,7 +46,7 @@ inline V3 ToWorld(const V3 &local) { return local + Origin(); }
 // - `player`: where Tommy is (null: no player): the static world is kept ready around him, and the origin follows
 //   him when nothing dynamic exists.
 // Dynamic bodies are the callers'; they read their bodies after this.
-void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player);
+void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player, void (*attachSeats)() = nullptr);
 
 // A body that started inside a car's hull (a convex hull fills the cabin and the open door's gap: a person killed in
 // the doorway is born inside it). `SetPassThrough(body, car)`: its contacts with that car's hull bodies are rejected,
@@ -95,7 +95,7 @@ bool HasKinematic(const void *key);
 bool EnsureVehicle(const smoke::Mover &mover);
 
 // A car someone sits in: its cabin body (layer kCabin) is kept while asked for every tick, from the next Step on.
-void RequestCabin(const void *car);
+void RequestCabin(const void *car, const void *occupant = nullptr);
 JPH::BodyID CabinBody(const void *car);   // invalid while there is none
 // Told before a cabin's body goes (the car left the world, or nobody asks for it): constraints to it must go first.
 using CabinGoneFn = void (*)(const void *car);

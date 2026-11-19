@@ -42,6 +42,7 @@ public:
     uint32_t keyVtable = 0;    // the actor's vtable when the ragdoll started (detects a reused address)
     bool puppet = false;       // started by command on a living human (no death)
     bool knockdown = false;    // a living human knocked over by a car: handed back to the game once it lies still
+    bool standingInCabin = false; // cabin collision without a seat constraint
     bool vehicleImpact = false; // car impacts use collision forces, with no animation-driven muscle target
     void *impactVehicle = nullptr; // keep the striking vehicle discoverable until it leaves the body's area
     bool sleeping = false;     // at rest (Jolt's sleep)

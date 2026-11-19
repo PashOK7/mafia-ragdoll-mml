@@ -30,7 +30,9 @@ into the folder containing Game.exe. [Download the latest release](https://githu
   gives the scene's meshes and the cars' models, including changes to door positions); a body never falls through a street that is not loaded yet (it
   waits for it). Bullets that hit a body lying on the ground push it and are taken from the game's own test, so a
   shot body moves where it was struck. Cars driven over or into bodies are slowed by them.
-- **In cars.** Someone killed in his seat slumps there and stays in the cabin while the car drives, turns, brakes or
+- **Trams and trains.** The tram driver and passengers react to a fatal hit in their current pose. A standing
+  character can fall to the floor. Seated passengers slump and travel with their own carriage, including the rear train car.
+- **In cars.** A traffic driver becomes a ragdoll as soon as the game registers a fatal hit. Someone killed in his seat slumps there and stays in the cabin while the car drives, turns, brakes or
   crashes or moves with a mission script. When Tommy pulls a dead driver out, the driver's coat stays in his hands as he draws the torso through the door.
   The legs follow under their own weight, and the body stays in the street when the car leaves.
 - **The ragdoll camera.** While the player himself is a ragdoll and while he gets up, the camera circles his body:
@@ -77,7 +79,7 @@ The same keys are in `mod/config.json` (the defaults); what is changed in the ga
 ## To do
 
 - Add ragdoll physics for dogs.
-- Give the tram driver and passengers ragdoll reactions.
+- Let a character’s hat fly off when the character enters ragdoll, if they are wearing one.
 - Let Tommy pull a dead driver out of the car when stealing it.
 
 ## Cost

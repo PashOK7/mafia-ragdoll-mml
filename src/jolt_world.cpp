@@ -33,6 +33,7 @@ namespace jolt_world {
 namespace {
 
 LogFn g_log;
+std::unordered_map<uint64_t, const void *> g_occupantCabins; // refreshed by the solver before each step
 #define JLOG(...) (g_log ? g_log(__VA_ARGS__) : (void)0)
 
 
@@ -156,6 +157,15 @@ public:
     // A body passing through a car's hull (SetPassThrough) does not meet that car's hull bodies; it meets the car's
     // cabin, which is not one of them.
     JPH::ValidateResult OnContactValidate(const JPH::Body &a, const JPH::Body &b, JPH::RVec3Arg, const JPH::CollideShapeResult &) override {
+        if (a.GetObjectLayer() == kCabin || b.GetObjectLayer() == kCabin) {
+            const auto &cabin = a.GetObjectLayer() == kCabin ? a : b;
+            const auto &person = a.GetObjectLayer() == kCabin ? b : a;
+            if (person.GetObjectLayer() == kOccupant) {
+                auto owner = g_occupantCabins.find(person.GetUserData());
+                if (owner != g_occupantCabins.end() && cabin.GetUserData() != reinterpret_cast<uintptr_t>(owner->second))
+                    return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+            }
+        }
         if (!g_passCar.empty() && (Passes(a, b) || Passes(b, a))) return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
         return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
     }
@@ -596,7 +606,7 @@ void ApplyKinematics(float dt, const std::vector<smoke::Mover> &movers) {
     g_tick++;
     for (const smoke::Mover &m : movers) {
         V3 pos; JPH::Quat rot; unsigned version;
-        if (!m.key || !PoseOf(m, &pos, &rot, &version)) continue;
+        if (m.cabinOnly || !m.key || !PoseOf(m, &pos, &rot, &version)) continue;
         bool created;
         Kinematic *entry = KinematicFor(m, pos, rot, version, &created);
         if (!entry || created) continue;
@@ -705,6 +715,7 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
             JPH::RefConst<JPH::Shape> shape = TwoSidedMesh(m);
             if (!shape) continue;
             JPH::BodyCreationSettings s(shape, J(pos), rot, JPH::EMotionType::Kinematic, kCabin);
+            s.mUserData = reinterpret_cast<uintptr_t>(m.key);
             // Seats and roof liners are triangulated. Slide across their internal
             // edges without generating an extra contact normal at each seam.
             s.mEnhancedInternalEdgeRemoval = true;
@@ -846,6 +857,7 @@ void RemoveAll() {
     g_carOfBody.clear();
     WatchDriver(nullptr, nullptr);
     g_passCar.clear();
+    g_occupantCabins.clear();
     g_holder.clear();
     g_personOfBody.clear();
     g_personTouches.clear();
@@ -1078,7 +1090,7 @@ std::string PersonPushState() {
                g_pushStats.peakForce, g_personForce, g_pushStats.maxPartMass);
 }
 
-void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player) {
+void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player, void (*attachSeats)()) {
     g_driverContacts.clear();
     g_carContacts.clear();
     g_carContactsDropped = 0;
@@ -1092,7 +1104,8 @@ void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player) {
     ApplyScenery();
     ApplyKinematics(dt, movers);
     ApplyCabins(dt, movers);
-    if (dt <= 0) return;   // the game is paused: the bodies wait
+    if (attachSeats) attachSeats();
+    if (dt <= 0) { g_occupantCabins.clear(); return; }
     // Integrate the same mission interval used for mover velocities and recovery timers.
     // The host bounds mission ticks below 200 ms. Keep each collision substep at most 1/120 s.
     int collisionSteps = std::max(1, (int)std::ceil(dt * 120.0f - 1e-3f));
@@ -1109,6 +1122,7 @@ void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player) {
         else ++it;
     }
     for (VehicleContact &c : g_vehicleContacts) c.at += g_w->origin;
+    g_occupantCabins.clear();
     CollectCarKicks();
     g_stepMs = g_stepMs * 0.9 + (Now() - t0) * 0.1;
     g_steps++;
@@ -1228,7 +1242,11 @@ bool EnsureVehicle(const smoke::Mover &m) {
 
 void SetImpactListener(ImpactFn fn) { g_impact = fn; }
 
-void RequestCabin(const void *car) { if (car) g_cabinWanted.insert(car); }
+void RequestCabin(const void *car, const void *occupant) {
+    if (!car) return;
+    g_cabinWanted.insert(car);
+    if (occupant) g_occupantCabins[reinterpret_cast<uintptr_t>(occupant)] = car;
+}
 JPH::BodyID CabinBody(const void *car) {
     auto it = g_cabins.find(car);
     return it != g_cabins.end() ? it->second.body : JPH::BodyID();

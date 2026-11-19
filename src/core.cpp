@@ -481,8 +481,10 @@ void EraseAt(size_t i) {
     g_ragdolls.erase(g_ragdolls.begin() + i);
 }
 
+void PurgeOccupantFrames();
 void Purge() {
     if (g_freed.empty()) return;
+    PurgeOccupantFrames();
     for (size_t i = 0; i < g_ragdolls.size();) {
         Ragdoll *rd = g_ragdolls[i].get();
         if (g_freed.count(rd->Model()) || rd->UsesAny(g_freed)) {
@@ -907,9 +909,186 @@ bool BeingPulledFromCar(void *human) {
     return clip >= 312 && clip <= 315;
 }
 
+// A traffic or railway occupant is a model owned by a native roster, without a human actor.
+struct Occupant {
+    void *carrier{}, *record{}, *model{}, *frame{};
+    int slot{}, carriage{};
+    bool rail{}, driver{}, sampleDraw{};
+    float drawnNeckError = -1;
+    std::unique_ptr<Ragdoll> body;
+};
+std::vector<Occupant> g_occupants;
+std::unordered_map<void *, std::vector<V3>> g_carriageMeshes;
+
+template<class Visit> bool RosterContains(uintptr_t vector, Visit visit) {
+    auto first = *reinterpret_cast<void ***>(vector), last = *reinterpret_cast<void ***>(vector + 4);
+    return first && last >= first && last - first <= 1024 && std::any_of(first, last, visit);
+}
+
+void PruneOccupants() {
+    std::erase_if(g_occupants, [](const Occupant &o) {
+        bool present = false;
+        auto check = [&] {
+            const uintptr_t vector = o.rail ? reinterpret_cast<uintptr_t>(o.carrier) + 0x254 : game::Exe().trafficElements;
+            if (!RosterContains(vector, [&](void *p) { return p == o.record; })) return;
+            const int state = o.rail ? game::at<int>(o.record, 0) : 0;
+            // Native animation completion moves the body to 18 (passenger) or 20 (driver).
+            present = game::at<void *>(o.record, o.slot) == o.model &&
+                (o.rail ? (state == 17 || state == 18 || (o.driver && state == 20)) :
+                 game::at<uint8_t>(o.record, 0) && game::at<void *>(o.record, 12) == o.carrier &&
+                 (!o.driver || game::at<uint8_t>(o.carrier, game::g_exe == &game::kExe10 ? 0x2071 : 0x2131)));
+        };
+        return !Guarded(check) || !present;
+    });
+}
+
+void PurgeOccupantFrames() {
+    std::erase_if(g_occupants, [](const Occupant &o) {
+        return g_freed.count(o.model) || g_freed.count(o.frame) || o.body->UsesAny(g_freed);
+    });
+    for (void *frame : g_freed) g_carriageMeshes.erase(frame);
+}
+
+// The collision grid and box transforms are local to each particular carriage.
+bool CarriageMesh(const Cabin &c) {
+    if (g_carriageMeshes.count(c.frame)) return true;
+    auto begin = game::at<void **>(c.grid, 4), end = game::at<void **>(c.grid, 8);
+    if (!begin || end < begin || end - begin > 1024) return false;
+    std::vector<V3> tris;
+    constexpr int faces[][4] = {{0,1,3,2},{4,6,7,5},{0,4,5,1},{2,3,7,6},{0,2,6,4},{1,5,7,3}};
+    for (; begin != end; ++begin) {
+        void *box = *begin;
+        if (!box || (game::at<unsigned>(box, 8) & 2)) continue;
+        const int kind = game::at<uint8_t>(box, 0);
+        if (kind != 0x40 && kind != 0x41) continue;
+        const float *m = kind == 0x40 ? game::at<float *>(box, 60) : nullptr;
+        if (kind == 0x40 && !m) continue;
+        const V3 lo = game::at<V3>(box, 36), hi = game::at<V3>(box, 48);
+        V3 corners[8];
+        for (int i = 0; i != 8; ++i) {
+            V3 p{i & 1 ? hi.x : lo.x, i & 2 ? hi.y : lo.y, i & 4 ? hi.z : lo.z};
+            corners[i] = m ? M3::Raw(m).Apply(p) + V3{m[12], m[13], m[14]} : p;
+        }
+        for (const auto &f : faces)
+            for (int i : {0,1,2,0,2,3}) tris.push_back(corners[f[i]]);
+    }
+    if (tris.empty()) return false;
+    g_carriageMeshes.emplace(c.frame, std::move(tris));
+    Watch(c.frame);
+    return true;
+}
+
+void StartOccupant(Occupant o) {
+    if (!g_cfg.enabled || !o.model || !game::Player() || !jolt_ragdoll::Enabled()) return;
+    for (const auto &other : g_occupants) if (other.model == o.model) return;
+    smoke::Mover carMover;
+    if (!o.rail && !vehicles::MoverOf(o.carrier, &carMover)) return;
+    std::string err;
+    o.body = std::make_unique<Ragdoll>();
+    if (!o.body->Init(o.model, o.model, nullptr, &err)) {
+        LOG("occupant %p model %p skeleton: %s", o.carrier, o.model, err.c_str());
+        return;
+    }
+    if (o.rail) {
+        // The stock tram driver stands at the controls. A seated passenger's
+        // thighs are nearly horizontal, even when their torso leans to one side.
+        const auto *points = o.body->InitialPoints();
+        V3 thighs = Norm(points[Ragdoll::RHIP] - points[Ragdoll::RKNEE]) +
+                    Norm(points[Ragdoll::LHIP] - points[Ragdoll::LKNEE]);
+        o.body->standingInCabin = thighs.y > 1.0f;
+    }
+    const auto track = g_carTracks.find(o.carrier);
+    if (track != g_carTracks.end() && g_tick - track->second.tick <= 2)
+        o.body->SetMotionFrom(nullptr, 0, &track->second.vel);
+    if (!jolt_ragdoll::Add(o.body.get(), &err, o.rail ? o.frame : o.carrier)) {
+        LOG("occupant %p model %p physics: %s", o.carrier, o.model, err.c_str());
+        return;
+    }
+    WatchRagdoll(o.body.get());
+    LOG("occupant ragdoll at death: %s %s model %p carrier %p carriage %d", o.rail ? "rail" : "traffic",
+        o.driver ? "driver" : "passenger", o.model, o.carrier, o.carriage);
+    g_occupants.push_back(std::move(o));
+}
+
+void TrafficDeath(MmlMidContext *ctx, void *) {
+    auto capture = [&] {
+        if (!g_cfg.enabled) return;
+        void *car = reinterpret_cast<void *>(ctx->ecx);
+        RosterContains(game::Exe().trafficElements, [&](void *record) {
+            if (!record || !game::at<uint8_t>(record, 0) || game::at<void *>(record, 12) != car) return false;
+            for (int slot : {28, 32}) {
+                void *model = game::at<void *>(record, slot);
+                if (!model || model != reinterpret_cast<void *>(ctx->edx)) continue;
+                Occupant o;
+                o.carrier = car; o.record = record; o.model = model; o.slot = slot;
+                o.driver = slot == 28;
+                StartOccupant(std::move(o));
+            }
+            return true;
+        });
+    };
+    Guarded(capture);
+}
+
+void RailDeath(MmlMidContext *ctx, void *) {
+    auto capture = [&] {
+        if (!g_cfg.enabled) return;
+        Occupant o;
+        o.record = reinterpret_cast<void *>(ctx->ecx);
+        o.carrier = reinterpret_cast<void **>(ctx->esp)[1];
+        if (!o.carrier || !o.record) return;
+        int state = game::at<int>(o.record, 0);
+        if (state == 22) state = game::at<int>(o.record, 0x44);
+        if (state == 17) return;
+        o.rail = true; o.slot = 4;
+        o.model = game::at<void *>(o.record, o.slot);
+        o.driver = o.record == static_cast<uint8_t *>(o.carrier) + 0x2b0;
+
+        o.carriage = game::at<int>(o.record, 0x18);
+        Cabin cabin{};
+        if (!o.model || !cabin.Open(o.carrier, o.carriage) || !CarriageMesh(cabin)) return;
+        o.frame = cabin.frame;
+        StartOccupant(std::move(o));
+    };
+    Guarded(capture);
+}
+
+void OccupantMovers(std::vector<smoke::Mover> &out) {
+    for (const auto &o : g_occupants) {
+        void *key = o.rail ? o.frame : o.carrier;
+        if (std::any_of(out.begin(), out.end(), [&](const auto &m) { return m.key == key; })) continue;
+        smoke::Mover m;
+        if (o.rail) {
+            const float *w = game::WorldMatrix(o.frame);
+            m.kind = smoke::Mover::HULL; m.key = key; m.cabinOnly = true; m.hullIsTriangles = true;
+            m.hull = &g_carriageMeshes.at(key); m.shapeVersion = 1;
+            m.c = {w[12], w[13], w[14]};
+            M3 axes = M3::FromWorld(w); axes.Orthonormalize();
+            for (int i = 0; i < 3; ++i) m.ax[i] = axes.r[i];
+        } else if (!vehicles::MoverOf(o.carrier, &m)) continue;
+        out.push_back(m);
+    }
+}
+
 // ---- making a ragdoll
 Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy = nullptr) {
     if (Ragdoll *r = Find(actor)) return r;
+    // Traffic can promote the same model to a human when Tommy opens the door.
+    // Keep its Jolt bodies, their velocities and their existing seat constraint.
+    if (!puppet && !IsPed(actor)) {
+        const void *model = ModelOf(actor);
+        auto occupant = std::find_if(g_occupants.begin(), g_occupants.end(), [&](const Occupant &o) {
+            return !o.rail && o.model == model;
+        });
+        if (occupant != g_occupants.end()) {
+            auto body = std::move(occupant->body);
+            g_occupants.erase(occupant);
+            body->actor = actor;
+            body->keyVtable = game::at<uint32_t>(actor, 0);
+            g_ragdolls.push_back(std::move(body));
+            return g_ragdolls.back().get();
+        }
+    }
     // The host must stop its previous handover before a new body captures/poses the skeleton.
     if (MML_HAS(H, human_get_up_cancel) && H->human_get_up_cancel) H->human_get_up_cancel(M, actor);
     void *leftTram = LeaveTram(actor);
@@ -1088,6 +1267,7 @@ void JoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
     }
     static std::vector<smoke::Mover> movers;
     JoltMovers(movers);
+    OccupantMovers(movers);
     V3 pp = pl ? game::ActorWorldPos(pl) : V3{};
     jolt_ragdoll::Step(jolt, dt, movers, pl ? &pp : nullptr);
 }
@@ -1353,6 +1533,7 @@ const char *GetUpReason(const Ragdoll &body) {
 void TickBody(float dt) {
     g_tick++;
     Purge();
+    PruneOccupants();
     ListPeople();
     TracePedestrians(TrajectoryStage::TickBegin);
     scenery::Tick();
@@ -1407,8 +1588,10 @@ void TickBody(float dt) {
     // every ragdoll steps in the one world: their bodies meet each other
     std::vector<Ragdoll *> jolt;
     for (auto &r : g_ragdolls) if (jolt_ragdoll::Has(r.get())) jolt.push_back(r.get());
+    for (const auto &o : g_occupants) jolt.push_back(o.body.get());
     bool joltOk = SafeJoltStep(jolt, dt);
     if (!joltOk) {
+        g_occupants.clear();
         LOG("jolt world faulted: its ragdolls dropped, the world made anew on the next tick");
         jolt_ragdoll::Clear();
         jolt_world::Stop();
@@ -1468,6 +1651,10 @@ void TickBody(float dt) {
             LOG("ragdoll %p faulted while writing, dropped", rd->actor);
             EraseAt(i);
         }
+    }
+    for (auto &o : g_occupants) {
+        auto write = [&] { o.body->Apply(); };
+        Guarded(write);
     }
     TracePedestrians(TrajectoryStage::TickEnd);
     GiveShapes();
@@ -1747,6 +1934,11 @@ void Tick(float dt) {
 void Render() {
     if (!g_cfg.enabled) return;
     Purge();
+    PruneOccupants();
+    for (auto &o : g_occupants) {
+        auto write = [&] { o.body->Apply(); };
+        Guarded(write);
+    }
     TracePedestrians(TrajectoryStage::RenderBegin);
     for (auto &r : g_ragdolls) {
         // the game brought him back since our tick: the game's (the tick drops the ragdoll)
@@ -1778,6 +1970,19 @@ void Render() {
 void Rendered() {
     if (!g_cfg.enabled) return;
     TracePedestrians(TrajectoryStage::WorldDrawn);
+    for (auto &o : g_occupants) {
+        if (!o.sampleDraw) continue;
+        o.sampleDraw = false;
+        auto read = [&] {
+            if (g_freed.count(o.model) || o.body->UsesAny(g_freed)) return;
+            M3 rotations[19];
+            V3 origins[19];
+            o.body->PhysicalPose(rotations, origins);
+            const float *w = game::WorldMatrix(o.body->Frames()[9]);
+            o.drawnNeckError = Len(origins[9] - V3{w[12], w[13], w[14]});
+        };
+        Guarded(read);
+    }
     auto read = [&] {
         if (g_pull.body && !g_pull.rows.empty() && !g_pull.rows.back().drawn) {
             Ragdoll::PoseSnap pose{};
@@ -1910,6 +2115,7 @@ void OnExplosion(const MmlExplosion &x) {
 }
 
 void OnActorDestroyed(void *actor) {
+    std::erase_if(g_occupants, [actor](const auto &o) { return o.carrier == actor; });
     if (g_pull.car == actor) g_pull.car = nullptr;
     for (auto &body : g_ragdolls) if (body->impactVehicle == actor) body->impactVehicle = nullptr;
     if (Find(actor)) Drop(actor);
@@ -1958,6 +2164,8 @@ bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
 }
 
 void OnWorldReset(const char *reason) {
+    g_occupants.clear();
+    g_carriageMeshes.clear();
     EndPullTrace("world reset");
     for (auto &entry : g_handovers) { entry.traceEnded = true; PersistTrajectory(entry); }
     ragcam::Stop();
@@ -2051,6 +2259,10 @@ void Start() {
     jolt_ragdoll::Init(mod::Log);
     knock::Init(mod::Log);
     Settings();
+    const bool v10 = game::g_exe == &game::kExe10;
+    const bool traffic = H->hook_mid(M, v10 ? 0x506C00 : 0x4BADD0, TrafficDeath, nullptr);
+    const bool rail = H->hook_mid(M, v10 ? 0x4D5160 : 0x484230, RailDeath, nullptr);
+    LOG("occupant death pose capture: traffic %d, railway %d", traffic, rail);
     Hooks();
     H->hit_filter(M, HitFilter, nullptr);
     const int mission = H->mission_state();
@@ -2059,6 +2271,8 @@ void Start() {
 }
 
 void Stop() {
+    g_occupants.clear();
+    g_carriageMeshes.clear();
     EndPullTrace("unload");
     ragcam::Stop();
     for (auto &r : g_ragdolls) Unshape(r->actor);
@@ -2109,6 +2323,14 @@ std::string State() {
                     r->puppet ? "true" : "false", r->sleeping ? "true" : "false", r->vehicleImpact ? "true" : "false", r->age, p.x, p.y, p.z, ch.x, ch.y, ch.z,
                     hd.x, hd.y, hd.z, fastest, r->sleepTimer, jolt_ragdoll::GripDistance(r.get()));
     }
+    std::string occupants;
+    for (auto &o : g_occupants) {
+        o.sampleDraw = true;
+        const auto p = o.body->BodyPos(Ragdoll::B_PELVIS), h = o.body->BodyPos(Ragdoll::B_HEAD);
+        occupants += Fmt("%s{\"model\":\"0x%08X\",\"carrier\":\"0x%08X\",\"kind\":\"%s_%s\",\"carriage\":%d,\"drawn_neck_error\":%.4f,\"age\":%.3f,\"pelvis\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f]}",
+            occupants.empty() ? "" : ",", (unsigned)(uintptr_t)o.model, (unsigned)(uintptr_t)o.carrier, o.rail ? "rail" : "traffic",
+            o.driver ? "driver" : "passenger", o.carriage, o.drawnNeckError, o.body->age, p.x,p.y,p.z,h.x,h.y,h.z);
+    }
     std::string supports;
     for (const auto &[car, track] : g_carTracks) {
         const uint32_t mask = VehicleSupport(car, nullptr);
@@ -2116,9 +2338,9 @@ std::string State() {
             supports += Fmt("%s{\"car\":\"0x%08X\",\"wheels\":%u}", supports.empty() ? "" : ",",
                             (unsigned)(uintptr_t)car, mask);
     }
-    return Fmt("{\"car_handovers\":%s,\"wheel_support\":[%s],\"enabled\":%s,\"ragdolls\":[%s],\"tracked\":%u,\"pedestrians\":%u,\"world\":%s,\"corpse_hits\":%u,\"dodge_fixes\":%u,\"dodge_step_sweeps\":%u,"
+    return Fmt("{\"occupants\":[%s],\"car_handovers\":%s,\"wheel_support\":[%s],\"enabled\":%s,\"ragdolls\":[%s],\"tracked\":%u,\"pedestrians\":%u,\"world\":%s,\"corpse_hits\":%u,\"dodge_fixes\":%u,\"dodge_step_sweeps\":%u,"
                "\"scenery\":\"%s\",\"person_push\":%s,\"last_bullet\":%s}",
-               CarHandoverState().c_str(), supports.c_str(), g_cfg.enabled ? "true" : "false", list.c_str(), (unsigned)g_poses.size(), (unsigned)g_pedList.size(),
+               occupants.c_str(), CarHandoverState().c_str(), supports.c_str(), g_cfg.enabled ? "true" : "false", list.c_str(), (unsigned)g_poses.size(), (unsigned)g_pedList.size(),
                jolt_world::Running() ? "true" : "false", g_corpseHits, g_dodgeFixes, g_dodgeStepSweeps, scenery::Describe().c_str(),
                jolt_world::PersonPushState().c_str(), g_lastBullet.actor ?
                Fmt("{\"actor\":\"0x%08X\",\"at\":[%.4f,%.4f,%.4f],\"shape\":%d,\"part\":%d,\"local_dv\":%.4f}",

@@ -42,6 +42,7 @@ struct Mover {
     const std::vector<uint32_t> *nativeWheels = nullptr; // per hull part: native wheel index + 1, 0 for other parts
     // HULL of a vehicle with no body of its own mass (a tram): its exact shape, `hull`'s triangles from both sides
     bool hullAsMesh = false;
+    bool cabinOnly = false; // private railway collision, in this carriage frame
 };
 
 } // namespace smoke
