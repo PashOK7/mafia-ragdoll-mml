@@ -90,6 +90,51 @@ def check(game):
         assert 0 <= body['drawn_neck_error'] < .15, body
         print(game.build, role, body['age'], body['drawn_neck_error'])
 
+    def float_bits(value):
+        return struct.unpack('<I', struct.pack('<f', value))[0]
+
+    engine = word(int(game.call('game')['mission'], 16) + 0x24)
+    shooter = int(game.call('game')['player'], 16)
+    def fire(origin, direction):
+        game.call('native.call', at=hex(0x5A84A0 if v12 else 0x5E3DF0), conv='thiscall',
+                  this=engine, ret='uint', args=[shooter, *map(float_bits, origin),
+                  *(float_bits(v * 160) for v in direction), float_bits(28), 0, 0, 1])
+        time.sleep(.32)
+        return game.call('ragdoll.state')
+
+    scale = game.call('state.time')['scale']
+    try:
+        game.call('state.time', scale=.15)
+        for role, model in targets.items():
+            if role == 'traffic_driver':
+                continue
+            for through_floor in (True, False):
+                before = game.call('ragdoll.state')
+                rider = next(o for o in before['occupants'] if int(o['model'], 16) == model)
+                carrier = int(rider['carrier'], 16)
+                frame = word(word(carrier + 0xC4)) if rider['carriage'] else word(carrier + 0x68)
+                address = game.call('native.call', at=hex(0x47ACD0 if v12 else 0x4F46C0),
+                                    conv='fastcall', args=[frame], ret='uint')['ret']
+                world = struct.unpack('<16f', read(address, 64))
+                head = rider['head']
+                local = [v - w for v, w in zip(head, world[12:15])]
+                if through_floor:
+                    direction = world[4:7]
+                    distance = sum(v * w for v, w in zip(local, direction)) + .3
+                else:
+                    side = 1 if sum(v * w for v, w in zip(local, world[:3])) > 0 else -1
+                    direction = [side * v for v in world[:3]]
+                    distance = .42
+                after = fire([v - distance * d for v, d in zip(head, direction)], direction)
+                impacts = after['corpse_hits'] - before['corpse_hits']
+                assert impacts == int(not through_floor), (role, through_floor, impacts, after['last_bullet'])
+                if impacts:
+                    hit = after['last_bullet']
+                    assert int(hit['actor'], 16) == model and hit['part'] >= 0 and hit['local_dv'] > 0, hit
+                    print(game.build, role, 'floor blocked, exposed hit', hit['part'], hit['local_dv'])
+    finally:
+        game.call('state.time', scale=scale)
+
 
 if __name__ == '__main__':
     if sys.argv[1:] not in (['1.0'], ['1.2']):

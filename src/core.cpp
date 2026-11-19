@@ -915,10 +915,28 @@ struct Occupant {
     int slot{}, carriage{};
     bool rail{}, driver{}, sampleDraw{};
     float drawnNeckError = -1;
+    void *lastShooter{};
+    V3 lastShotOrigin{}, lastShotEnd{};
+    bool hasShotSegment = false;
     std::unique_ptr<Ragdoll> body;
 };
 std::vector<Occupant> g_occupants;
-std::unordered_map<void *, std::vector<V3>> g_carriageMeshes;
+// Trailing carriages have separate model frames outside the railway actor. Keep
+// their visual triangles in node space and refit moved or hidden parts (doors).
+struct RailPart {
+    std::string name;
+    std::vector<V3> triangles;
+    V3 origin{};
+    M3 axes{};
+    bool visible = false;
+};
+struct RailMesh {
+    std::vector<RailPart> parts;
+    std::vector<V3> triangles;
+    unsigned version = 0;
+    ULONGLONG refresh = 0;
+};
+std::unordered_map<void *, RailMesh> g_carriageMeshes;
 
 template<class Visit> bool RosterContains(uintptr_t vector, Visit visit) {
     auto first = *reinterpret_cast<void ***>(vector), last = *reinterpret_cast<void ***>(vector + 4);
@@ -949,34 +967,93 @@ void PurgeOccupantFrames() {
     for (void *frame : g_freed) g_carriageMeshes.erase(frame);
 }
 
-// The collision grid and box transforms are local to each particular carriage.
-bool CarriageMesh(const Cabin &c) {
-    if (g_carriageMeshes.count(c.frame)) return true;
-    auto begin = game::at<void **>(c.grid, 4), end = game::at<void **>(c.grid, 8);
-    if (!begin || end < begin || end - begin > 1024) return false;
-    std::vector<V3> tris;
-    constexpr int faces[][4] = {{0,1,3,2},{4,6,7,5},{0,4,5,1},{2,3,7,6},{0,2,6,4},{1,5,7,3}};
-    for (; begin != end; ++begin) {
-        void *box = *begin;
-        if (!box || (game::at<unsigned>(box, 8) & 2)) continue;
-        const int kind = game::at<uint8_t>(box, 0);
-        if (kind != 0x40 && kind != 0x41) continue;
-        const float *m = kind == 0x40 ? game::at<float *>(box, 60) : nullptr;
-        if (kind == 0x40 && !m) continue;
-        const V3 lo = game::at<V3>(box, 36), hi = game::at<V3>(box, 48);
-        V3 corners[8];
-        for (int i = 0; i != 8; ++i) {
-            V3 p{i & 1 ? hi.x : lo.x, i & 2 ? hi.y : lo.y, i & 4 ? hi.z : lo.z};
-            corners[i] = m ? M3::Raw(m).Apply(p) + V3{m[12], m[13], m[14]} : p;
+bool ReadRailParts(void *frame, RailMesh &mesh) {
+    char file[512]{};
+    if (!H->model_file(M, frame, file, sizeof file)) return false;
+    int handle = H->model_open(M, file);
+    if (!handle) return false;
+    struct CloseModel { int handle; ~CloseModel() { H->model_close(M, handle); } } close{handle};
+    int count = H->model_nodes(M, handle, nullptr, 0);
+    if (count < 1 || count > 4096) return false;
+    std::vector<MmlModelNode> nodes(count);
+    H->model_nodes(M, handle, nodes.data(), count);
+    for (int i = 0; i < count; ++i) {
+        const auto &node = nodes[i];
+        if (node.frame_type != 1 || (node.visual_type != 0 && node.visual_type != 1)) continue;
+        MmlModelMesh geometry{};
+        if (!H->model_mesh(M, handle, i, 0, &geometry) || !geometry.pos || !geometry.index) continue;
+        RailPart part;
+        part.name = node.name;
+        for (int t = 0; t < geometry.triangles; ++t) {
+            const uint16_t *face = geometry.index + 3*t;
+            if (std::max({face[0], face[1], face[2]}) >= geometry.vertices) continue;
+            for (int j = 0; j < 3; ++j) {
+                const float *p = geometry.pos + 3*face[j];
+                part.triangles.push_back({p[0], p[1], p[2]});
+            }
         }
-        for (const auto &f : faces)
-            for (int i : {0,1,2,0,2,3}) tris.push_back(corners[f[i]]);
+        if (!part.triangles.empty()) mesh.parts.push_back(std::move(part));
     }
-    if (tris.empty()) return false;
-    g_carriageMeshes.emplace(c.frame, std::move(tris));
-    Watch(c.frame);
+    return !mesh.parts.empty();
+}
+
+bool RailMover(const Occupant &o, smoke::Mover &m) {
+    if (!o.carriage) {
+        // The driver's car is an actor. Share the same posed visual mesh as on-foot ragdolls.
+        if (!vehicles::MoverOf(o.carrier, &m)) return false;
+    } else {
+        const float *w = game::WorldMatrix(o.frame);
+        M3 axes = M3::FromWorld(w);
+        axes.Orthonormalize();
+        const M3 inverse = axes.T();
+        m.c = {w[12], w[13], w[14]};
+        for (int i=0; i<3; ++i) m.ax[i] = axes.r[i];
+        auto &mesh = g_carriageMeshes[o.frame];
+        if (mesh.parts.empty() && !ReadRailParts(o.frame, mesh)) return false;
+        const auto now = GetTickCount64();
+        if (now >= mesh.refresh) {
+            bool changed = false;
+            for (auto &part : mesh.parts) {
+                void *visual = game::FindChild(o.frame, part.name.c_str());
+                bool visible = visual != nullptr;
+                for (void *f = visual; f && f != o.frame && visible; f = game::at<void *>(f, game::kFrameParent))
+                    visible = (game::at<unsigned>(f, game::kFrameFlags) & 1) != 0;
+                changed |= visible != part.visible;
+                if (visible) {
+                    const float *pw = game::WorldMatrix(visual);
+                    V3 origin = inverse.Apply(V3{pw[12], pw[13], pw[14]} - m.c);
+                    M3 basis = M3::Raw(pw) * inverse;
+                    bool moved = !part.visible || Len(origin - part.origin) > .003f;
+                    for (int j=0; j<3; ++j) moved |= Len(basis.r[j] - part.axes.r[j]) > .003f;
+                    if (moved) { part.origin = origin; part.axes = basis; changed = true; }
+                }
+                part.visible = visible;
+            }
+            if (changed) {
+                mesh.triangles.clear();
+                for (const auto &part : mesh.parts) if (part.visible)
+                    for (V3 p : part.triangles) mesh.triangles.push_back(part.origin + part.axes.Apply(p));
+                ++mesh.version;
+            }
+            mesh.refresh = now + 80;
+        }
+        if (mesh.triangles.empty()) return false;
+        m.kind = smoke::Mover::HULL;
+        m.hull = &mesh.triangles;
+        m.hullIsTriangles = true;
+        m.shapeVersion = mesh.version;
+    }
+    m.key = o.frame;
+    m.cabinOnly = true;
     return true;
 }
+
+struct TransportShot {
+    void *carrier;
+    void *model = nullptr;
+    bool created = false, hitPerson = false;
+};
+thread_local TransportShot *g_transportShot;
 
 void StartOccupant(Occupant o) {
     if (!g_cfg.enabled || !o.model || !game::Player() || !jolt_ragdoll::Enabled()) return;
@@ -989,14 +1066,7 @@ void StartOccupant(Occupant o) {
         LOG("occupant %p model %p skeleton: %s", o.carrier, o.model, err.c_str());
         return;
     }
-    if (o.rail) {
-        // The stock tram driver stands at the controls. A seated passenger's
-        // thighs are nearly horizontal, even when their torso leans to one side.
-        const auto *points = o.body->InitialPoints();
-        V3 thighs = Norm(points[Ragdoll::RHIP] - points[Ragdoll::RKNEE]) +
-                    Norm(points[Ragdoll::LHIP] - points[Ragdoll::LKNEE]);
-        o.body->standingInCabin = thighs.y > 1.0f;
-    }
+    o.body->railOccupant = o.rail;
     const auto track = g_carTracks.find(o.carrier);
     if (track != g_carTracks.end() && g_tick - track->second.tick <= 2)
         o.body->SetMotionFrom(nullptr, 0, &track->second.vel);
@@ -1005,9 +1075,124 @@ void StartOccupant(Occupant o) {
         return;
     }
     WatchRagdoll(o.body.get());
+    if (g_transportShot && g_transportShot->model == o.model) g_transportShot->created = true;
     LOG("occupant ragdoll at death: %s %s model %p carrier %p carriage %d", o.rail ? "rail" : "traffic",
         o.driver ? "driver" : "passenger", o.model, o.carrier, o.carriage);
     g_occupants.push_back(std::move(o));
+}
+
+// The transport Hit virtual owns the shot geometry. Its native occupant callback
+// identifies the model behind the glass, including on subsequent hits. Keep the
+// association within one call so another shot, a blast or an adjacent rider cannot inherit it.
+using TransportHitFn = int(__fastcall *)(void *, void *, int, V3 *, V3 *, V3 *, float, void *, int, void *);
+TransportHitFn originalCarHit, originalRailHit;
+void ApplyTransportShot(const TransportShot &shot, const V3 &from, const V3 &dir, float damage) {
+    const V3 delta = Norm(dir) * 100.f; // native vehicle Hit traces 100 m inside the vehicle
+    Ragdoll *target = nullptr;
+    V3 point{};
+    int part = -1;
+    float closest = Len(delta);
+    for (auto &o : g_occupants) {
+        if (o.carrier != shot.carrier || (shot.model && o.model != shot.model)) continue;
+        V3 candidate{};
+        const int segment = jolt_ragdoll::ShotPart(o.body.get(), from, delta, &candidate);
+        if (segment < 0) {
+            // Native skin and the simplified physical segments can differ slightly
+            // on the lethal shot. Only that positively identified new victim qualifies.
+            if (!shot.created || o.model != shot.model) continue;
+            candidate = o.body->ClosestToLine(from, from + delta);
+        }
+        const float distance = Len(candidate - from);
+        if (distance >= closest) continue;
+        if (!shot.created && jolt_ragdoll::CabinBlocksShot(o.rail ? o.frame : o.carrier, from, candidate)) continue;
+        target = o.body.get();
+        point = candidate;
+        part = segment;
+        closest = distance;
+    }
+    if (!target) return;
+    const float dv = Kick(target, dir, point, damage, part);
+    g_lastBullet = {target->Model(), point, part, part, dv};
+    ++g_corpseHits;
+}
+
+// TickShoot's collision query can return an empty stretch through a dead rider:
+// the engine has no actor there. Test only that travelled stretch, up to the
+// precomputed static impact. The native Hit virtual handles vehicle contacts.
+void RailBulletStretch(MmlMidContext *ctx, void *) {
+    if (ctx->eax || g_occupants.empty() || !g_cfg.enabled || !g_cfg.bullets) return;
+    auto trace = [&] {
+        void *stack = reinterpret_cast<void *>(ctx->esp);
+        auto *gameObject = reinterpret_cast<void *>(ctx->ebp);
+        auto *begin = game::at<uint8_t *>(gameObject, game::kGameShots);
+        auto *end = game::at<uint8_t *>(gameObject, game::kGameShots + 4);
+        const unsigned index = game::at<unsigned>(stack, 0x38);
+        if (!begin || end <= begin || index >= static_cast<unsigned>((end - begin) / game::kShotSize)) return;
+        auto *shot = begin + index * game::kShotSize;
+        const V3 from = game::at<V3>(stack, 0x40), delta = game::at<V3>(stack, 0x18);
+        const float length = Len(delta), damage = game::at<float>(shot, game::kShotDamage);
+        if (!(length > 0.0001f && damage > 0)) return;
+        const V3 axis = delta * (1.f / length);
+        float limit = length;
+        if (game::at<uint8_t>(shot, game::kShotHits))
+            limit = std::min(limit, Dot(game::at<V3>(shot, game::kShotHitPos) - from, axis));
+        if (!(limit > 0)) return;
+        const V3 origin = game::at<V3>(shot, game::kShotFrom);
+        void *shooter = game::at<void *>(shot, game::kShotShooter);
+        Occupant *target = nullptr;
+        int part = -1;
+        V3 point{};
+        for (auto &o : g_occupants) {
+            if (!o.rail) continue;
+            const V3 hip = o.body->BodyPos(Ragdoll::B_PELVIS);
+            const V3 nearest = from + axis * std::clamp(Dot(hip - from, axis), 0.f, limit);
+            if (Len(hip - nearest) > 2.0f) continue;
+            V3 contact{};
+            const int segment = jolt_ragdoll::ShotPart(o.body.get(), from, axis * limit, &contact);
+            if (segment < 0 || jolt_ragdoll::CabinBlocksShot(o.frame, origin, contact)) continue;
+            target = &o;
+            limit = Len(contact - from);
+            point = contact;
+            part = segment;
+        }
+        if (!target) return;
+        const bool continuing = target->hasShotSegment && target->lastShooter == shooter &&
+            Len(target->lastShotOrigin - origin) < .0001f && Len(target->lastShotEnd - from) < .0001f;
+        target->lastShotOrigin = origin;
+        target->lastShotEnd = from + delta;
+        target->lastShooter = shooter;
+        target->hasShotSegment = true;
+        if (continuing) return;
+        const float dv = Kick(target->body.get(), axis, point, damage, part);
+        g_lastBullet = {target->model, point, part, part, dv};
+        ++g_corpseHits;
+    };
+    Guarded(trace);
+}
+
+int TransportHit(TransportHitFn original, void *carrier, void *edx, int type, V3 *dir, V3 *from, V3 *pos,
+                 float damage, void *attacker, int flags, void *frame) {
+    TransportShot shot{carrier};
+    auto previous = g_transportShot;
+    g_transportShot = type == 0 && dir && from && damage > 0 && g_cfg.enabled && g_cfg.bullets ? &shot : nullptr;
+    V3 start{}, direction{};
+    if (g_transportShot) { start = *from; direction = *dir; }
+    int result;
+    __try {
+        result = original(carrier, edx, type, dir, from, pos, damage, attacker, flags, frame);
+    } __finally {
+        g_transportShot = previous;
+    }
+    if (!shot.hitPerson && Len(direction) > 1e-5f && !g_occupants.empty())
+        ApplyTransportShot(shot, start, direction, damage);
+    return result;
+}
+
+int __fastcall CarHit(void *car, void *edx, int type, V3 *dir, V3 *from, V3 *pos, float damage, void *attacker, int flags, void *frame) {
+    return TransportHit(originalCarHit, car, edx, type, dir, from, pos, damage, attacker, flags, frame);
+}
+int __fastcall RailwayHit(void *rail, void *edx, int type, V3 *dir, V3 *from, V3 *pos, float damage, void *attacker, int flags, void *frame) {
+    return TransportHit(originalRailHit, rail, edx, type, dir, from, pos, damage, attacker, flags, frame);
 }
 
 void TrafficDeath(MmlMidContext *ctx, void *) {
@@ -1019,6 +1204,7 @@ void TrafficDeath(MmlMidContext *ctx, void *) {
             for (int slot : {28, 32}) {
                 void *model = game::at<void *>(record, slot);
                 if (!model || model != reinterpret_cast<void *>(ctx->edx)) continue;
+                if (g_transportShot && g_transportShot->carrier == car) g_transportShot->model = model;
                 Occupant o;
                 o.carrier = car; o.record = record; o.model = model; o.slot = slot;
                 o.driver = slot == 28;
@@ -1039,15 +1225,19 @@ void RailDeath(MmlMidContext *ctx, void *) {
         if (!o.carrier || !o.record) return;
         int state = game::at<int>(o.record, 0);
         if (state == 22) state = game::at<int>(o.record, 0x44);
-        if (state == 17) return;
         o.rail = true; o.slot = 4;
         o.model = game::at<void *>(o.record, o.slot);
+        if (g_transportShot && g_transportShot->carrier == o.carrier) g_transportShot->model = o.model;
+        if (state == 17) return;
         o.driver = o.record == static_cast<uint8_t *>(o.carrier) + 0x2b0;
 
         o.carriage = game::at<int>(o.record, 0x18);
         Cabin cabin{};
-        if (!o.model || !cabin.Open(o.carrier, o.carriage) || !CarriageMesh(cabin)) return;
+        if (!o.model || !cabin.Open(o.carrier, o.carriage)) return;
         o.frame = cabin.frame;
+        Watch(o.frame);
+        smoke::Mover mover;
+        if (!RailMover(o, mover)) return;
         StartOccupant(std::move(o));
     };
     Guarded(capture);
@@ -1058,14 +1248,7 @@ void OccupantMovers(std::vector<smoke::Mover> &out) {
         void *key = o.rail ? o.frame : o.carrier;
         if (std::any_of(out.begin(), out.end(), [&](const auto &m) { return m.key == key; })) continue;
         smoke::Mover m;
-        if (o.rail) {
-            const float *w = game::WorldMatrix(o.frame);
-            m.kind = smoke::Mover::HULL; m.key = key; m.cabinOnly = true; m.hullIsTriangles = true;
-            m.hull = &g_carriageMeshes.at(key); m.shapeVersion = 1;
-            m.c = {w[12], w[13], w[14]};
-            M3 axes = M3::FromWorld(w); axes.Orthonormalize();
-            for (int i = 0; i < 3; ++i) m.ax[i] = axes.r[i];
-        } else if (!vehicles::MoverOf(o.carrier, &m)) continue;
+        if (o.rail ? !RailMover(o, m) : !vehicles::MoverOf(o.carrier, &m)) continue;
         out.push_back(m);
     }
 }
@@ -2018,6 +2201,7 @@ void Rendered() {
 }
 
 void OnHit(const MmlEvent &ev) {
+    if (g_transportShot) g_transportShot->hitPerson = true;
     if (!ev.hit || ev.hit->taken || !ev.actor) return;
     void *human = ev.actor;
     const MmlHumanHit &h = *ev.hit;
@@ -2262,7 +2446,11 @@ void Start() {
     const bool v10 = game::g_exe == &game::kExe10;
     const bool traffic = H->hook_mid(M, v10 ? 0x506C00 : 0x4BADD0, TrafficDeath, nullptr);
     const bool rail = H->hook_mid(M, v10 ? 0x4D5160 : 0x484230, RailDeath, nullptr);
-    LOG("occupant death pose capture: traffic %d, railway %d", traffic, rail);
+    const bool carHit = H->hook(M, v10 ? 0x46A670 : 0x423600, reinterpret_cast<void *>(&CarHit), reinterpret_cast<void **>(&originalCarHit));
+    const bool railHit = H->hook(M, v10 ? 0x4E1D90 : 0x490B40, reinterpret_cast<void *>(&RailwayHit), reinterpret_cast<void **>(&originalRailHit));
+    LOG("occupant death pose capture: traffic %d, railway %d; shot impulses: traffic %d, railway %d", traffic, rail, carHit, railHit);
+    if (!H->hook_mid(M, game::Exe().bulletRay, RailBulletStretch, nullptr))
+        LOG("rail occupant shot stretch unavailable");
     Hooks();
     H->hit_filter(M, HitFilter, nullptr);
     const int mission = H->mission_state();

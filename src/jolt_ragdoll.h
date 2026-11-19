@@ -31,6 +31,9 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
 void FinishPull(Ragdoll *r);
 const void *SeatedCar(const Ragdoll *r);
 float GripDistance(const Ragdoll *r, V3 *contact = nullptr); // metres to the hands, or -1 when released
+// Nearest physical segment of this body on the shot ray, in world coordinates.
+int ShotPart(const Ragdoll *r, const V3 &from, const V3 &delta, V3 *point);
+bool CabinBlocksShot(const void *key, const V3 &from, const V3 &point);
 void Remove(Ragdoll *r);
 bool Has(const Ragdoll *r);
 bool OwnsBody(uint32_t body);   // a Jolt body (its index and sequence number) is a part of a ragdoll

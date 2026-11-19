@@ -189,7 +189,9 @@ JPH::Ref<JPH::SwingTwistConstraintSettings> Ball(const Ragdoll *r, const Ragdoll
     s->mPlaneHalfConeAngle = side;
     s->mTwistMinAngle = lo;
     s->mTwistMaxAngle = hi;
-    s->mMaxFrictionTorque = a.friction * T(kJointFriction);
+    // In a carriage an unsupported limb must yield even under a small gravity torque.
+    // Body damping, anatomical stops and actual contact still resist motion.
+    s->mMaxFrictionTorque = r->railOccupant ? 0.0f : a.friction * T(kJointFriction);
     s->mSwingMotorSettings = s->mTwistMotorSettings = JPH::MotorSettings(JPH::ESpringMode::FrequencyAndDamping, T(kMuscleHz), 1.0f);
     return s;
 }
@@ -214,7 +216,7 @@ JPH::Ref<JPH::HingeConstraintSettings> Hinge(const Ragdoll *r, const Ragdoll *re
     s->mNormalAxis2 = J(n2);
     s->mLimitsMin = a.flex * kDeg;
     s->mLimitsMax = a.side * kDeg;
-    s->mMaxFrictionTorque = a.friction * T(kJointFriction);
+    s->mMaxFrictionTorque = r->railOccupant ? 0.0f : a.friction * T(kJointFriction);
     s->mMotorSettings = JPH::MotorSettings(JPH::ESpringMode::FrequencyAndDamping, T(kMuscleHz), 1.0f);
     return s;
 }
@@ -681,6 +683,36 @@ float GripDistance(const Ragdoll *r, V3 *contact) {
     return Len(point - e.lastHands);
 }
 
+int ShotPart(const Ragdoll *r, const V3 &from, const V3 &delta, V3 *point) {
+    auto it = g_entries.find(r);
+    if (it == g_entries.end()) return -1;
+    const JPH::RRayCast ray{J(jolt_world::ToJolt(from)), J(delta)};
+    const auto &bi = jolt_world::Bodies();
+    float closest = 1;
+    int part = -1;
+    for (int i = 0; i < BODIES; ++i) {
+        JPH::RayCastResult hit;
+        hit.mFraction = closest;
+        if (bi.GetTransformedShape(it->second.ragdoll->GetBodyID(i)).CastRay(ray, hit)) {
+            closest = hit.mFraction;
+            part = i;
+        }
+    }
+    if (part >= 0) *point = from + delta * closest;
+    return part;
+}
+
+bool CabinBlocksShot(const void *key, const V3 &from, const V3 &point) {
+    auto id = jolt_world::CabinBody(key);
+    if (id.IsInvalid()) return true;
+    JPH::RRayCast ray{J(jolt_world::ToJolt(from)), J(point - from)};
+    JPH::RayCastSettings settings;
+    settings.SetBackFaceMode(JPH::EBackFaceMode::CollideWithBackFaces);
+    JPH::AnyHitCollisionCollector<JPH::CastRayCollector> hits;
+    jolt_world::Bodies().GetTransformedShape(id).CastRay(ray, settings, hits);
+    return hits.HadHit();
+}
+
 void Remove(Ragdoll *r) {
     auto it = g_entries.find(r);
     if (it == g_entries.end()) return;
@@ -936,7 +968,7 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
     }
     jolt_world::Step(dt, movers, player, [] {
         for (auto &[body, entry] : g_entries)
-            if (entry.car && !body->standingInCabin) Seat(entry);
+            if (entry.car && !body->railOccupant) Seat(entry);
     });
     for (Ragdoll *r : all) {
         auto it = g_entries.find(r);
