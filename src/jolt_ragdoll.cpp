@@ -2,6 +2,7 @@
 #include "fmt.h"
 #include "jolt_ragdoll.h"
 #include "anatomy.h"
+#include "joint_resistance.h"
 #include "vehicles.h"
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -110,14 +111,13 @@ const char *const kName[BODIES] = {"pelvis", "abdomen", "chestlow", "chest", "he
 // Shared with the living contact proxies; forearms include the hands.
 constexpr auto &kMass = Ragdoll::SegmentMass;
 
-// One joint's anatomy. Ball: the swing around a neutral direction, `flex` towards the joint's forward axis and
-// `side` across it, and the twist about the bone; hinge: its range from straight. `friction` (N m) resists any
-// motion; `muscle` (N m) is what the muscles can give at full strength.
-struct Anatomy { float flex, side, twistLo, twistHi, friction, muscle; };
-const Anatomy kSpineLow{25, 15, -8, 8, 12, 180}, kSpineMid{20, 15, -15, 15, 12, 180}, kSpineHigh{15, 12, -20, 20, 12, 180},
-    kNeck{50, 40, -70, 70, 3, 40}, kShoulder{75, 80, -70, 70, 4, 80}, kHip{70, 35, -40, 40, 12, 250},
-    kAnkle{35, 20, -12, 12, 2, 120};
-const Anatomy kElbow{0, 145, 0, 0, 2, 60}, kKnee{0, 150, 0, 0, 5, 200};   // hinges: [flex, side] = [min, max] degrees
+// Swing and twist limits in degrees. Hinges use flex and side as their bend limits.
+struct Anatomy { float flex, side, twistLo, twistHi; Resistance passive; float muscle; };
+const Anatomy kSpineLow{25, 15, -8, 8, {10, 6}, 180}, kSpineMid{20, 15, -15, 15, {10, 6}, 180},
+    kSpineHigh{15, 12, -20, 20, {10, 6}, 180}, kNeck{50, 40, -70, 70, neckResistance, 40},
+    kShoulder{75, 80, -70, 70, {.4f, 2}, 80}, kHip{70, 35, -40, 40, {8, 6}, 250},
+    kAnkle{35, 20, -12, 12, {.3f, 1}, 120};
+const Anatomy kElbow{0, 145, 0, 0, {.2f, 1}, 60}, kKnee{0, 150, 0, 0, {2, 2.5f}, 200};
 
 struct Entry {
     unsigned serial = 0;
@@ -128,7 +128,7 @@ struct Entry {
     V3 hingeNormalParent[BODIES] = {}, hingeNormalChild[BODIES] = {};
     JPH::Quat target[BODIES];             // ball: child rotation relative to the parent, the muscles' target
     float targetAngle[BODIES] = {};       // hinge: the target angle
-    float muscle[BODIES] = {};            // N m at full strength
+    const Anatomy *anatomy[BODIES] = {};
     unsigned animSeen = 0;
     bool motorsOn = false;
     float age = 0;
@@ -143,7 +143,7 @@ struct Entry {
     float reachStart = 0, deepestReach = 0, gripStart = 0, lastDepth = 0;
     float farthestPull = 0;
     float gripAge = 0;
-    JPH::SwingTwistConstraint *passiveNeck = nullptr;
+
     // Held still until the static world around it is there (after a core reload, in a part of the city just
     // reached): its parts asleep, the velocities they had kept for when it goes.
     bool holding = false;
@@ -189,9 +189,7 @@ JPH::Ref<JPH::SwingTwistConstraintSettings> Ball(const Ragdoll *r, const Ragdoll
     s->mPlaneHalfConeAngle = side;
     s->mTwistMinAngle = lo;
     s->mTwistMaxAngle = hi;
-    // In a carriage an unsupported limb must yield even under a small gravity torque.
-    // Body damping, anatomical stops and actual contact still resist motion.
-    s->mMaxFrictionTorque = r->railOccupant ? 0.0f : a.friction * T(kJointFriction);
+    s->mMaxFrictionTorque = 0; // updated from relative joint speed before the passive solve
     s->mSwingMotorSettings = s->mTwistMotorSettings = JPH::MotorSettings(JPH::ESpringMode::FrequencyAndDamping, T(kMuscleHz), 1.0f);
     return s;
 }
@@ -216,7 +214,7 @@ JPH::Ref<JPH::HingeConstraintSettings> Hinge(const Ragdoll *r, const Ragdoll *re
     s->mNormalAxis2 = J(n2);
     s->mLimitsMin = a.flex * kDeg;
     s->mLimitsMax = a.side * kDeg;
-    s->mMaxFrictionTorque = r->railOccupant ? 0.0f : a.friction * T(kJointFriction);
+    s->mMaxFrictionTorque = 0;
     s->mMotorSettings = JPH::MotorSettings(JPH::ESpringMode::FrequencyAndDamping, T(kMuscleHz), 1.0f);
     return s;
 }
@@ -302,21 +300,15 @@ void Muscles(Ragdoll *r, Entry &e, float dt) {
             }
             e.motorsOn = false;
         }
-        if (e.grip && !e.passiveNeck) {
-            // The passive neck yields under the roof, then recovers toward the
-            // angle at grasp. The position motor is a critically damped spring.
-            auto *neck = static_cast<JPH::SwingTwistConstraint *>(
-                e.ragdoll->GetConstraint(e.settings->GetConstraintIndexForBodyIndex(HEAD)));
-            neck->SetTargetOrientationBS(neck->GetBody1()->GetRotation().Conjugated() * neck->GetBody2()->GetRotation());
-            neck->GetSwingMotorSettings().SetTorqueLimit(16.f);
-            neck->GetTwistMotorSettings().SetTorqueLimit(16.f);
-            neck->SetSwingMotorState(JPH::EMotorState::Position);
-            neck->SetTwistMotorState(JPH::EMotorState::Position);
-            e.passiveNeck = neck;
+        if (e.ragdoll->IsActive(false)) {
+            const float scale = T(kJointFriction);
+            for (int b = 1; b < BODIES; ++b) {
+                auto *joint = e.ragdoll->GetConstraint(e.settings->GetConstraintIndexForBodyIndex(b));
+                SetPassiveResistance(*joint, e.anatomy[b]->passive, scale);
+            }
         }
         return;
     }
-    e.passiveNeck = nullptr; // the active muscle controller now owns all motor settings
     // The game's death animation, while the engine plays it: a new pose since the last one we took.
     if (!r->knockdown && T(kFollowAnim) > 0.5f && r->animSerial != e.animSeen) {
         e.animSeen = r->animSerial;
@@ -326,7 +318,7 @@ void Muscles(Ragdoll *r, Entry &e, float dt) {
     }
     for (int b = 1; b < BODIES; b++) {
         JPH::TwoBodyConstraint *c = e.ragdoll->GetConstraint(e.settings->GetConstraintIndexForBodyIndex(b));
-        float torque = s * e.muscle[b];
+        float torque = s * e.anatomy[b]->muscle;
         if (e.hinge[b]) {
             auto *h = static_cast<JPH::HingeConstraint *>(c);
             h->GetMotorSettings().SetTorqueLimit(torque);
@@ -372,11 +364,7 @@ bool g_inOrder;
 
 void ReleaseGrip(Entry &e, const Ragdoll *r, bool endAction = true) {
     if (endAction) jolt_world::SetHolder(r, nullptr);
-    if (e.passiveNeck) {
-        e.passiveNeck->SetSwingMotorState(JPH::EMotorState::Off);
-        e.passiveNeck->SetTwistMotorState(JPH::EMotorState::Off);
-        e.passiveNeck = nullptr;
-    }
+
     if (e.grip && jolt_world::Running()) jolt_world::System()->RemoveConstraint(e.grip);
     e.grip = nullptr;
     if (!e.handAnchor.IsInvalid() && jolt_world::Running()) {
@@ -797,19 +785,19 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn, const void *struckB
     // The joints, child by child.
     auto ball = [&](int child, int point, const V3 &c, const V3 &f, const Anatomy &a) {
         rs->mParts[child].mToParent = Ball(r, &neutral, kParent[child], child, toJ(P[point]), c, f, a);
-        e.muscle[child] = a.muscle;
+        e.anatomy[child] = &a;
     };
     auto hinge = [&](int child, int point, V3 axis, const V3 &fallback, const Anatomy &a) {
         if (Len(axis) < 0.3f) axis = fallback;
         float start;
         rs->mParts[child].mToParent = Hinge(r, &neutral, kParent[child], child, toJ(P[point]), axis, a, &start);
+        e.anatomy[child] = &a;
         e.hinge[child] = true;
         const auto &rp=JoltBridge::B(&neutral,kParent[child]), &rc=JoltBridge::B(&neutral,child);
         V3 h=Norm(axis), n=Orth(JoltBridge::Rot(rp.q,{1,0,0}),h);
         e.hingeAxisParent[child] = JoltBridge::InvRot(rp.q,h);
         e.hingeNormalParent[child] = JoltBridge::InvRot(rp.q,n);
         e.hingeNormalChild[child] = JoltBridge::InvRot(rc.q,n);
-        e.muscle[child] = a.muscle;
     };
     // Spine and neck: straight on from the segment below, leaning a little forward.
     ball(ABDOMEN, RP::BACK1, Tilt(pu, pf, 5), pf, kSpineLow);

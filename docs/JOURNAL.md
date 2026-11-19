@@ -625,3 +625,17 @@ During a fatal shot the native vehicle Hit identifies the occupant model. For de
 Both windowed freeride labs passed `tests/check_transport_occupants.py`. In each, shots from the aisle registered one local impulse per shot on the tram driver, a passenger and a rear-car train passenger. Shots at those targets from under the floor registered zero. Separate native shot-queue trials confirmed a lethal shot and impulse on all three roles in both builds. All pose measurements come from the game and Jolt; visual assessment is the owner's.
 
 The DLL in both labs and `W:/Mafia10Fixes` has SHA-256 `739b119e6f4a389ae81a07421649b6361b587f141a79985a03a147c180883ba1`. Owner rollback files are in `build/driver-audit/owner-before-017-20261119-220307/`.
+
+### 2026-11-19 - Shared passive joint resistance (0.1.8)
+
+The owner's 1.0 log showed the tram driver and three passengers on the same carriage in 0.1.7. The reported bench pose left the head unsupported. Rail occupants had zero friction torque in every joint. All bodies still had angular drag in world space. A car driver's neck also had a separate position motor while Tommy held the driver.
+
+Every passive ragdoll now uses the same anatomical settings for each joint. Jolt resists the child body's rotation relative to its parent. Hinges use rotation about their allowed axis. The neck has very little dry friction and a velocity-dependent torque. The spine and hips have higher dry friction to support the trunk. A hand grip applies its load to the driver's trunk, with the neck following the ordinary joint law.
+
+In the isolated Jolt regression the torso support is fixed and the 6 kg head hangs under gravity. Give it a single 2 N s transverse impulse and disable sleeping. With the old rail resistance, maximum deflection between three and four seconds was 12.09 degrees. The shared neck settings gave 0.20 degrees at both 30 and 120 Hz. The initial excursion was 7.41 and 5.73 degrees respectively. These are solver measurements, not an angle measured from the owner's screen.
+
+Both builds passed the Falconer and Bolt V8 Touring extraction captures in `build/driver-audit/passive-joints-018-anatomy/`. The first tuning allowed the head to move 15 to 17 cm towards the door before Tommy grasped the driver in the Falconer. With the shared spine and hip settings the same reach measured 1.1 to 1.3 cm. Both vehicles passed their capture analyzers and Tommy could take the seat and drive away in both builds.
+
+The final DLL passed the transport occupant regression and all 34 lying-pose anatomy checks on each game build. After five seconds in separate stationary tram trials, the passengers' necks measured 0.77 to 1.40 m above the carriage origin, from starting heights of 1.78 to 1.79 m. Both standing drivers stayed near the controls in those trials. The pendulum test isolates the bench-edge condition; the exact pose in the owner's session was not replayed.
+
+The owner installation in `W:/Mafia10Fixes` and both lab DLLs match SHA-256 `c94188de3059bae58baa532a3f8e214d28f35e5bd76bfb64c34fea849993cd93`. Previous owner files are in `build/driver-audit/owner-before-018-20261119-222127/`.

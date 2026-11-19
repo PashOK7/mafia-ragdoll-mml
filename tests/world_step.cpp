@@ -2,6 +2,9 @@
 #include "mod.h"
 #include "scenery.h"
 #include "jolt_world.h"
+#include "joint_resistance.h"
+#include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <algorithm>
@@ -12,6 +15,51 @@ namespace mod {
 const MmlHost *H;
 MmlMod *M;
 void Log(const char *, ...) {}
+}
+
+// A supported torso with a freely hanging 6 kg head. Give the head one
+// transverse impulse. Measure its angle from vertical with sleeping disabled.
+static bool SwingTest(bool hinge, float scale, float dt) {
+    using namespace JPH;
+    const RVec3 pivot(8, 12, 0);
+    BodyCreationSettings settings(new SphereShape(.10f), pivot + Vec3(0, -.10f, 0),
+                                  Quat::sIdentity(), EMotionType::Dynamic, jolt_world::kDynamic);
+    settings.mAllowSleeping = false;
+    settings.mAngularDamping = .5f;
+    settings.mOverrideMassProperties = EOverrideMassProperties::CalculateInertia;
+    settings.mMassPropertiesOverride.mMass = 6.f;
+    auto &bodies = jolt_world::Bodies();
+    auto *head = bodies.CreateBody(settings);
+    bodies.AddBody(head->GetID(), EActivation::Activate);
+    HingeConstraintSettings elbow;
+    elbow.mPoint1 = elbow.mPoint2 = pivot;
+    elbow.mHingeAxis1 = elbow.mHingeAxis2 = Vec3::sAxisX();
+    elbow.mNormalAxis1 = elbow.mNormalAxis2 = Vec3::sAxisY();
+    SwingTwistConstraintSettings neck;
+    neck.mPosition1 = neck.mPosition2 = pivot;
+    neck.mTwistAxis1 = neck.mTwistAxis2 = Vec3::sAxisY();
+    neck.mPlaneAxis1 = neck.mPlaneAxis2 = Vec3::sAxisX();
+    neck.mNormalHalfConeAngle = DegreesToRadians(50.f);
+    neck.mPlaneHalfConeAngle = DegreesToRadians(40.f);
+    Ref<TwoBodyConstraint> joint = hinge ? elbow.Create(Body::sFixedToWorld, *head)
+                                         : neck.Create(Body::sFixedToWorld, *head);
+    jolt_world::System()->AddConstraint(joint);
+    bodies.AddImpulse(head->GetID(), Vec3(0, 0, 2.f));
+    float first = 0, late = 0;
+    for (int i = 0; i < std::lround(4.f / dt); ++i) {
+        jolt_ragdoll::SetPassiveResistance(*joint, jolt_ragdoll::neckResistance, scale);
+        jolt_world::Step(dt, {}, nullptr);
+        const auto offset = head->GetCenterOfMassPosition() - pivot;
+        const float angle = std::abs(RadiansToDegrees(std::atan2(offset.GetZ(), -offset.GetY())));
+        if (i * dt < .8f) first = std::max(first, angle);
+        if (i * dt >= 3.f) late = std::max(late, angle);
+    }
+    jolt_world::System()->RemoveConstraint(joint);
+    bodies.RemoveBody(head->GetID());
+    bodies.DestroyBody(head->GetID());
+    std::printf("%s %.0f Hz, scale %.0f: peak %.3f deg, after 3 s %.3f deg\n",
+                hinge ? "hinge" : "neck", 1.f / dt, scale, first, late);
+    return first > 2.f && (scale == 0 ? late > 3.f : late < .5f);
 }
 
 int main() {
@@ -63,6 +111,10 @@ int main() {
             return 1;
         }
     }
+    for (float dt : {1.f / 30, 1.f / 120})
+        for (bool hinge : {false, true})
+            for (float scale : {0.f, 1.f})
+                if (!SwingTest(hinge, scale, dt)) return 1;
     jolt_world::Stop();
     std::puts("PASS: waterline is per placement and six 100 ms steps reach the native car pose");
     return 0;
