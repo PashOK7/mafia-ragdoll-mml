@@ -22,8 +22,8 @@ namespace jolt_world {
 using LogFn = void (*)(const char *fmt, ...);
 
 // Object layers: what collides with what.
-// kOccupant: the bodies of people sitting in a car; they meet each other, dynamic bodies and kCabin only (not the
-// car's convex hulls, which fill its inside, nor the street). kCabin: a car's own triangles, both sides, moved with
+// kOccupant: bodies inside a vehicle meet the static world, other occupants, dynamic bodies and their cabin.
+// The vehicle's outer convex hull would fill its interior. kCabin: its triangles, both sides, moved with
 // it, for the people in it to slump against (seats, doors, the dashboard, the wheel).
 // kCarBody: a car the game drives, as a body of its real mass that meets dynamic bodies and living-body sensors.
 // kLiving is separate from other kinematics, so car/car and car/tram collisions remain native, without doubling.

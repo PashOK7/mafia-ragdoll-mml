@@ -639,3 +639,15 @@ Both builds passed the Falconer and Bolt V8 Touring extraction captures in `buil
 The final DLL passed the transport occupant regression and all 34 lying-pose anatomy checks on each game build. After five seconds in separate stationary tram trials, the passengers' necks measured 0.77 to 1.40 m above the carriage origin, from starting heights of 1.78 to 1.79 m. Both standing drivers stayed near the controls in those trials. The pendulum test isolates the bench-edge condition; the exact pose in the owner's session was not replayed.
 
 The owner installation in `W:/Mafia10Fixes` and both lab DLLs match SHA-256 `c94188de3059bae58baa532a3f8e214d28f35e5bd76bfb64c34fea849993cd93`. Previous owner files are in `build/driver-audit/owner-before-018-20261119-222127/`.
+
+### 2026-11-19 - Passenger ejection and street contact (0.1.9)
+
+In the owner's running 1.0 game on 0.1.8, passenger `0x1996E200` from tram `0x0F7682B0` had a pelvis at Y = -3955.105 m. The other four ragdolls in the same tram were at Y = -4.62 to -4.87 m. Both the broad-phase filter and the layer-pair filter excluded static scenery for every vehicle occupant. A loose passenger also kept the original carriage association after leaving through a door.
+
+Occupant parts now contact static scenery throughout ejection. A hand or foot can reach the pavement while the pelvis remains inside. Before updating the carriage pose, a loose body leaves the cabin collision layer once all 15 part bounds clear the visual mesh bounds in carriage coordinates. The transition keeps the existing body transforms and velocities. The original roster still owns its visual model. A carriage jump only carries bodies still associated with that carriage.
+
+Both windowed freeride labs reproduced the fall on 0.1.8 with a native passenger initially outside the tram. On 0.1.9 the doorway fixture starts the native passenger overlapping the carriage and fires live projectiles. Six hits (1.0) and seven hits (1.2) pushed the tested passengers clear. After five seconds their pelvises were 0.47 m and 0.21 m above the street respectively. Both bodies accepted a subsequent hit. Bodies still inside travelled 12 m with a moving carriage on each build. The static-floor regression in `tests/world_step.cpp` keeps the test limb on the occupant layer for the entire fall and checks the resting height.
+
+The repeatable live regression `tests/check_rail_exit.py` aligns the hips at the tram edge for either seated pose before shooting. It passed twice per build, with the pelvis resting 0.14 to 0.23 m above the street. The native transport occupant regression passed on both builds. The Falconer and Bolt V8 Touring passed their gameplay and capture checks (`build/driver-audit/rail-exit-019/`).
+
+The installed DLLs in both labs and `W:/Mafia10Fixes` match SHA-256 `8a966101479d27be6827bb21f5389b19f768e82072007ee723dc7f1397b0a624`. Previous owner files are in `build/driver-audit/owner-before-019-20261119-223359/`.

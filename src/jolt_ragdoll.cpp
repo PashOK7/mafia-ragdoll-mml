@@ -385,6 +385,22 @@ void Unseat(Entry &e) {
     e.car = nullptr;
 }
 
+// Only release a loose body once every part has cleared the visual model in cabin space.
+bool OutsideCabin(const Entry &e) {
+    const auto cabin = jolt_world::CabinBody(e.car);
+    if (cabin.IsInvalid()) return false;
+    const auto &bi = jolt_world::Bodies();
+    const auto local = bi.GetCenterOfMassTransform(cabin).InversedRotationTranslation();
+    const auto bounds = bi.GetShape(cabin)->GetLocalBounds();
+    if (bounds.Contains(local * bi.GetCenterOfMassPosition(e.ragdoll->GetBodyID(PELVIS)))) return false;
+    for (int b = 0; b < BODIES; ++b) {
+        const auto id = e.ragdoll->GetBodyID(b);
+        const auto pose = local * bi.GetCenterOfMassTransform(id);
+        if (bounds.Overlaps(bi.GetShape(id)->GetWorldSpaceBounds(pose, JPH::Vec3::sOne()))) return false;
+    }
+    return true;
+}
+
 void OnCabinGone(const void *car) {
     for (auto &kv : g_entries) if (kv.second.car == car) Unseat(kv.second);
 }
@@ -690,9 +706,9 @@ int ShotPart(const Ragdoll *r, const V3 &from, const V3 &delta, V3 *point) {
     return part;
 }
 
-bool CabinBlocksShot(const void *key, const V3 &from, const V3 &point) {
+bool CabinBlocksShot(const void *key, const V3 &from, const V3 &point, bool requireCabin) {
     auto id = jolt_world::CabinBody(key);
-    if (id.IsInvalid()) return true;
+    if (id.IsInvalid()) return requireCabin;
     JPH::RRayCast ray{J(jolt_world::ToJolt(from)), J(point - from)};
     JPH::RayCastSettings settings;
     settings.SetBackFaceMode(JPH::EBackFaceMode::CollideWithBackFaces);
@@ -897,9 +913,14 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
     jolt_world::SetPersonPush(T(kPushForce), T(kPushMass));
 
     // The seated: their cars' cabins kept, their seats made once the cabin is there.
-    for (auto &kv : g_entries) {
-        if (!kv.second.car) continue;
-        jolt_world::RequestCabin(kv.second.car, kv.first);
+    for (auto &[body, entry] : g_entries) {
+        if (!entry.car) continue;
+        if (!entry.holding && !entry.seat && OutsideCabin(entry)) {
+            RLOG("ragdoll %p cleared cabin %p and entered the world", body->actor, entry.car);
+            Unseat(entry);
+            continue;
+        }
+        jolt_world::RequestCabin(entry.car, body);
     }
     // Bodies passing through a car's hull: its cabin kept while any part is inside the hull; out for half a second
     // (or the car gone from the world): an ordinary body again.

@@ -1094,6 +1094,7 @@ void ApplyTransportShot(const TransportShot &shot, const V3 &from, const V3 &dir
     float closest = Len(delta);
     for (auto &o : g_occupants) {
         if (o.carrier != shot.carrier || (shot.model && o.model != shot.model)) continue;
+        if (!jolt_ragdoll::SeatedCar(o.body.get())) continue;
         V3 candidate{};
         const int segment = jolt_ragdoll::ShotPart(o.body.get(), from, delta, &candidate);
         if (segment < 0) {
@@ -1149,7 +1150,8 @@ void RailBulletStretch(MmlMidContext *ctx, void *) {
             if (Len(hip - nearest) > 2.0f) continue;
             V3 contact{};
             const int segment = jolt_ragdoll::ShotPart(o.body.get(), from, axis * limit, &contact);
-            if (segment < 0 || jolt_ragdoll::CabinBlocksShot(o.frame, origin, contact)) continue;
+            if (segment < 0 || jolt_ragdoll::CabinBlocksShot(o.frame, origin, contact,
+                    jolt_ragdoll::SeatedCar(o.body.get()) != nullptr)) continue;
             target = &o;
             limit = Len(contact - from);
             point = contact;
@@ -1245,6 +1247,7 @@ void RailDeath(MmlMidContext *ctx, void *) {
 
 void OccupantMovers(std::vector<smoke::Mover> &out) {
     for (const auto &o : g_occupants) {
+        if (!jolt_ragdoll::SeatedCar(o.body.get())) continue;
         void *key = o.rail ? o.frame : o.carrier;
         if (std::any_of(out.begin(), out.end(), [&](const auto &m) { return m.key == key; })) continue;
         smoke::Mover m;
@@ -2515,9 +2518,9 @@ std::string State() {
     for (auto &o : g_occupants) {
         o.sampleDraw = true;
         const auto p = o.body->BodyPos(Ragdoll::B_PELVIS), h = o.body->BodyPos(Ragdoll::B_HEAD);
-        occupants += Fmt("%s{\"model\":\"0x%08X\",\"carrier\":\"0x%08X\",\"kind\":\"%s_%s\",\"carriage\":%d,\"drawn_neck_error\":%.4f,\"age\":%.3f,\"pelvis\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f]}",
+        occupants += Fmt("%s{\"model\":\"0x%08X\",\"carrier\":\"0x%08X\",\"kind\":\"%s_%s\",\"carriage\":%d,\"in_cabin\":%s,\"drawn_neck_error\":%.4f,\"age\":%.3f,\"pelvis\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f]}",
             occupants.empty() ? "" : ",", (unsigned)(uintptr_t)o.model, (unsigned)(uintptr_t)o.carrier, o.rail ? "rail" : "traffic",
-            o.driver ? "driver" : "passenger", o.carriage, o.drawnNeckError, o.body->age, p.x,p.y,p.z,h.x,h.y,h.z);
+            o.driver ? "driver" : "passenger", o.carriage, jolt_ragdoll::SeatedCar(o.body.get()) ? "true" : "false", o.drawnNeckError, o.body->age, p.x,p.y,p.z,h.x,h.y,h.z);
     }
     std::string supports;
     for (const auto &[car, track] : g_carTracks) {

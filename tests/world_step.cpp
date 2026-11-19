@@ -98,6 +98,19 @@ int main() {
     car.h = {1,.5f,2}; car.c = {0,10,0};
     car.ax[0] = {1,0,0}; car.ax[1] = {0,1,0}; car.ax[2] = {0,0,1};
     jolt_world::Step(.016f, {car}, nullptr);
+    // A limb can reach the street before the rest of the passenger clears the door.
+    // Keep it on the occupant layer throughout the fall onto the static scene triangle.
+    JPH::BodyCreationSettings limb(new JPH::SphereShape(.1f), JPH::RVec3(.22f, 3.f, .22f),
+        JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, jolt_world::kOccupant);
+    const auto limbID = jolt_world::Bodies().CreateAndAddBody(limb, JPH::EActivation::Activate);
+    for (int i = 0; i < 120; ++i) jolt_world::Step(1.f / 120.f, {car}, nullptr);
+    const float restingHeight = jolt_world::Bodies().GetPosition(limbID).GetY();
+    jolt_world::Bodies().RemoveBody(limbID);
+    jolt_world::Bodies().DestroyBody(limbID);
+    if (std::abs(restingHeight - 2.1f) > .025f) {
+        std::printf("FAIL: occupant missed the static floor (centre %.3f)\n", restingHeight);
+        return 1;
+    }
     JPH::BodyIDVector ids;
     jolt_world::System()->GetBodies(ids);
     auto id = std::find_if(ids.begin(), ids.end(), [&](const auto &v) { return jolt_world::KinematicOwner(v) == &car; });

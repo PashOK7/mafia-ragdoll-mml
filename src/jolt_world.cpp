@@ -65,7 +65,10 @@ public:
 bool Meets(JPH::ObjectLayer a, JPH::ObjectLayer b) {
     auto either = [&](JPH::ObjectLayer x) { return a == x || b == x; };
     if (either(kCarBody)) return a == kDynamic || b == kDynamic || a == kLiving || b == kLiving;
-    if (either(kOccupant)) return (a == kOccupant || a == kDynamic || a == kCabin) && (b == kOccupant || b == kDynamic || b == kCabin);
+    if (either(kOccupant)) {
+        const auto other = a == kOccupant ? b : a;
+        return other == kStatic || other == kDynamic || other == kOccupant || other == kCabin;
+    }
     // A cabin is for the people in it (kOccupant) and for bodies passing through its car's hull (a person killed in
     // the open door, SetPassThrough); it exists only while someone asks for it.
     if (either(kCabin)) return a == kDynamic || b == kDynamic;
@@ -79,8 +82,7 @@ public:
 class LayerVsBroadPhase final : public JPH::ObjectVsBroadPhaseLayerFilter {
 public:
     bool ShouldCollide(JPH::ObjectLayer a, JPH::BroadPhaseLayer b) const override {
-        if (a == kOccupant) return b == BP::kMoving;   // people in a car never meet the street
-        return a == kDynamic || b == BP::kMoving;   // a static or kinematic body only looks for moving ones
+        return a == kDynamic || a == kOccupant || b == BP::kMoving;
     }
 };
 
