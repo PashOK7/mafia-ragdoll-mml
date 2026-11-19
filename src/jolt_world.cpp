@@ -703,6 +703,9 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
             JPH::RefConst<JPH::Shape> shape = TwoSidedMesh(m);
             if (!shape) continue;
             JPH::BodyCreationSettings s(shape, J(pos), rot, JPH::EMotionType::Kinematic, kCabin);
+            // Seats and roof liners are triangulated. Slide across their internal
+            // edges without generating an extra contact normal at each seam.
+            s.mEnhancedInternalEdgeRemoval = true;
             s.mFriction = 0.8f;   // cloth on upholstery and leather
             s.mRestitution = 0.0f;
             s.mOverrideMassProperties = JPH::EOverrideMassProperties::MassAndInertiaProvided;

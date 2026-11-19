@@ -138,9 +138,10 @@ struct Entry {
     JPH::Ref<JPH::PointConstraint> grip;   // the part of the coat that Tommy actually reached
     JPH::BodyID handAnchor;
     bool reached = false;
-    V3 lastHands{}, initialSlack{}, grabHands{}, outward{};
+    V3 lastHands{}, initialSlack{}, grabHands{}, outward{}, gripAxis{};
     float initialSpan = 0, tightestSpan = 0;
     float gripAge = 0;
+    JPH::SwingTwistConstraint *passiveNeck = nullptr;
     // Held still until the static world around it is there (after a core reload, in a part of the city just
     // reached): its parts asleep, the velocities they had kept for when it goes.
     bool holding = false;
@@ -297,8 +298,21 @@ void Muscles(Ragdoll *r, Entry &e, float dt) {
             }
             e.motorsOn = false;
         }
+        if (e.grip && !e.passiveNeck) {
+            // The passive neck yields under the roof, then recovers toward the
+            // angle at grasp. The position motor is a critically damped spring.
+            auto *neck = static_cast<JPH::SwingTwistConstraint *>(
+                e.ragdoll->GetConstraint(e.settings->GetConstraintIndexForBodyIndex(HEAD)));
+            neck->SetTargetOrientationBS(neck->GetBody1()->GetRotation().Conjugated() * neck->GetBody2()->GetRotation());
+            neck->GetSwingMotorSettings().SetTorqueLimit(16.f);
+            neck->GetTwistMotorSettings().SetTorqueLimit(16.f);
+            neck->SetSwingMotorState(JPH::EMotorState::Position);
+            neck->SetTwistMotorState(JPH::EMotorState::Position);
+            e.passiveNeck = neck;
+        }
         return;
     }
+    e.passiveNeck = nullptr; // the active muscle controller now owns all motor settings
     // The game's death animation, while the engine plays it: a new pose since the last one we took.
     if (!r->knockdown && T(kFollowAnim) > 0.5f && r->animSerial != e.animSeen) {
         e.animSeen = r->animSerial;
@@ -354,6 +368,11 @@ bool g_inOrder;
 
 void ReleaseGrip(Entry &e, const Ragdoll *r, bool endAction = true) {
     if (endAction) jolt_world::SetHolder(r, nullptr);
+    if (e.passiveNeck) {
+        e.passiveNeck->SetSwingMotorState(JPH::EMotorState::Off);
+        e.passiveNeck->SetTwistMotorState(JPH::EMotorState::Off);
+        e.passiveNeck = nullptr;
+    }
     if (e.grip && jolt_world::Running()) jolt_world::System()->RemoveConstraint(e.grip);
     e.grip = nullptr;
     if (!e.handAnchor.IsInvalid() && jolt_world::Running()) {
@@ -398,6 +417,55 @@ void OnCabinJump(const void *car, const JPH::Vec3 &fromPos, const JPH::Quat &fro
     }
 }
 
+// The native seated pose can straddle the two faces of an upholstered backrest.
+// Place the rigid trunk on the knee side before its pelvis is attached to the seat.
+static void FitSeatBack(Entry &e, JPH::BodyID cabinID) {
+    auto &bi = jolt_world::Bodies();
+    const auto cabin = bi.GetTransformedShape(cabinID);
+    const auto hip = bi.GetCenterOfMassPosition(e.ragdoll->GetBodyID(PELVIS));
+    const auto feet = (bi.GetCenterOfMassPosition(e.ragdoll->GetBodyID(RFOOT)) +
+                       bi.GetCenterOfMassPosition(e.ragdoll->GetBodyID(LFOOT))) * .5f;
+    JPH::Vec3 forward = bi.GetRotation(cabinID) * JPH::Vec3::sAxisZ();
+    if ((feet - hip).Dot(forward) < 0) forward = -forward;
+    float clearance = 0;
+    int crossed = 0;
+    bool centreBehindFace = false;
+    for (int part : {PELVIS, ABDOMEN, CHESTLOW}) {
+        const auto id = e.ragdoll->GetBodyID(part);
+        const auto centre = bi.GetCenterOfMassPosition(id);
+        const auto toLocal = bi.GetRotation(id).Conjugated();
+        const auto half = bi.GetShape(id)->GetLocalBounds().GetExtent();
+        const float radius = (toLocal * forward).Abs().Dot(half);
+        const float reach = radius + .15f; // allow for the thickness of the backrest
+        JPH::RRayCast ray{centre + forward * reach, -forward * (reach + radius)};
+        JPH::RayCastResult hit;
+        if (!cabin.CastRay(ray, hit)) continue;
+        const auto face = ray.GetPointOnRay(hit.mFraction);
+        if (std::abs(cabin.GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, face).Dot(forward)) < .8f) continue;
+        // From behind, the backrest must also reach the trunk. A surface wholly
+        // in front of the body (e.g. the dashboard) is not a seating correction.
+        JPH::RRayCast reverse{centre - forward * reach, forward * (reach + radius)};
+        JPH::RayCastResult back;
+        if (!cabin.CastRay(reverse, back)) continue;
+        const auto rear = reverse.GetPointOnRay(back.mFraction);
+        if (std::abs(cabin.GetWorldSpaceSurfaceNormal(back.mSubShapeID2, rear).Dot(forward)) < .8f ||
+            (face - rear).Dot(forward) < -.001f) continue;
+        const float distance = (face - centre).Dot(forward);
+        const float overlap = distance + radius;
+        if (overlap <= 0) continue;
+        ++crossed;
+        centreBehindFace = centreBehindFace || distance > 0;
+        clearance = std::max(clearance, overlap);
+    }
+    if (crossed < 2 || !centreBehindFace) return;
+    const auto shift = forward * clearance;
+    for (int part = 0; part < BODIES; ++part) {
+        const auto id = e.ragdoll->GetBodyID(part);
+        bi.SetPosition(id, bi.GetPosition(id) + shift, JPH::EActivation::Activate);
+    }
+    RLOG("seated trunk fitted %.3f m forward of its backrest (%d intersections)", clearance, crossed);
+}
+
 // The pelvis held where it sits: 5 cm of play each way and 15 degrees about every axis (a body on a seat with
 // nothing to hold it but friction and the seat's shape; the cabin's triangles do the rest).
 void Seat(Entry &e) {
@@ -405,6 +473,7 @@ void Seat(Entry &e) {
     if (cabin.IsInvalid() || e.seat) return;
     JPH::BodyInterface &bi = jolt_world::Bodies();
     JPH::BodyID pelvis = e.ragdoll->GetBodyID(PELVIS);
+    FitSeatBack(e, cabin);
     JPH::SixDOFConstraintSettings s;
     s.mSpace = JPH::EConstraintSpace::WorldSpace;
     s.mPosition1 = s.mPosition2 = bi.GetPosition(pelvis);
@@ -538,6 +607,7 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
         e.grabHands = hands;
         e.outward = Norm({player.x - chest.x, 0, player.z - chest.z}, {0, 0, 0});
         e.initialSpan = e.tightestSpan = span;
+        e.gripAxis = Norm(right - left, {0, 0, 0});
     } else if (Len(hands - e.lastHands) > 1.5f) {
         ReleaseGrip(e, r); // the player was teleported across the scene
         return;
@@ -555,7 +625,22 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
     const float slack = std::max(0.f, 1.f - e.gripAge / .18f);
     const V3 target = hands + e.initialSlack * (slack * slack * (3.f - 2.f * slack));
     bi.MoveKinematic(e.handAnchor, J(jolt_world::ToJolt(target)), JPH::Quat::sIdentity(), dt);
-    bi.ActivateBody(e.grip->GetBody2()->GetID());
+    const auto held = e.grip->GetBody2()->GetID();
+    // Two hands can turn the coat as a pair. Resist angular slip perpendicular
+    // to the line between them, leaving rotation about that line free.
+    const V3 axis = Norm(right - left, e.gripAxis);
+    if (span > .02f) {
+        const V3 handSpin = Cross(e.gripAxis, axis) * (1.f / dt);
+        const V3 slip = handSpin - F(bi.GetAngularVelocity(held));
+        const V3 transverse = slip - axis * Dot(slip, axis);
+        // Two damped tangential forces at half-span, each limited to 80 N.
+        const V3 torque = transverse * (50.f * span * span);
+        const float limit = 80.f * span;
+        const float scale = limit / std::max(limit, Len(torque));
+        bi.AddAngularImpulse(held, J(torque * (dt * scale)));
+    }
+    e.gripAxis = axis;
+    bi.ActivateBody(held);
 }
 
 const void *SeatedCar(const Ragdoll *r) {
