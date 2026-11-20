@@ -654,6 +654,8 @@ The installed DLLs in both labs and `W:/Mafia10Fixes` match SHA-256 `8a966101479
 
 ### 2026-11-20 - Driver footwell placement and two-hand support (0.1.10)
 
+The [0.1.10 release notes](RELEASE-0.1.10.md) cover changes since the previous public release, 0.1.0. All eight saved extraction captures passed again at packaging time. Both archives carry the lab-tested DLL. The clean bundle matches the public MML 0.1 base file for file, with the host moved to `scripts/`. The smaller archive owns five files under `mml/mods/ragdoll/`.
+
 The owner's ambulance capture showed a foot 0.46 m inside the outer wheel line after release. On the same vehicle in both labs the old seat-back correction shifted the whole skeleton forward by 0.16 m. Before Tommy even reached in, the shin penetrated the cabin by up to 0.074 m. During the pull the shin and foot reported opposite normals on the same panel. Moving the grip from the pelvis to the abdomen still left a foot inside on both builds.
 
 When fitting a trunk to the backrest, test the displaced leg shapes against the actual cabin. Keep the original leg pose if it fits within the solver's contact tolerance. An obstructed leg uses a two-link hip-to-ankle solve in its existing knee bend plane. Evaluate the thigh, shin and shoe together against the seat and footwell, choosing the smallest combined overlap and shoe displacement. This runs when attaching the seat. At grasp the mod records the line between Tommy's hands in the torso's local frame. Changes to that line apply bounded restoring torque through the hand span. The body can roll around it and retains its momentum at release.

@@ -8,7 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/x86/out/mml/mods/ragdoll'
 # Pin the baseline at packaging time. The installed mod negotiates services through the SDK.
-TESTED_BASE = 'd70fff2e2392d9551e1a6e555d937155aec3668c83a262e9374c16e4167b56d5'
+TESTED_BASE = '4b64ec657da0d98352c3f1c40785a3bb1baf858cf743dc750729b82bfc144a94'
+# MML 0.1's public packaging tool lists the same tested host at the game root.
+TESTED_ROOT_LAYOUT = 'd70fff2e2392d9551e1a6e555d937155aec3668c83a262e9374c16e4167b56d5'
 
 
 def main():
@@ -16,6 +18,7 @@ def main():
     choices = parser.add_mutually_exclusive_group()
     choices.add_argument('--mod-only', action='store_true')
     choices.add_argument('--with-loader', action='store_true', help='build only the clean-install download')
+    choices.add_argument('--existing-asi', action='store_true', help='bundle MML as a plugin of an existing ASI loader')
     parser.add_argument('--loader-root', type=Path, default=os.environ.get('MML_ROOT', ROOT.parent / 'MafiaModLoader'))
     args = parser.parse_args()
     loader = args.loader_root.resolve()
@@ -31,10 +34,18 @@ def main():
     files[prefix + 'README.md'] = ROOT / 'README.md'
     files[prefix + 'licenses/Jolt.txt'] = loader / 'third_party/_deps/jolt/LICENSE'
     if not args.mod_only:
-        _, base = release.base_archive(loader, expected_content=TESTED_BASE)
+        root_layout = 'MafiaModLoader.asi' in release.base_files(loader)
+        _, base = release.base_archive(loader, expected_content=TESTED_ROOT_LAYOUT if root_layout else TESTED_BASE)
+        if root_layout:
+            base['scripts/MafiaModLoader.asi'] = base.pop('MafiaModLoader.asi')
+        archive = f'1-{name}-with-MML-{release.RELEASE}.zip'
+        if args.existing_asi:
+            del base['dinput8.dll']
+            del base['licenses/UltimateASILoader.txt']
+            archive = f'{name}-with-MML-{release.RELEASE}-existing-ASI.zip'
         bundle = {**base, **files, 'INSTALL-RAGDOLL.txt': ROOT / 'docs/INSTALL.txt'}
-        print(release.write_zip(dist / f'1-{name}-with-MML-{release.RELEASE}.zip', bundle))
-    if not args.with_loader:
+        print(release.write_zip(dist / archive, bundle))
+    if not args.with_loader and not args.existing_asi:
         print(release.write_zip(dist / f'2-{name}-mod-only-if-MML-is-installed.zip', files))
 
 

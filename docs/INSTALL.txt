@@ -7,6 +7,10 @@ For a game with a compatible MafiaModLoader already installed, extract the mod-o
 ZIP into the folder containing Game.exe. It updates only mml/mods/ragdoll and
 preserves the installed loader.
 
+If your modpack already loads ASI plugins from scripts/ and MML is new to this game,
+select just scripts/, mml/ and licenses/ from the first ZIP and extract those folders
+beside Game.exe. This keeps your existing ASI loader and graphics wrapper.
+
 The clean-game base identifies its host in mml/base-version.txt. The mod-only
 download works with the tested host and compatible later builds. Add other mods
 under mml/mods. The full MML runtime and the optional FFmpeg video package are

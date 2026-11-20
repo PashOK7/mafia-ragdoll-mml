@@ -34,7 +34,7 @@ into the folder containing Game.exe. [Download the latest release](https://githu
   carriage, including the rear train car. Bullets push the part of the body they strike, both on the fatal shot
   and after the body has settled.
 - **In cars.** A traffic driver becomes a ragdoll as soon as the game registers a fatal hit. Someone killed in his seat slumps there and stays in the cabin while the car drives, turns, brakes or
-  crashes or moves with a mission script. When Tommy pulls a dead driver out, the driver's coat stays in his hands as he draws the torso through the door.
+  crashes or moves with a mission script. When Tommy pulls a dead driver out, his hands grip the torso and draw it through the door.
   The legs follow under their own weight, and the body stays in the street when the car leaves.
 - **The ragdoll camera.** While the player himself is a ragdoll and while he gets up, the camera circles his body:
   the mouse turns it round him, the wheel brings it nearer or further, and it keeps out of walls and cars; it blends
@@ -51,6 +51,12 @@ If a compatible loader is already installed, extract the second ZIP (**mod-only*
 folder. This updates only `mml/mods/ragdoll/` and preserves the installed loader.
 The mod is on by default. Its settings are in **Options > Mods > Ragdolls**.
 Other mods can be installed alongside it in `mml/mods/`.
+
+If a modpack already loads ASI plugins from `scripts/` and you are adding MML for
+the first time, select just the `scripts/`, `mml/` and `licenses/` folders from the
+first ZIP and extract them beside `Game.exe`. This keeps the modpack's ASI loader
+and graphics wrapper. An existing MML installation can use the mod-only ZIP with
+its current host location.
 
 Getting up on a tram or elevated train uses the walking floor of the carriage under Tommy's feet.
 In the first-person passenger view his model is hidden. If he falls through a doorway, the game
@@ -81,7 +87,7 @@ The same keys are in `mod/config.json` (the defaults); what is changed in the ga
 
 - Add ragdoll physics for dogs.
 - Let a character’s hat fly off when the character enters ragdoll, if they are wearing one.
-- Let Tommy pull a dead driver out of the car when stealing it.
+- Apply ragdoll physics to bodies already inside a car when it explodes.
 
 ## Cost
 
@@ -100,7 +106,7 @@ cmake --build --preset x86-release
 The mod is in `build\x86\out\mml\mods\ragdoll\`. `python tools\deploy.py` copies it into the labs named in
 MafiaModLoader's `mml.config.json` and reloads it in a running game; `python tools\pack.py` makes the players'
 downloads in `build/dist/mafia-ragdoll-<version>-player/`. The default builds both.
-Use `--mod-only` or `--with-loader` to select one. Agents: read `AGENTS.md`.
+Use `--mod-only` or `--with-loader` to select one, or `--existing-asi` to build the modpack bundle. Agents: read `AGENTS.md`.
 
 ## Credits
 
