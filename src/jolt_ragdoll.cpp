@@ -139,7 +139,7 @@ struct Entry {
     JPH::Ref<JPH::PointConstraint> grip;   // point on the driver's trunk reached by Tommy's hands
     JPH::BodyID handAnchor;
     bool reached = false;
-    V3 lastHands{}, initialSlack{}, outward{}, gripAxis{};
+    V3 lastHands{}, initialSlack{}, outward{}, gripAxis{}, localGripAxis{};
     float reachStart = 0, deepestReach = 0, gripStart = 0, lastDepth = 0;
     float farthestPull = 0;
     float gripAge = 0;
@@ -425,9 +425,80 @@ void OnCabinJump(const void *car, const JPH::Vec3 &fromPos, const JPH::Quat &fro
     }
 }
 
+// Refit the leg between the corrected hip and the original footwell position.
+// Moving the whole seated skeleton forward can put the shin and foot on
+// opposite sides of the dashboard before the first collision step.
+static void FitSeatedLeg(const Ragdoll *r, Entry &e, const JPH::TransformedShape &cabin,
+                         int thigh, int shin, int foot, JPH::Vec3Arg shift, JPH::Vec3Arg forward, JPH::Vec3Arg up) {
+    auto &bi = jolt_world::Bodies();
+    const JPH::BodyID ids[] = {e.ragdoll->GetBodyID(thigh), e.ragdoll->GetBodyID(shin), e.ragdoll->GetBodyID(foot)};
+    const auto upper = bi.GetWorldTransform(ids[0]), lower = bi.GetWorldTransform(ids[1]), shoe = bi.GetWorldTransform(ids[2]);
+    const auto &u = JoltBridge::B(r, thigh), &l = JoltBridge::B(r, shin);
+    const auto hip = upper * J(u.a) + shift, oldKnee = upper * J(u.b), oldAnkle = lower * J(l.b);
+    const float a = Len(u.b - u.a), b = Len(l.b - l.a);
+    if (!(a > .001f && b > .001f)) {
+        for (auto id : ids) bi.SetPosition(id, bi.GetPosition(id) + shift, JPH::EActivation::Activate);
+        return;
+    }
+    const auto makeLink = [&](const JPH::RMat44 &oldPose, const JoltBridge::Body &segment,
+                              JPH::Vec3Arg start, JPH::Vec3Arg end) {
+        const auto q = oldPose.GetQuaternion();
+        const auto direction = (q * J(segment.b - segment.a)).Normalized();
+        const auto rotation = JPH::Quat::sFromTo(direction, (end - start).Normalized()) * q;
+        return JPH::RMat44::sRotationTranslation(rotation, start - rotation * J(segment.a));
+    };
+    auto penetration = [&](const JPH::RMat44 *pose, float stopAt) {
+        float depth = 0;
+        for (int i = 0; i < 3 && depth < stopAt; ++i) {
+            const auto shape = bi.GetShape(ids[i]);
+            JPH::ClosestHitCollisionCollector<JPH::CollideShapeCollector> hit;
+            cabin.CollideShape(shape, JPH::Vec3::sOne(), pose[i].PreTranslated(shape->GetCenterOfMass()),
+                               {}, JPH::RVec3::sZero(), hit);
+            if (hit.HadHit()) depth = std::max(depth, hit.mHit.mPenetrationDepth);
+        }
+        return depth;
+    };
+    JPH::RMat44 best[] = {upper, lower, shoe};
+    for (auto &pose : best) pose.SetTranslation(pose.GetTranslation() + shift);
+    const float initialDepth = penetration(best, FLT_MAX);
+    float bestCost = initialDepth;
+    const float slop = jolt_world::System()->GetPhysicsSettings().mPenetrationSlop;
+    // A shoe can start inside the footwell's sloping front wall. Try the
+    // nearest reachable placements towards the seat and above the floor;
+    // test the full shapes of the thigh, shin and shoe at each placement.
+    for (int step = 0; initialDepth > slop && step <= 12; ++step) {
+        for (int lift = 0; lift <= step && lift <= 6; ++lift) {
+            const float back = (step - lift) * .04f, height = lift * .04f;
+            const auto toAnkle = JPH::Vec3(oldAnkle - hip) - forward * back + up * height;
+            const auto axis = toAnkle.NormalizedOr(-up);
+            const float reach = std::clamp(toAnkle.Length(), std::abs(a - b) + .0001f, a + b - .0001f);
+            const float along = (a*a - b*b + reach*reach) / (2.f * reach);
+            const auto bend = JPH::Vec3(oldKnee - hip);
+            const auto pole = (bend - axis * bend.Dot(axis)).NormalizedOr(axis.GetNormalizedPerpendicular());
+            const auto knee = hip + axis * along + pole * std::sqrt(std::max(0.f, a*a - along*along));
+            const auto ankle = hip + axis * reach;
+            const float displacementCost = .025f * (ankle - oldAnkle).Length();
+            if (displacementCost >= bestCost) continue;
+            JPH::RMat44 pose[] = {makeLink(upper, u, hip, knee), makeLink(lower, l, knee, ankle), shoe};
+            pose[2].SetTranslation(shoe.GetTranslation() + (ankle - oldAnkle));
+            const float cost = penetration(pose, bestCost - displacementCost) + displacementCost;
+            if (cost < bestCost) {
+                bestCost = cost;
+                std::copy_n(pose, 3, best);
+            }
+        }
+        if (bestCost <= .002f) break;
+    }
+    for (int i = 0; i < 3; ++i)
+        bi.SetPositionAndRotation(ids[i], best[i].GetTranslation(), best[i].GetQuaternion(), JPH::EActivation::Activate);
+    if (bestCost < initialDepth)
+        RLOG("seated %s footwell: cabin penetration %.3f -> %.3f m", foot == LFOOT ? "left" : "right",
+             initialDepth, penetration(best, FLT_MAX));
+}
+
 // The native seated pose can straddle the two faces of an upholstered backrest.
 // Place the rigid trunk on the knee side before its pelvis is attached to the seat.
-static void FitSeatBack(Entry &e, JPH::BodyID cabinID) {
+static void FitSeatBack(const Ragdoll *r, Entry &e, JPH::BodyID cabinID) {
     auto &bi = jolt_world::Bodies();
     const auto cabin = bi.GetTransformedShape(cabinID);
     const auto hip = bi.GetCenterOfMassPosition(e.ragdoll->GetBodyID(PELVIS));
@@ -467,7 +538,10 @@ static void FitSeatBack(Entry &e, JPH::BodyID cabinID) {
     }
     if (crossed < 2 || !centreBehindFace) return;
     const auto shift = forward * clearance;
-    for (int part = 0; part < BODIES; ++part) {
+    const auto up = bi.GetRotation(cabinID) * JPH::Vec3::sAxisY();
+    FitSeatedLeg(r, e, cabin, RTHIGH, RSHIN, RFOOT, shift, forward, up);
+    FitSeatedLeg(r, e, cabin, LTHIGH, LSHIN, LFOOT, shift, forward, up);
+    for (int part = 0; part < RTHIGH; ++part) {
         const auto id = e.ragdoll->GetBodyID(part);
         bi.SetPosition(id, bi.GetPosition(id) + shift, JPH::EActivation::Activate);
     }
@@ -476,12 +550,12 @@ static void FitSeatBack(Entry &e, JPH::BodyID cabinID) {
 
 // The pelvis held where it sits: 5 cm of play each way and 15 degrees about every axis (a body on a seat with
 // nothing to hold it but friction and the seat's shape; the cabin's triangles do the rest).
-void Seat(Entry &e) {
+void Seat(const Ragdoll *r, Entry &e) {
     JPH::BodyID cabin = jolt_world::CabinBody(e.car);
     if (cabin.IsInvalid() || e.seat) return;
     JPH::BodyInterface &bi = jolt_world::Bodies();
     JPH::BodyID pelvis = e.ragdoll->GetBodyID(PELVIS);
-    FitSeatBack(e, cabin);
+    FitSeatBack(r, e, cabin);
     JPH::SixDOFConstraintSettings s;
     s.mSpace = JPH::EConstraintSpace::WorldSpace;
     s.mPosition1 = s.mPosition2 = bi.GetPosition(pelvis);
@@ -633,6 +707,7 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
         e.gripAge = 0;
         e.gripStart = e.farthestPull = depth;
         e.gripAxis = Norm(right - left, {0, 0, 0});
+        e.localGripAxis = F(bi.GetRotation(grabbed).Conjugated() * J(e.gripAxis));
     } else if (Len(hands - e.lastHands) > 1.5f) {
         ReleaseGrip(e, r); // the player was teleported across the scene
         return;
@@ -662,8 +737,11 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
         const V3 handSpin = Cross(e.gripAxis, axis) * (1.f / dt);
         const V3 slip = handSpin - F(bi.GetAngularVelocity(held));
         const V3 transverse = slip - axis * Dot(slip, axis);
-        // Two damped tangential forces at half-span, each limited to 80 N.
-        const V3 torque = transverse * (50.f * span * span);
+        // Two compliant hand contacts. The material line between the grasp
+        // points rotates with the trunk. Its displacement supplies restoring
+        // torque even after the hands stop turning. Rotation around it is free.
+        const V3 materialAxis = F(bi.GetRotation(held) * J(e.localGripAxis));
+        const V3 torque = (Cross(materialAxis, axis) * 350.f + transverse * 50.f) * (span * span);
         const float limit = 80.f * span;
         const float scale = limit / std::max(limit, Len(torque));
         bi.AddAngularImpulse(held, J(torque * (dt * scale)));
@@ -977,7 +1055,7 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
     }
     jolt_world::Step(dt, movers, player, [] {
         for (auto &[body, entry] : g_entries)
-            if (entry.car && !body->railOccupant) Seat(entry);
+            if (entry.car && !body->railOccupant) Seat(body, entry);
     });
     for (Ragdoll *r : all) {
         auto it = g_entries.find(r);
