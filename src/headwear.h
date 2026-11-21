@@ -9,7 +9,7 @@ namespace headwear {
 void Prepare();
 void Tick(std::span<const MmlPedestrian> pedestrians);
 void Drop(Ragdoll &body, float dt);
-void Sync();
+void Sync(float dt);
 bool Near(V3 point);
 void ApplyAirDrag(float dt);
 bool OwnsBody(uint32_t body);

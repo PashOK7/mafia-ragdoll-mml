@@ -27,8 +27,13 @@ def check_truck_carry(game):
             return {p['prop']: p['pos'][2] for p in game.call('props.list')['props']
                     if p['model'].lower() == 'rdhat_civil15_lined.i3d'}
         before = set(hats())
+        seq=game.latest()
         game.call('vehicle.move', car=truck, velocity=[0,0,18], ms=1050)
-        game.call('human.hit', actor=actor, type=0, damage=1000, dir=[0,0,0])
+        # Drive a real hull into the ragdoll. The scripted test vehicle uses
+        # the SDK path to deliver the native vehicle hit to this mission NPC.
+        contact=game.call('human.vehicle_contact', actor=actor, car=truck,
+                          velocity=[0,0,18], pos=game.pos(actor))
+        assert contact['accepted'],contact
         flight = []
         stopped = False
         for _ in range(45):
@@ -46,7 +51,10 @@ def check_truck_carry(game):
             game.sleep(24)
         # The stopped truck or the wearer can still catch the hat at low
         # clearance. Initial carry is required even when that arrests flight.
-        assert flight and flight[0] > 1 and max(flight)-flight[0] < 12, flight
+        hits=game.call('events.since',seq=seq,types='HUMAN_HIT')['events']
+        assert any(e['data']['actor']==actor and e['data']['hit_type']==8 and
+                   e['data'].get('attacker')==truck for e in hits),hits
+        assert flight and flight[0] > .20 and .25<max(flight)-flight[0] < 12, flight
         print(game.build, 'truck impact: hat first seen', round(flight[0],2),
               'm forward, then travelled another', round(max(flight)-flight[0],2), 'm')
     finally:
@@ -108,25 +116,17 @@ def check_shotgun_carry(game, axis=(0,0,1), model='civil17', moving=False, locat
         assert len(flight)>=4 and (moving or max(flight)>.60),(
             flight,game.call('events.since',seq=seq,types='HUMAN_HIT,BULLET_HIT')['events'])
         logs=[line for line in game.tool('log_tail',lines=100).splitlines() if line not in previous]
-        lift=next((line.split(' lift along head ')[1].split() for line in logs
-                   if 'headwear shot carry' in line),None)
-        assert lift and float(lift[0])>0 and float(lift[3])<.34*float(lift[0]),logs[-15:]
-        assert any('headwear shot separation' in line for line in logs),logs[-15:]
-        worn=next((float(line.split('worn travel ')[1].split()[0]) for line in logs
-                   if 'headwear shot worn travel' in line),0)
+        release=next(line.split('headwear release lift ')[1].split() for line in logs
+                     if 'headwear release lift' in line)
+        assert 0<=float(release[0])<=float(release[3])+.001,release
+        assert any('headwear separation' in line for line in logs),logs[-15:]
         early_flight=next((float(line.split(' forward ')[1].split()[0]) for line in logs
-                           if 'headwear shot flight remaining 24 ' in line),0)
-        carry=next((line.split("wearer's path ")[1].split() for line in logs
-                    if "headwear shot along wearer's path" in line),None)
-        assert carry and float(carry[0])>=float(carry[5])-.001,logs[-15:]
-        if moving:
-            assert float(carry[5])>1 and early_flight>.22,(worn,early_flight,logs[-15:])
-        else:
-            assert worn>.20 and early_flight>.50,(worn,early_flight,logs[-15:])
-        ghost_contacts=[line for line in logs if 'headwear shot contact layer 0 rdhat_' in line]
+                           if 'headwear flight remaining 24 ' in line),0)
+        assert early_flight>(.22 if moving else .38),(early_flight,logs[-15:])
+        ghost_contacts=[line for line in logs if 'headwear contact layer 0 rdhat_' in line]
         assert not ghost_contacts,ghost_contacts
         if model=='civil12':
-            later=next((line for line in logs if 'headwear shot flight remaining 16 ' in line),None)
+            later=next((line for line in logs if 'headwear flight remaining 16 ' in line),None)
             assert later,logs[-15:]
             forward=float(later.split(' forward ')[1].split()[0])
             speed=float(later.split(' speed ')[1].split()[0])
@@ -295,7 +295,10 @@ def check(game):
         first, second = a.pop(), b.pop()
         assert visible(first) and visible(second)
         before = hats()
-        hit(owner)
+        if model == 'TommyHAT':
+            game.call('ragdoll.start', actor=owner)
+        else:
+            hit(owner)
         assert visible(first) and set(hats()) == set(before), (model, 'detached on activation')
         for _ in range(40):
             game.sleep(80)

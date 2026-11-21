@@ -9,52 +9,18 @@ struct HatFit {
     V3 mount{},lastHat{},lastTorso{},firstTorso{},hatMotion{},torsoMotion{};
     bool tracking=false;
     V3 previousVelocity{};
-    V3 shotMotion{};
-    V3 pendingShot{};
-    float shotAge=0;
     float lift=0, liftRate=0;
     float depth=.09f, leverage=.45f;
     bool sampled=false;
-    bool ridingShot=false;
-    float engaged=0.f;
-
-    void shot(V3 delta,float age) {
-        shotMotion=shotMotion*std::exp(-std::max(0.f,age-shotAge)/.18f)+delta;
-        pendingShot+=delta;
-        shotAge=age;
-    }
 
     V3 carryAxis() const {
-        const V3 travel{torsoMotion.x,0,torsoMotion.z};
-        return Norm(travel,Norm({shotMotion.x,0,shotMotion.z},{}));
+        return Norm({torsoMotion.x,0,torsoMotion.z},{});
     }
 
-    V3 shotReleaseVelocity(V3 headVelocity,V3 up) const {
+    V3 releaseVelocity(V3 up) const {
         const V3 axis=carryAxis();
-        const V3 opening=up*std::clamp(liftRate,0.f,1.1f);
-        const V3 velocity=hatMotion+opening;
-        // The fitted band still carries the wearer's translation at the lip
-        // of the crown. Head rotation can subtract from the tracked point's
-        // speed along that path. Keep the translation and any faster forward
-        // head motion, with the measured sideways and vertical components.
-        const float inherited=Dot(velocity,axis);
-        const float forward=std::max({inherited,Dot(torsoMotion,axis),Dot(headVelocity+opening,axis)});
-        return velocity+axis*(forward-inherited);
-    }
-
-    bool clearsShotGuide(float span,float dt) {
-        if (!ridingShot) return true;
-        V3 forward{shotMotion.x,0,shotMotion.z};
-        const V3 direction=Norm(forward,{});
-        const float translation=std::max(0.f,Dot(lastTorso-firstTorso,direction));
-        // While the band is riding over the crown, its motion remains coupled
-        // to the wearer. It clears over the cap's own span as the trunk moves.
-        // If only the head rotates (e.g. a body backed against a wall), let the
-        // measured axial opening carry it free instead.
-        const float forwardSpeed=Dot(torsoMotion,direction);
-        engaged+=std::max(0.f,liftRate)*dt*(1.f-std::clamp(forwardSpeed/.85f,0.f,1.f));
-        if (translation+engaged<span) return false;
-        return true;
+        const float carry=std::max(0.f,Dot(torsoMotion-hatMotion,axis));
+        return hatMotion+axis*carry+up*std::clamp(liftRate,0.f,1.1f);
     }
 
     // Follow the actual mounted point. A contact solver can move a body by
@@ -91,15 +57,6 @@ struct HatFit {
         // Lateral force applied above the band tips it about the rim.
         float peel=leverage*shear;
         float pull=axial+peel-2.8f;
-        // The shot drives the head before the finite-difference tracker sees
-        // that motion. Apply its sideways impulse to the band once.
-        const V3 crosswise=pendingShot-up*Dot(pendingShot,up);
-        if (Len(crosswise)>.1f && !ridingShot) {
-            ridingShot=true;
-            engaged=0.f;
-        }
-        liftRate+=std::min(2.5f,Len(crosswise)*leverage*2.6f);
-        pendingShot={};
         int steps=int(std::ceil(dt*120.f));
         float step=dt/steps;
         for (int i=0;i<steps;++i) {

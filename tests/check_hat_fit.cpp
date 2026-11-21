@@ -8,12 +8,18 @@ int main() {
     HatFit diagonal;
     diagonal.torsoMotion={1.867f,-.380f,1.695f};
     diagonal.hatMotion={1.358f,-.206f,.191f};
-    diagonal.shotMotion={.45f,-.20f,.89f};
     const V3 axis=diagonal.carryAxis();
-    const V3 velocity=diagonal.shotReleaseVelocity(diagonal.hatMotion,{0,1,0});
+    const V3 velocity=diagonal.releaseVelocity({0,1,0});
     assert(Dot(velocity,axis)>=Dot(diagonal.torsoMotion,axis)-.001f);
     assert(std::abs(Dot(velocity-diagonal.hatMotion,{axis.z,0,-axis.x}))<.001f);
     assert(std::abs(velocity.y-diagonal.hatMotion.y)<.001f);
+    // The band can add only its opening speed. A solver peak on the last
+    // pellet cannot launch the visual faster than its mounted trajectory.
+    HatFit volley;
+    volley.hatMotion={5.5f,0,0};
+    volley.torsoMotion={3.9f,0,0};
+    volley.liftRate=20.f;
+    assert(Len(volley.releaseVelocity({0,1,0})-V3{5.5f,1.1f,0})<.001f);
     for (float fps : {20.f,30.f,60.f,144.f}) {
         const float dt=1/fps;
         const V3 up{0,1,0};

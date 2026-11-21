@@ -54,6 +54,8 @@ struct FallenHat {
     bool wasDead;
     JPH::BodyID body;
     V3 previous, drawn;
+    V3 releaseOffset{};
+    float releaseTime=0;
     const hats::PropMesh *mesh;
     float scale;
     bool touchedRagdoll=false;
@@ -61,7 +63,7 @@ struct FallenHat {
     bool sleeping=false;
     uint32_t releaseGroup=JPH::CollisionGroup::cInvalidGroup;
     unsigned releaseContacts=0;
-    V3 shotStart{}, shotAxis{};
+    V3 flightStart{}, flightAxis{};
     unsigned flightSamples=0;
     unsigned flightContacts=0;
     std::vector<void *> visuals;
@@ -70,6 +72,7 @@ std::unordered_map<void *, FallenHat> fallen;
 std::vector<FallenHat> retired;
 std::unordered_set<void *> physicsVisuals;
 constexpr float hatMass=.22f;
+constexpr float transitionTime=.05f;
 JPH::Vec3 J(V3 v) { return {v.x,v.y,v.z}; }
 V3 F(JPH::RVec3Arg v) { return {float(v.GetX()),float(v.GetY()),float(v.GetZ())}; }
 
@@ -95,7 +98,7 @@ void UpdateRelease(FallenHat &hat,bool asleep) {
         bi.GetCenterOfMassTransform(hat.body),settings,JPH::RVec3::sZero(),hits,{},{},wearer);
     if (hits.HadHit() && !asleep) return;
     hat.releaseGroup=JPH::CollisionGroup::cInvalidGroup;
-    Log("headwear shot separation: %u wearer contacts skipped, speed %.3f m/s",
+    Log("headwear separation: %u wearer contacts skipped, speed %.3f m/s",
         hat.releaseContacts,bi.GetLinearVelocity(hat.body).Length());
 }
 
@@ -141,51 +144,29 @@ float DrawClearance(const FallenHat &hat,V3 pos,JPH::QuatArg q) {
     return std::clamp(lift,0.f,.05f);
 }
 
-bool ClearShotRelease(const JPH::Shape *shape,JPH::Quat &rotation,V3 axis,V3 impulse,
-                      float seatedDepth,float headroom,V3 &position) {
+// The convex hat includes the empty space inside its crown. Test its seated
+// pose first and lift it only as far as needed to clear its owner's hull.
+// An obstruction belonging to anything else keeps the hat on the wearer.
+bool ClearRelease(const JPH::Shape *shape,JPH::QuatArg rotation,V3 up,float radius,
+                  uint32_t ownerGroup,V3 &position) {
     const auto &query=jolt_world::System()->GetNarrowPhaseQueryNoLock();
     JPH::CollideShapeSettings settings;
     settings.mMaxSeparationDistance=.002f;
-    const V3 side=impulse-axis*Dot(impulse,axis);
-    const V3 peel=Norm(side,{});
-    const float tilt=std::min(.25f,Len(side)*.045f);
-    const auto tipped=tilt>0 ? JPH::Quat::sRotation(J(Norm(Cross(axis,peel))),tilt)*rotation : rotation;
-    for (int i=0;i<=12;++i) {
-        const float rise=seatedDepth+headroom*i/12.f;
-        // Release has a dominant axial lift and a secondary peel about the rim.
-        const V3 candidate=position+axis*rise+peel*(seatedDepth*std::sin(tilt));
-        const auto transform=JPH::RMat44::sRotationTranslation(tipped,J(jolt_world::ToJolt(candidate)))
-                                 .PreTranslated(shape->GetCenterOfMass());
-        JPH::AnyHitCollisionCollector<JPH::CollideShapeCollector> hits;
-        query.CollideShape(shape,JPH::Vec3::sOne(),transform,settings,JPH::RVec3::sZero(),hits);
-        if (hits.HadHit()) continue;
-        position=candidate;
-        rotation=tipped;
-        return true;
-    }
-    return false;
-}
-
-bool ClearRelease(const JPH::Shape *shape,JPH::QuatArg rotation,float depth,V3 &position) {
-    const V3 initial=position;
-    const auto &query=jolt_world::System()->GetNarrowPhaseQueryNoLock();
-    JPH::CollideShapeSettings settings;
-    for (int i=0;i<12;++i) {
-        const auto transform=JPH::RMat44::sRotationTranslation(rotation,J(jolt_world::ToJolt(position)))
+    for (int i=0;i<=24;++i) {
+        const V3 candidate=position+up*(radius*i/24.f);
+        const auto transform=JPH::RMat44::sRotationTranslation(rotation,J(jolt_world::ToJolt(candidate)))
                                  .PreTranslated(shape->GetCenterOfMass());
         JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> hits;
         query.CollideShape(shape,JPH::Vec3::sOne(),transform,settings,JPH::RVec3::sZero(),hits);
-        const JPH::CollideShapeResult *deepest=nullptr;
-        float penetration=.002f;
-        for (const auto &hit:hits.mHits) {
-            if (hit.mPenetrationDepth>penetration) {
-                deepest=&hit;
-                penetration=hit.mPenetrationDepth;
-            }
+        if (!hits.HadHit()) {
+            position=candidate;
+            return true;
         }
-        if (!deepest) return true;
-        position-=F(deepest->mPenetrationAxis.NormalizedOr(JPH::Vec3::sAxisY()))*(penetration+.002f);
-        if (Len(position-initial)>depth) return false;
+        for (const auto &hit:hits.mHits) {
+            const auto &bi=jolt_world::Bodies();
+            if (!bi.GetUserData(hit.mBodyID2) || bi.GetCollisionGroup(hit.mBodyID2).GetGroupID()!=ownerGroup)
+                return false;
+        }
     }
     return false;
 }
@@ -302,23 +283,23 @@ void Tick(std::span<const MmlPedestrian> pedestrians) {
     retired.clear();
 }
 
-void Sync() {
+void Sync(float dt) {
     if (fallen.empty() || !jolt_world::Running()) return;
     auto &bi=jolt_world::Bodies();
     for (auto &[_,hat]:fallen) {
         const bool asleep=!bi.IsActive(hat.body);
         UpdateRelease(hat,asleep);
-        if (asleep && hat.sleeping) continue;
+        if (asleep && hat.sleeping && hat.releaseTime<=0) continue;
         hat.sleeping=asleep;
         JPH::RVec3 p;
         JPH::Quat q;
         bi.GetPositionAndRotation(hat.body,p,q);
         V3 pos=jolt_world::ToWorld(F(p));
         if (hat.flightSamples && --hat.flightSamples%4==0) {
-            const V3 travelled=pos-hat.shotStart;
-            const float speed=Dot(F(bi.GetLinearVelocity(hat.body)),hat.shotAxis);
-            Log("headwear shot flight remaining %u forward %.3f m vertical %.3f m speed %.3f m/s",
-                hat.flightSamples,Dot(travelled,hat.shotAxis),travelled.y,speed);
+            const V3 travelled=pos-hat.flightStart;
+            const float speed=Dot(F(bi.GetLinearVelocity(hat.body)),hat.flightAxis);
+            Log("headwear flight remaining %u forward %.3f m vertical %.3f m speed %.3f m/s",
+                hat.flightSamples,Dot(travelled,hat.flightAxis),travelled.y,speed);
         }
         if (pos.y<hat.previous.y) {
             // The nearby visual-mesh cache does not contain every native floor.
@@ -350,7 +331,12 @@ void Sync() {
         hat.previous=pos;
         // Leave the sleeping body and its contact manifold in Jolt. Move
         // only the rendered surface clear of the asphalt's depth plane.
-        hat.drawn=pos+V3{0,DrawClearance(hat,pos,q),0};
+        // Ease the owner-clearance correction out of the visual so the
+        // independent hat starts at the last attached pose.
+        hat.releaseTime=std::max(0.f,hat.releaseTime-dt);
+        const float blend=std::clamp(hat.releaseTime/transitionTime,0.f,1.f);
+        hat.drawn=pos+hat.releaseOffset*(blend*blend*(3.f-2.f*blend));
+        hat.drawn.y+=DrawClearance(hat,hat.drawn,q);
         const Q rotation{q.GetW(),-q.GetX(),-q.GetY(),-q.GetZ()};
         H->prop_place(M,hat.prop,&hat.drawn.x,&rotation.w,0);
     }
@@ -514,7 +500,7 @@ void FlightContact(uint32_t id,const JPH::BodyID &other,unsigned layer,V3 point,
         if (!hat.flightSamples || hat.flightContacts>=4 || hat.body.GetIndexAndSequenceNumber()!=id) continue;
         ++hat.flightContacts;
         const char *name=layer==jolt_world::kStatic ? jolt_world::StaticName(other) : "<moving>";
-        Log("headwear shot contact layer %u %s at %.3f %.3f %.3f normal %.3f %.3f %.3f approach %.3f m/s",
+        Log("headwear contact layer %u %s at %.3f %.3f %.3f normal %.3f %.3f %.3f approach %.3f m/s",
             layer,name,point.x,point.y,point.z,normal.x,normal.y,normal.z,approach);
         break;
     }
@@ -523,12 +509,7 @@ void FlightContact(uint32_t id,const JPH::BodyID &other,unsigned layer,V3 point,
 void Drop(Ragdoll &body, float dt) {
     if (body.headwearChecked || !body.model || ready.empty()) return;
     auto &fit=body.hatFit;
-    if (Dot(fit.pendingShot,fit.pendingShot)>0 && jolt_ragdoll::WaitingForGround(&body)) {
-        // Start the transfer when the ragdoll starts moving, including on a
-        // street whose collision is still being streamed in.
-        fit.shotAge=body.age;
-        return;
-    }
+    if (jolt_ragdoll::WaitingForGround(&body)) return;
     V3 base,tip;
     float radius;
     body.BodyCapsule(Ragdoll::B_HEAD,&base,&tip,&radius);
@@ -538,27 +519,6 @@ void Drop(Ragdoll &body, float dt) {
         if (!(dt>0)) return;
         fit.track(body.HeadWorldPoint(fit.mount),torso,dt);
         if (!fit.slips(up,fit.hatMotion,dt)) return;
-        // Test the native collision volume too: native props and the Jolt
-        // ragdoll can see different vehicle geometry in the same place.
-        constexpr float brim=.18f;
-        V3 extent{brim,brim,brim}, lo=fit.lastHat-extent, hi=fit.lastHat+extent;
-        MmlShape shapes[32];
-        int count=H->world_shapes(M,&lo.x,&hi.x,MML_WORLD_MOVING|MML_WORLD_NO_PEOPLE,shapes,32);
-        for (int i=0;i<std::min(count,32);++i) {
-            const auto &s=shapes[i];
-            if (!(s.classes&0x200)) continue;
-            V3 d=fit.lastHat-V3{s.center[0],s.center[1],s.center[2]};
-            if (s.kind==MML_SHAPE_SPHERE && Len(d)<=brim+s.half[0]) return;
-            if (s.kind==MML_SHAPE_BOX) {
-                float squared=0;
-                for (int k=0;k<3;++k) {
-                    const float *a=s.axes+k*3;
-                    float gap=std::max(0.f,std::abs(Dot(d,{a[0],a[1],a[2]}))-s.half[k]);
-                    squared+=gap*gap;
-                }
-                if (squared<=brim*brim) return;
-            }
-        }
     }
     body.headwearChecked = true;
     void *neck = game::FindChild(body.model,"neck");
@@ -605,10 +565,6 @@ void Drop(Ragdoll &body, float dt) {
         const Q wornRotation=QuatOf(M3::FromWorld(world)*nativeNeck.T()*bones[idx]);
         const float scale = Len(M3::Raw(world).r[0]);
         auto &model=ready.at(name);
-        if (!fit.clearsShotGuide(std::min(model.dimensions.x,model.dimensions.z)*scale,dt)) {
-            body.headwearChecked=false;
-            return;
-        }
         if (!model.hull) {
             JPH::Array<JPH::Vec3> points;
             points.reserve(model.mesh.vertices.size());
@@ -625,29 +581,28 @@ void Drop(Ragdoll &body, float dt) {
         }
         JPH::Quat q(-wornRotation.x,-wornRotation.y,-wornRotation.z,wornRotation.w);
         const V3 seated=position;
-        const bool shotRelease=fit.ridingShot;
+        const uint32_t ownerGroup=jolt_ragdoll::CollisionGroupOf(&body);
         const float radius=model.mesh.radius*scale;
-        // A bullet can tip the rim, but the collar still has to lift off the head.
-        const bool clear=shotRelease ? ClearShotRelease(shape,q,up,fit.shotMotion,fit.depth,radius,position)
-                                     : ClearRelease(shape,q,radius,position);
-        if (!clear) {
+        if (!ClearRelease(shape,q,up,radius,ownerGroup,position)) {
             body.headwearChecked=false;
             return;
         }
         const Q rotation{q.GetW(),-q.GetX(),-q.GetY(),-q.GetZ()};
-        void *prop=H->prop_create(M,(name+"_lined").c_str(),nullptr,&position.x,&rotation.w,scale);
+        void *prop=H->prop_create(M,(name+"_lined").c_str(),nullptr,&seated.x,&rotation.w,scale);
         if (!prop) return;
         if (!H->frame_watch(M,frame,gone,nullptr)) {
             H->prop_remove(M,prop);
             return;
         }
-        const V3 velocity=shotRelease ? fit.shotReleaseVelocity(body.PointVelocity(Ragdoll::B_HEAD,position),up)
-                                     : fit.hatMotion;
+        const V3 spin=body.BodySpin(Ragdoll::B_HEAD);
+        const V3 velocity=fit.releaseVelocity(up);
         JPH::BodyCreationSettings settings(shape,J(jolt_world::ToJolt(position)),q,
                                            JPH::EMotionType::Dynamic,jolt_world::kDynamic);
         settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
         settings.mMassPropertiesOverride.mMass=hatMass;
-        settings.mLinearVelocity=J(velocity);
+        // BodyCreationSettings expects the velocity at the convex hull's centre of mass.
+        settings.mLinearVelocity=J(velocity)+J(spin).Cross(q*shape->GetCenterOfMass());
+        settings.mAngularVelocity=J(spin);
         settings.mMotionQuality=JPH::EMotionQuality::LinearCast;
         settings.mFriction=.78f;
         settings.mRestitution=.05f;
@@ -660,24 +615,17 @@ void Drop(Ragdoll &body, float dt) {
             return;
         }
         FallenHat hat{prop,body.pedestrian ? body.actor : nullptr,body.model,
-                      body.pedestrian && !body.puppet,id,position,position,&model.mesh,scale};
-        if (shotRelease) {
-            hat.releaseGroup=jolt_ragdoll::CollisionGroupOf(&body);
-            hat.shotStart=position;
-            hat.shotAxis=fit.carryAxis();
-            hat.flightSamples=32;
-        }
+                      body.pedestrian && !body.puppet,id,position,seated,seated-position,transitionTime,&model.mesh,scale};
+        hat.releaseGroup=ownerGroup;
+        hat.flightStart=position;
+        hat.flightAxis=fit.carryAxis();
+        hat.flightSamples=32;
         hat.visuals.push_back(prop);
         game::EnumFramesDeep(prop,&hat.visuals);
         physicsVisuals.insert(hat.visuals.begin(),hat.visuals.end());
         show(frame,false);
-        if (shotRelease) {
-            Log("headwear shot carry %.3f m/s tracked %.3f m/s lift along head %.3f m lateral %.3f m",
-                Len(velocity),Len(fit.hatMotion),Dot(position-seated,up),Len(Cross(position-seated,up)));
-            Log("headwear shot worn travel %.3f m",Dot(fit.lastTorso-fit.firstTorso,hat.shotAxis));
-            Log("headwear shot along wearer's path %.3f m/s at release, torso %.3f m/s, crown %.3f m/s",
-                Dot(velocity,hat.shotAxis),Dot(fit.torsoMotion,hat.shotAxis),Dot(fit.hatMotion,hat.shotAxis));
-        }
+        Log("headwear release lift %.3f m radius %.3f m spin %.3f rad/s",Dot(position-seated,up),radius,Len(spin));
+        Log("headwear worn travel %.3f m",Dot(fit.lastTorso-fit.firstTorso,hat.flightAxis));
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
             velocity.x,velocity.y,velocity.z,fit.torsoMotion.x,fit.torsoMotion.y,fit.torsoMotion.z);

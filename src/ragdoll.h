@@ -124,7 +124,7 @@ public:
     void Probe(V3 *physPelvis, V3 *drawnPelvis, V3 *root) const;
     V3 BodyPos(int b) const { return origin + body[b].x; }   // world centre of a body part
     V3 BodyVel(int b) const { return body[b].v; }            // its velocity (m/s) as the solver last left it
-    V3 PointVelocity(int b, V3 point) const { return body[b].v + Cross(body[b].w, point - BodyPos(b)); }
+    V3 BodySpin(int b) const { return body[b].w; }
     V3 HeadLocalPoint(V3 world) const { return InvRotate(body[B_HEAD].q,world-BodyPos(B_HEAD)); }
     V3 HeadWorldPoint(V3 local) const { return BodyPos(B_HEAD)+Rotate(body[B_HEAD].q,local); }
     // Collision capsule of a body part in world space (segment ends and radius), for other simulations.
