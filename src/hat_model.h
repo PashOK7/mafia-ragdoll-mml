@@ -231,7 +231,7 @@ inline void node(Bytes &out, const Bytes &mesh, const std::string &name, uint16_
     put(out,pos); put(out,V3{1,1,1}); put(out,Q{1,0,0,0}); put(out,uint8_t(9));
     str(out,name); str(out,""); out.insert(out.end(),mesh.begin(),mesh.end());
 }
-inline bool split(const Bytes &source, const std::string &marker, Bytes &person, Bytes &prop) {
+inline bool split(const Bytes &source, const std::string &marker, Bytes &person, Bytes &prop,V3 &dimensions) {
     try {
         Reader r{source};
         if (r.get<uint32_t>()!=0x00534434 || r.get<uint16_t>()!=29) return false;
@@ -280,6 +280,9 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
         }
         if (neck<0 || hatLods.empty()) return false;
         removeHatFaces(hatLods,edits);
+        scalp::Bounds shell;
+        for (const auto &g:hatLods.front().groups) for (auto i:g.index) shell.add(hatLods.front().vertices[i].pos);
+        dimensions=shell.hi-shell.lo;
         repairCrowns(hatLods,edits);
         V3 centre{};
         if (hats.size()>65535) return false;

@@ -761,3 +761,11 @@ The owner's 0.1.17 log included a release at 0.096 s. A truck moving at 18 m/s r
 The launch velocity is measured at the actual mounting point over recent physics ticks. This includes rotational travel and position corrections from the solver. Intermediate tests with instantaneous velocities or a release inside vehicle collision could still leave a prop behind. The regression now tracks the independent prop through the game world.
 
 In the final 18 m/s truck runs the hat was first observed detached 27.31 m forward in 1.0 and 24.35 m in 1.2, then travelled another 5.99 m and 9.19 m respectively during observation. Both labs also passed the five ordinary fall cases, bystander independence, bareheaded control, and mesh tests. The fit tests passed at 20, 30, 60 and 144 Hz. Owner installation SHA-256: `df5a38c4095376df90a251578f4a593ad58ebf4dd5130bc033ee029802423cac`.
+
+## 2026-11-21 — Release during the impact (0.1.19)
+
+0.1.18 held the hat through any vehicle contact with the wearer, even at the legs. The fit also limited lifting speed and required head velocity to approach torso velocity. The owner's civil15 release at age 1.248 s recorded almost zero forward motion. The log alone does not identify the first ground contact.
+
+The axial load and lateral tipping moment now drive a damped band directly. The model estimates the effective seating depth as 60% of the stock shell height and uses the ratio of height to narrower horizontal span for leverage. Those values approximate a band in meshes that lack a separately modelled fit. Only vehicle geometry at the hat itself can delay creating the native prop. Motion at the mounting point supplies its launch velocity.
+
+Both windowed labs passed the mesh, ordinary fall and moving truck regressions. In the 18 m/s truck trials the release age was 0.528 s on 1.0 and 0.496 s on 1.2. The newly independent hats travelled a further 22.26 and 26.50 m along the truck path after first observation. A sustained gentle acceleration, free fall, inversion and a harder lateral shove were also checked at four frame rates. Owner installation SHA-256 `e50037bb9e540e0518ef26c4a1f0b1d687fb26dafc94b14e5255a30594fceaa0`.

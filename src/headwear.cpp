@@ -30,7 +30,7 @@ const char *candidates =
     "salman02k;salman03k;salman05k;samcoathat;synrad1;synrad1blood;synrad1dead;tommycoat;tommycoathat;"
     "tommydelnik;tommydelnikhigh;tommyhat;tommyhict bezt;tommyhighcoathat;tommyhighhat;tommytaxidriver;"
     "tommytaxidriverhigh;tony;vrabec;vratny1;vypravci2;willg2;willman01;willman02;zenarad01";
-std::unordered_set<std::string> ready;
+std::unordered_map<std::string,V3> ready;
 bool prepared = false;
 std::unordered_map<void *, void *> fallen;
 std::vector<void *> retired;
@@ -98,7 +98,8 @@ void Prepare() {
         hats::Bytes source(static_cast<size_t>(size)), person, prop;
         if (H->file_read(M,gameName.c_str(),source.data(),source.size(),MML_FILE_GAME)!=size) continue;
         std::string marker = "rdhat_"+name;
-        if (!hats::split(source,marker+"_scalp",person,prop)) continue;
+        V3 dimensions{};
+        if (!hats::split(source,marker+"_scalp",person,prop,dimensions)) continue;
         const std::string propPath = dir+marker+"_lined.4ds";
         const std::string propName = "models\\"+marker+"_lined.4ds";
         if (otherProvider(propName,propPath) || !save(propPath,prop) || !save(personPath,person)) continue;
@@ -107,7 +108,7 @@ void Prepare() {
             H->file_add(M,propName.c_str(),nullptr);
             continue;
         }
-        ready.insert(marker);
+        ready.emplace(marker,dimensions);
     }
     Log("detachable headwear prepared for %u installed character models",unsigned(ready.size()));
 }
@@ -129,11 +130,7 @@ void Drop(Ragdoll &body, float dt) {
     if (fit.tracking) {
         if (!(dt>0)) return;
         fit.track(body.HeadWorldPoint(fit.mount),torso,dt);
-        if (!fit.slips(up,fit.hatMotion,dt,fit.torsoMotion)) return;
-        // A vehicle still supporting or striking the wearer can intercept the
-        // newly created prop in the same step. Release once the wearer is clear.
-        for (const auto &hit:jolt_world::CarContacts())
-            if (!hit.sensor && hit.owner==reinterpret_cast<uintptr_t>(&body)) return;
+        if (!fit.slips(up,fit.hatMotion,dt)) return;
         // Test the native collision volume too: native props and the Jolt
         // ragdoll can see different vehicle geometry in the same place.
         constexpr float brim=.18f;
@@ -189,6 +186,10 @@ void Drop(Ragdoll &body, float dt) {
         auto idx=f-body.Frames();
         const V3 position=origins[idx]+bones[idx].Apply(local);
         if (!fit.tracking) {
+            const V3 size=ready.at(name);
+            const float scale=Len(M3::Raw(world).r[0]);
+            fit.depth=.60f*size.y*scale;
+            fit.leverage=size.y/std::max(.001f,std::min(size.x,size.z));
             fit.mount=body.HeadLocalPoint(position);
             fit.track(position,torso,dt);
             body.headwearChecked=false;

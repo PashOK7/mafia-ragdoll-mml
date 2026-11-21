@@ -10,6 +10,7 @@ struct HatFit {
     bool tracking=false;
     V3 previousVelocity{};
     float lift=0, liftRate=0;
+    float depth=.09f, leverage=.45f;
     bool sampled=false;
 
     // Follow the actual mounted point. A contact solver can move a body by
@@ -28,7 +29,7 @@ struct HatFit {
         tracking=true;
     }
 
-    bool slips(V3 up,V3 crownVelocity,float dt,V3 torsoVelocity) {
+    bool slips(V3 up,V3 crownVelocity,float dt) {
         if (!(dt>0)) return false;
         if (!sampled || dt>.15f) {
             previousVelocity=crownVelocity;
@@ -41,28 +42,20 @@ struct HatFit {
         float axial=Dot(load,up);
         // Sideways loading can peel a tipped band over the crown. An upright
         // band transfers that same load to the hat as the head accelerates.
-        float tipped=std::clamp(1.f-std::max(0.f,up.y),0.f,1.f);
         float shear=Len(load-up*axial);
-        float peel=.65f*tipped*std::max(0.f,shear-6.f);
-        // Limit how rapidly a yielding band can open during a contact spike.
-        float pull=std::clamp(axial+peel-2.8f,-18.f,18.f);
+        // Lateral force applied above the band tips it about the rim.
+        float peel=leverage*shear;
+        float pull=axial+peel-2.8f;
         int steps=int(std::ceil(dt*120.f));
         float step=dt/steps;
         for (int i=0;i<steps;++i) {
             liftRate+=(pull-30.f*lift-8.f*liftRate)*step;
-            liftRate=std::min(.42f,liftRate);
             lift+=liftRate*step;
             if (lift<0) {
                 lift=0;
                 liftRate=0;
             }
-            if (lift>=.09f) {
-                lift=.09f;
-                // During impact the trunk can already be travelling while the
-                // neck is still catching up. Keep carrying the hat in that phase.
-                float speed=Len(torsoVelocity);
-                if (Dot(crownVelocity,torsoVelocity)>=speed*(speed*.88f-.65f)) return true;
-            }
+            if (lift>=depth) { lift=depth; return true; }
         }
         return false;
     }
