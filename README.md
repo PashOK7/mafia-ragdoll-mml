@@ -15,6 +15,10 @@ into the folder containing Game.exe. [Download the latest release](https://githu
 
 ## What it does
 
+- **Headwear.** On supported character models, the actual hat or cap detaches when ragdoll physics starts.
+  It inherits the motion of the head and falls as a separate physical object. The mod uses the installed
+  model's own mesh and textures. After a hot reload, characters whose models Mafia already cached can
+  acquire detachable headwear the next time the game loads their model.
 - **Death.** Whoever dies near the player (a person of a mission, a traffic pedestrian, the player) becomes a ragdoll
   from the pose he had a tick before the game reacted, moving as his animation moved, pushed by what killed him: a
   bullet where it struck, a car at its speed, an explosion. The game's death animation, while it plays, is the
@@ -88,13 +92,20 @@ The same keys are in `mod/config.json` (the defaults); what is changed in the ga
 ## To do
 
 - Add ragdoll physics for dogs.
-- Let a character’s hat fly off when the character enters ragdoll, if they are wearing one.
 - Apply ragdoll physics to bodies already inside a car when it explodes.
 
 ## Cost
 
 About 0.3 ms a frame with six bodies lying near the player and a dozen people around, 0.6 ms with twenty-two
 (measured with MafiaModLoader's `profile`); bodies at rest sleep and cost little.
+
+## Diagnosing a driver pull
+
+Mafia records the latest pull in `mml/data/ragdoll/driver-pull.json`. The two previous captures
+are beside it with suffixes `.prev` and `.prev2`. Each rendered sample records Tommy's native and
+drawn shoulder, elbow and wrist positions in world metres, left arm first, along with the grip phase.
+Run `python tools/analyze_driver_pull.py <capture>` for the elbow path relative to each shoulder
+and the time of the fastest change in the IK correction. Older captures retain their original fields.
 
 ## Building
 

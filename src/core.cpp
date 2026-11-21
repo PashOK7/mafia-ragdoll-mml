@@ -18,6 +18,7 @@
 // bodies are mafia-ragdoll's as they were.
 #include "fmt.h"
 #include "core.h"
+#include "headwear.h"
 #include <windows.h>
 #include <intrin.h>
 #include <algorithm>
@@ -254,7 +255,7 @@ std::string TrajectoryJson(const CarHandover &entry) {
     return out + "]}";
 }
 
-bool WriteTrace(const char *name, const std::string &data) {
+bool WriteTrace(const char *name, const std::string &data, bool history = false) {
     const std::string path = std::string(H->mod_data_dir(M)) + name;
     const std::string temporary = path + ".new";
     wchar_t destination[1024], source[1024];
@@ -263,6 +264,12 @@ bool WriteTrace(const char *name, const std::string &data) {
     if (!file) return false;
     const bool written = fwrite(data.data(), 1, data.size(), file) == data.size();
     const bool closed = fclose(file) == 0;
+    if (written && closed && history && GetFileAttributesW(destination) != INVALID_FILE_ATTRIBUTES) {
+        const std::wstring previous = std::wstring(destination)+L".prev";
+        if (GetFileAttributesW(previous.c_str()) != INVALID_FILE_ATTRIBUTES)
+            CopyFileW(previous.c_str(),(previous+L"2").c_str(),FALSE);
+        if (ReplaceFileW(destination,source,previous.c_str(),0,nullptr,nullptr)) return true;
+    }
     if (written && closed && MoveFileExW(source, destination, MOVEFILE_REPLACE_EXISTING)) return true;
     DeleteFileW(source);
     return false;
@@ -282,6 +289,23 @@ std::string TraceString(const std::string &value) {
     return out + '"';
 }
 
+struct ArmPoints {
+    V3 shoulder[2], elbow[2], wrist[2];
+
+    void Read(const Ragdoll::PoseSnap &pose) {
+        for (int i = 0; i < 2; ++i) {
+            const int arm = i ? Ragdoll::RARM : Ragdoll::LARM;
+            shoulder[i] = pose.pts[arm];
+            elbow[i] = pose.pts[arm + 1];
+            wrist[i] = pose.pts[arm + 2];
+        }
+    }
+    std::string Json() const {
+        auto pair = [](const V3 (&p)[2]) { return "[" + TracePoint(p[0]) + "," + TracePoint(p[1]) + "]"; };
+        return "{\"shoulder\":" + pair(shoulder) + ",\"elbow\":" + pair(elbow) + ",\"wrist\":" + pair(wrist) + "}";
+    }
+};
+
 struct PullSample {
     float t, error;
     V3 left, right, coat, chest, pelvis, feet[2], origin, side;
@@ -290,6 +314,10 @@ struct PullSample {
     bool hands, carPose, drawn;
     V3 contact[2]{}, drawnWrist[2]{};
     float ikWeight = 0;
+    ArmPoints nativeArms{}, drawnArms{};
+    bool armsRecorded = false;
+    const char *phase = "animation";
+    float releaseWeight{};
     const char *gripPart = "";
     std::string cabinContacts;
 };
@@ -321,13 +349,17 @@ void EndPullTrace(const char *reason) {
         out += Fmt(",\"neck_q\":[%.6f,%.6f,%.6f,%.6f]", s.neck.w, s.neck.x, s.neck.y, s.neck.z);
         out += ",\"drawn_head\":" + (s.drawn ? TracePoint(s.drawnHead) : "null");
         out += ",\"drawn_nose\":" + (s.drawn ? TracePoint(s.drawnNose) : "null");
+        if (s.armsRecorded)
+            out += ",\"arm_phase\":\"" + std::string(s.phase) + "\",\"native_arms\":" + s.nativeArms.Json() +
+                   ",\"drawn_arms\":" + s.drawnArms.Json();
         if (s.ikWeight > 0)
             out += Fmt(",\"ik_weight\":%.5f,\"grip_part\":\"%s\"", s.ikWeight, s.gripPart) +
                 ",\"grip_contacts\":[" + TracePoint(s.contact[0]) + "," + TracePoint(s.contact[1]) + "]" +
                 ",\"drawn_wrists\":[" + TracePoint(s.drawnWrist[0]) + "," + TracePoint(s.drawnWrist[1]) + "]";
+        if (s.releaseWeight > 0) out += Fmt(",\"release_weight\":%.5f",s.releaseWeight);
         out += ",\"car\":" + (s.carPose ? TracePoint(s.origin) : "null") + ",\"side\":" + (s.carPose ? TracePoint(s.side) : "null") + "}";
     }
-    if (!WriteTrace("driver-pull.json", out + "]}")) LOG("could not save driver-pull.json");
+    if (!WriteTrace("driver-pull.json", out + "]}", true)) LOG("could not save driver-pull.json");
     g_pull = {};
 }
 
@@ -1768,6 +1800,7 @@ const char *GetUpReason(const Ragdoll &body) {
 
 void TickBody(float dt) {
     g_tick++;
+    headwear::Tick();
     Purge();
     PruneOccupants();
     ListPeople();
@@ -1837,6 +1870,7 @@ void TickBody(float dt) {
         }
     }
     if (joltOk) {
+        for (Ragdoll *body : jolt) headwear::Drop(*body,dt);
         SamplePull(dt);
         TracePedestrians(TrajectoryStage::Physics);
         for (auto &entry : g_handovers) {
@@ -2175,6 +2209,11 @@ struct PullArmPose {
     Q local[7]{};
     Q applied[7]{};
 } g_pullArms;
+struct {
+    unsigned serial{};
+    PullArmPose pose{};
+    float age{}, duration{};
+} g_lastAttached;
 
 void RestorePullArms() {
     const auto saved = g_pullArms;
@@ -2191,24 +2230,66 @@ void RestorePullArms() {
     }
 }
 
-void SetPullRotation(int slot, void *frame, const M3 &local) {
-    const Q q = QuatOf(local);
+void SetPullQuaternion(int slot, void *frame, const Q &q) {
     g_pullArms.frame[slot] = frame;
     g_pullArms.local[slot] = game::at<Q>(frame, game::kFrameRot);
     H->bone_set(M, frame, &q.w, nullptr);
     g_pullArms.applied[slot] = game::at<Q>(frame, game::kFrameRot);
 }
 
+void SetPullRotation(int slot, void *frame, const M3 &local) {
+    SetPullQuaternion(slot, frame, QuatOf(local));
+}
+
 void PosePullArms(const Ragdoll *driver) {
     if (!game::Player() || g_pullArms.model) return;
     V3 contact[2];
-    const float weight = jolt_ragdoll::PullContacts(driver, contact);
+    const bool released = g_lastAttached.serial == driver->serial && (!driver->carExtraction ||
+        (!jolt_ragdoll::SeatedCar(driver) && jolt_ragdoll::GripDistance(driver,nullptr)<0));
+    float weight;
+    if (released) {
+        const float t = (driver->age-g_lastAttached.age)/g_lastAttached.duration;
+        if (t >= 1) { g_lastAttached={}; return; }
+        weight = 1-t*t*(3-2*t);
+    } else {
+        if (!driver->carExtraction) return;
+        weight = jolt_ragdoll::PullContacts(driver, contact);
+    }
     Ragdoll::PoseSnap pose{};
-    if (weight <= 0 || !SafeSnapshot(game::Player(), &pose)) return;
+    auto *row = g_pull.body == driver && !g_pull.rows.empty() && !g_pull.rows.back().drawn ? &g_pull.rows.back() : nullptr;
+    if ((!row && weight <= 0) || !SafeSnapshot(game::Player(), &pose)) return;
+    if (row) row->nativeArms.Read(pose);
+    if (weight <= 0) return;
     g_pullArms.model = ModelOf(game::Player());
+    if (released) {
+        // Fade only the correction from the last held frame. Native animation
+        // continues in all seven joints, including after the carjack clip ends.
+        if (row) { row->phase = "release"; row->releaseWeight = weight; }
+        const auto &last = g_lastAttached.pose;
+        const int bones[] = {15,16,11,12,6,14,10};
+        if (g_lastAttached.serial != driver->serial || last.model != g_pullArms.model) return;
+        for (int i = 0; i < 7; ++i) {
+            void *frame = pose.frames[bones[i]];
+            if (!frame || last.frame[i] != frame) continue;
+            float base[16], held[16], now[16];
+            QuatMatrix(last.local[i],base);
+            QuatMatrix(last.applied[i],held);
+            QuatMatrix(game::at<Q>(frame,game::kFrameRot),now);
+            const Q delta = QuatOf(M3::Raw(base).T()*M3::Raw(held));
+            const float t = delta.w < 0 ? -weight : weight;
+            Q q{1-weight+t*delta.w,t*delta.x,t*delta.y,t*delta.z};
+            const float inv = 1.f / std::sqrt(q.w*q.w+q.x*q.x+q.y*q.y+q.z*q.z);
+            float residual[16];
+            QuatMatrix({q.w*inv,q.x*inv,q.y*inv,q.z*inv},residual);
+            SetPullRotation(i,frame,M3::Raw(now)*M3::Raw(residual));
+        }
+        return;
+    }
+    if (row) row->phase = jolt_ragdoll::SeatedCar(driver) ? "reach" : "hold";
     const PullReach plan(pose.pts, contact, weight);
     const auto &goal = plan.goal;
     const auto &lean = plan.lean;
+    float offset = 0;
     M3 parentWorld[2];
     for (int i = 0; i < 2; ++i) {
         void *parent = game::at<void *>(pose.frames[i ? 10 : 14], game::kFrameParent);
@@ -2233,10 +2314,18 @@ void PosePullArms(const Ragdoll *driver) {
         const V3 axis = Norm(goal[i] - shoulder, Norm(wrist - shoulder));
         const float length = std::clamp(Len(goal[i] - shoulder), std::abs(upper - fore) + .001f, upper + fore - .001f);
         const float along = (upper * upper - fore * fore + length * length) / (2.f * length);
-        const V3 pole = elbow - shoulder;
-        const V3 bend = Norm(pole - axis * Dot(pole, axis), BasisFrom(shoulder, goal[i], elbow).r[1]);
+        // Carry the animated bend plane through the shortest swing of the
+        // shoulder-to-wrist axis. Projecting the upper arm onto the new axis
+        // flips the elbow when the target crosses the upper-arm direction.
+        const auto plane = BasisFrom(shoulder, wrist, elbow);
+        const V3 turn = Cross(plane.r[0], axis);
+        const float denom = 1.f + Dot(plane.r[0], axis);
+        const V3 bend = denom > 1e-5f ? Norm(plane.r[1] + Cross(turn, plane.r[1]) +
+                                       Cross(turn, Cross(turn, plane.r[1])) * (1.f / denom)) : plane.r[1];
         const V3 solved = shoulder + axis * along + bend * std::sqrt(std::max(0.f, upper * upper - along * along));
         const V3 end = shoulder + axis * length;
+        const int elbowPoint = i ? Ragdoll::RELB : Ragdoll::LELB;
+        offset = std::max({offset,Len(end-pose.pts[elbowPoint+1]),Len(solved-pose.pts[elbowPoint])});
         // Keep the native twist of both links relative to the elbow bend plane.
         const M3 oldUpper = BasisFrom(shoulder, elbow, wrist), newUpper = BasisFrom(shoulder, solved, end);
         const M3 oldFore = BasisFrom(elbow, wrist, shoulder), newFore = BasisFrom(solved, end, shoulder);
@@ -2245,6 +2334,9 @@ void PosePullArms(const Ragdoll *driver) {
         SetPullRotation(2*i, pose.frames[arm], upperWorld * pose.rot[arm-1].T());
         SetPullRotation(2*i+1, pose.frames[arm+1], foreWorld * upperWorld.T());
     }
+    // A smoothstep's peak slope is 1.5. Allocate recovery time from the
+    // actual displacement at contact, at ordinary arm-reaching speed.
+    g_lastAttached = {driver->serial, g_pullArms, driver->age, std::max(.12f,1.5f*offset/1.35f)};
 }
 
 void Render() {
@@ -2261,7 +2353,7 @@ void Render() {
     for (auto &r : g_ragdolls) {
         // the game brought him back since our tick: the game's (the tick drops the ragdoll)
         if (SafeAliveAgain(r.get())) continue;
-        if (r->carExtraction) {
+        if (r->carExtraction || g_lastAttached.serial == r->serial) {
             auto reach = [&] { PosePullArms(r.get()); };
             Guarded(reach);
         }
@@ -2312,8 +2404,12 @@ void Rendered() {
                 auto &row = g_pull.rows.back();
                 row.drawnHead = pose.pts[Ragdoll::HEAD];
                 row.drawnNose = pose.pts[Ragdoll::NOSE];
-                if (g_pullArms.model && SafeSnapshot(game::Player(), &pose)) {
-                    row.ikWeight = jolt_ragdoll::PullContacts(g_pull.body, row.contact, &row.gripPart);
+                if (game::Player() && SafeSnapshot(game::Player(), &pose)) {
+                    row.drawnArms.Read(pose);
+                    if (!g_pullArms.model) row.nativeArms = row.drawnArms;
+                    row.armsRecorded = true;
+                    if (!row.releaseWeight)
+                        row.ikWeight = jolt_ragdoll::PullContacts(g_pull.body, row.contact, &row.gripPart);
                     row.drawnWrist[0] = pose.pts[Ragdoll::LHAND];
                     row.drawnWrist[1] = pose.pts[Ragdoll::RHAND];
                 }
@@ -2498,6 +2594,8 @@ bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
 }
 
 void OnWorldReset(const char *reason) {
+    headwear::Reset();
+    g_lastAttached = {};
     g_pullArms = {};
     g_occupants.clear();
     g_carriageMeshes.clear();
@@ -2588,6 +2686,7 @@ uint32_t VehicleSupport(void *car, void *) {
 }
 
 void Start() {
+    headwear::Prepare();
     if (MML_HAS(H, vehicle_support_hook) && H->vehicle_support_hook) {
         if (!H->vehicle_support_hook(M, VehicleSupport, nullptr))
             LOG("vehicle wheel support: native usability integration unavailable");
@@ -2614,6 +2713,7 @@ void Start() {
 }
 
 void Stop() {
+    headwear::Reset();
     auto restore = [] { RestorePullArms(); };
     Guarded(restore);
     g_occupants.clear();

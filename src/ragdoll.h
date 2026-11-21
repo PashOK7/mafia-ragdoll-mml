@@ -37,6 +37,7 @@ public:
     unsigned serial = ++serials;   // unique per ragdoll (a new one may take a dropped one's address)
     void *actor = nullptr;     // identity: a C_human, or a traffic pedestrian element (not an actor)
     void *model = nullptr;     // the model frame whose skeleton is driven
+    bool headwearChecked = false;
     bool pedestrian = false;   // `actor` is a pedestrian manager element
     bool carExtraction = false; // follow the puller's track, which outlasts the victim's track
     uint32_t keyVtable = 0;    // the actor's vtable when the ragdoll started (detects a reused address)
@@ -121,6 +122,7 @@ public:
     void Probe(V3 *physPelvis, V3 *drawnPelvis, V3 *root) const;
     V3 BodyPos(int b) const { return origin + body[b].x; }   // world centre of a body part
     V3 BodyVel(int b) const { return body[b].v; }            // its velocity (m/s) as the solver last left it
+    V3 PointVelocity(int b, V3 point) const { return body[b].v + Cross(body[b].w, point - BodyPos(b)); }
     // Collision capsule of a body part in world space (segment ends and radius), for other simulations.
     static constexpr int BodyCount() { return BCOUNT; }
     void BodyCapsule(int b, V3 *a, V3 *e, float *r) const {

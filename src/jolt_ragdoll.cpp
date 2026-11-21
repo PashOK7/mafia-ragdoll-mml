@@ -708,7 +708,7 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     if (it == g_entries.end() || dt <= 0) return;
     Entry &e = it->second;
     if (!e.car && !e.grip) {
-        e.reachBlend = std::max(0.f, e.reachBlend - dt / .18f);
+        e.reachBlend = 0; // the independent arm recovery no longer samples the released body
         return;
     }
     const V3 left = pose[Ragdoll::LHAND], right = pose[Ragdoll::RHAND], player = pose[Ragdoll::PELVIS];

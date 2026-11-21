@@ -73,12 +73,40 @@ def cabin_resistance(rows, edge):
             for (part, mesh), count in sorted(counts.items(), key=lambda item: -item[1])]
 
 
+def arm_motion(rows):
+    """Locate unusual elbow travel relative to the moving shoulder, on the actual pull."""
+    result = {}
+    for a, b in zip(rows, rows[1:]):
+        if 'native_arms' not in a or 'native_arms' not in b:
+            continue
+        phase = b['arm_phase']
+        arms = result.setdefault(phase, {})
+        for i, side_name in enumerate(('left', 'right')):
+            metrics = arms.setdefault(side_name, {'native_path_m': 0., 'drawn_path_m': 0.,
+                                                 'peak_offset_change_m_s': 0., 'peak_at_s': None})
+            steps = []
+            for key in ('native', 'drawn'):
+                def elbow(s):
+                    arm = s[key + '_arms']
+                    return subtract(arm['elbow'][i], arm['shoulder'][i])
+                step = subtract(elbow(b), elbow(a))
+                metrics[key + '_path_m'] += math.hypot(*step)
+                steps.append(step)
+            speed = math.dist(*steps) / (b['t'] - a['t'])
+            if speed > metrics['peak_offset_change_m_s']:
+                metrics.update(peak_offset_change_m_s=speed, peak_at_s=b['t'])
+    return result
+
+
 def analyze(trace):
     rows = trace['samples']
     if any(b['t'] <= a['t'] for a, b in zip(rows, rows[1:])):
         raise ValueError('unordered simulation ticks')
     held = [s for s in rows if all(s[k] is not None for k in ('coat', 'left', 'right'))]
     result = {'ticks': len(rows), 'end': trace['end'], 'held_ticks': len(held)}
+    arms = arm_motion(rows)
+    if arms:
+        result['elbow_motion'] = arms
     if not held:
         return result
     start, end = held[0]['t'], held[-1]['t']

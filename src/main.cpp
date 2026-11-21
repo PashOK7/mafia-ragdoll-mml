@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <string>
 #include "core.h"
+#include "headwear.h"
 #include "ragcam.h"
 #include "game_build.h"
 #include "mml/mml.h"
@@ -45,6 +46,7 @@ namespace {
 void OnEvent(const MmlEvent *ev, void *) {
     const bool loading = H->mission_state() == MML_MISSION_LOADING;
     switch (ev->type) {
+    case MML_EVENT_MISSION_OPEN: headwear::Prepare(); break;
     case MML_EVENT_MISSION_TICK: if (!loading) core::Tick(ev->dt); break;
     case MML_EVENT_RENDER_BEGIN: if (ev->world && !loading) core::Render(); break;
     case MML_EVENT_RENDER_WORLD: if (ev->world && !loading) core::Rendered(); break;
@@ -99,7 +101,7 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
         return 1;
     }
     for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_RENDER_WORLD, MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT,
-                           MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_CLOSE, MML_EVENT_GAME_LOADED,
+                           MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_OPEN, MML_EVENT_MISSION_CLOSE, MML_EVENT_GAME_LOADED,
                            MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION})
         H->subscribe(M, t, OnEvent, nullptr);
     static const char *const kCommands[][2] = {
