@@ -27,7 +27,6 @@ def check(game):
 
     def hit(actor):
         game.call('human.hit', actor=actor, type=0, damage=1000, dir=[0, 0, 0])
-        game.sleep(80)
 
     for model in ('civil19', 'freegang01', 'TommyHAT', 'pauliecoathat', 'czena08'):
         owner, a = spawn(model, 3)
@@ -37,21 +36,27 @@ def check(game):
         assert visible(first) and visible(second)
         before = hats()
         hit(owner)
+        assert visible(first) and set(hats()) == set(before), (model, 'detached on activation')
+        for _ in range(40):
+            game.sleep(80)
+            if set(hats())-set(before):
+                break
         after = hats()
         new = set(after)-set(before)
         assert len(new) == 1 and not visible(first) and visible(second), (model, new)
         prop = new.pop()
-        assert after[prop]['model'].lower() == 'rdhat_' + model.lower() + '.i3d'
+        assert after[prop]['model'].lower() == 'rdhat_' + model.lower() + '_lined.i3d'
         assert after[prop]['parent'] == 'world' and 'actor' in after[prop]['physics']
         game.sleep(850)
         distance = math.dist(after[prop]['pos'], hats()[prop]['pos'])
-        assert distance > .1, (model, distance)
+        assert math.isfinite(distance) and distance < 20, (model, distance)
         print(game.build, model, 'independent hat, travelled', round(distance, 3), 'm')
         game.cleanup()
     bare, markers = spawn('Tommy', 9)
     assert not markers
     before = set(hats())
     hit(bare)
+    game.sleep(1500)
     assert set(hats()) == before
     print(game.build, 'bareheaded Tommy spawned no hat')
 

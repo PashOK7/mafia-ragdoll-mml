@@ -80,6 +80,12 @@ void Prepare() {
     std::error_code error;
     fs::create_directories(utf8path(dir),error);
     if (error) { Warn("cannot create headwear cache"); return; }
+    const std::string lining=dir+"rd_lining.bmp";
+    if (otherProvider("maps\\rd_lining.bmp",lining) || !save(lining,hats::liningBitmap()) ||
+        !H->file_add(M,"maps\\rd_lining.bmp",lining.c_str())) {
+        Warn("cannot register hat lining texture");
+        return;
+    }
     std::istringstream names(candidates);
     std::string name;
     while (std::getline(names,name,';')) {
@@ -92,8 +98,8 @@ void Prepare() {
         if (H->file_read(M,gameName.c_str(),source.data(),source.size(),MML_FILE_GAME)!=size) continue;
         std::string marker = "rdhat_"+name;
         if (!hats::split(source,marker+"_scalp",person,prop)) continue;
-        const std::string propPath = dir+marker+".4ds";
-        const std::string propName = "models\\"+marker+".4ds";
+        const std::string propPath = dir+marker+"_lined.4ds";
+        const std::string propName = "models\\"+marker+"_lined.4ds";
         if (otherProvider(propName,propPath) || !save(propPath,prop) || !save(personPath,person)) continue;
         if (!H->file_add(M,propName.c_str(),propPath.c_str())) continue;
         if (!H->file_add(M,gameName.c_str(),personPath.c_str())) {
@@ -112,9 +118,13 @@ void Tick() {
 }
 
 void Drop(Ragdoll &body, float dt) {
-    if (body.headwearChecked || !body.model) return;
+    if (body.headwearChecked || !body.model || ready.empty()) return;
+    V3 base,tip;
+    float radius;
+    body.BodyCapsule(Ragdoll::B_HEAD,&base,&tip,&radius);
+    V3 up=Norm(tip-base);
+    if (!body.hatFit.slips(up,body.PointVelocity(Ragdoll::B_HEAD,tip),dt)) return;
     body.headwearChecked = true;
-    if (ready.empty()) return;
     void *neck = game::FindChild(body.model,"neck");
     if (!neck) return;
     std::vector<void *> children;
@@ -122,6 +132,7 @@ void Drop(Ragdoll &body, float dt) {
     for (void *frame : children) {
         const char *full = game::at<const char *>(frame,game::kFrameName);
         if (!full) continue;
+        if (game::at<void *>(frame,game::kFrameParent)!=neck) continue;
         const char *dot = strrchr(full,'.');
         std::string name = hats::lower(dot ? dot+1 : full);
         // A wearer still in Mafia's cache from 0.1.15 has an open crown.
@@ -134,11 +145,22 @@ void Drop(Ragdoll &body, float dt) {
         }
         float world[16];
         if (!H->frame_world(M,frame,world)) return;
-        const Q rotation = QuatOf(M3::FromWorld(world));
+        // The mesh still carries the previous render pose during a physics tick.
+        // Transfer its neck-local placement to the current simulated neck.
+        const float *nw=game::WorldMatrix(neck);
+        M3 nativeNeck=M3::FromWorld(nw);
+        V3 local=nativeNeck.T().Apply(V3{world[12]-nw[12],world[13]-nw[13],world[14]-nw[14]});
+        M3 bones[19]; V3 origins[19];
+        body.PhysicalPose(bones,origins);
+        auto f=std::find(body.Frames(),body.Frames()+19,neck);
+        if (f==body.Frames()+19) return;
+        auto idx=f-body.Frames();
+        const V3 position=origins[idx]+bones[idx].Apply(local);
+        const Q rotation=QuatOf(M3::FromWorld(world)*nativeNeck.T()*bones[idx]);
         const float scale = Len(M3::Raw(world).r[0]);
-        void *prop = H->prop_create(M,name.c_str(),nullptr,world+12,&rotation.w,scale);
+        void *prop = H->prop_create(M,(name+"_lined").c_str(),nullptr,&position.x,&rotation.w,scale);
         if (!prop) return;
-        V3 velocity = body.PointVelocity(Ragdoll::B_HEAD,{world[12],world[13],world[14]});
+        V3 velocity = body.PointVelocity(Ragdoll::B_HEAD,position)+body.hatFit.velocity;
         // Mafia puts a prop created at zero velocity to sleep in mid-air.
         // Start a stationary, newly unsupported hat with its first gravity step.
         const float gravityStep=9.81f*std::clamp(dt,.001f,.05f);
@@ -150,8 +172,9 @@ void Drop(Ragdoll &body, float dt) {
         }
         fallen.emplace(frame,prop);
         show(frame,false);
-        Log("headwear detached: %s ragdoll %u at %.3f %.3f %.3f velocity %.3f %.3f %.3f",
-            name.c_str(),body.serial,world[12],world[13],world[14],velocity.x,velocity.y,velocity.z);
+        Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f slip %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f",
+            name.c_str(),body.serial,body.age,up.y,Len(body.hatFit.offset),position.x,position.y,position.z,
+            velocity.x,velocity.y,velocity.z);
         return;
     }
 }

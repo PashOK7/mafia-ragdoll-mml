@@ -15,9 +15,10 @@ into the folder containing Game.exe. [Download the latest release](https://githu
 
 ## What it does
 
-- **Headwear.** On supported character models, the actual hat or cap detaches when ragdoll physics starts.
-  It inherits the motion of the head and falls as a separate physical object. The mod uses the installed
-  model's own mesh and textures. Where the original head ends at the brim, the mod builds a rounded
+- **Headwear.** Hats and caps stay on during a gentle movement. A head jolt, a sharp turn or a sustained
+  tilt can loosen the fit until the hat falls. Its release position and velocity follow the moving head.
+  The detached hat has a cloth lining and a sweatband inside its original shell. The mod uses the installed
+  model's exterior mesh and textures. Where the original head ends at the brim, the mod builds a rounded
   crown from that character's head outline and face texture at each level of detail. After a hot
   reload, cached characters acquire the updated geometry when Mafia next loads their model file.
 - **Death.** Whoever dies near the player (a person of a mission, a traffic pedestrian, the player) becomes a ragdoll

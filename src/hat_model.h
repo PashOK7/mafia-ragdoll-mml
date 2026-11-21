@@ -113,7 +113,67 @@ inline void readMorph(Reader &r, std::vector<Lod> &meshes) {
 } // namespace hats
 #include "scalp.h"
 namespace hats {
-inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre, bool worn) {
+// A small shared cloth texture with a leather sweatband along the opening.
+// Windows BMP rows start at the bottom. The lining UV is measured from the brim.
+inline Bytes liningBitmap() {
+    constexpr uint32_t side=64, pixels=side*side*3;
+    Bytes bmp;
+    put(bmp,uint16_t(0x4d42)); put(bmp,uint32_t(54+pixels)); put(bmp,uint32_t(0)); put(bmp,uint32_t(54));
+    put(bmp,uint32_t(40)); put(bmp,side); put(bmp,side); put(bmp,uint16_t(1)); put(bmp,uint16_t(24));
+    put(bmp,uint32_t(0)); put(bmp,pixels);
+    for (int i=0;i<4;++i) put(bmp,uint32_t(0));
+    for (unsigned y=0;y<side;++y) for (unsigned x=0;x<side;++x) {
+        const bool band=y<14;
+        const int stitch=(y==11 && (x%8)<5) ? 12 : 0;
+        const int weave=((x+y)%4==0 ? 2 : -1);
+        const int shade=band ? 0 : int(24*(side-1-y)/(side-14));
+        const int tone=shade+stitch+weave;
+        bmp.push_back(uint8_t((band ? 29 : 45)+tone));
+        bmp.push_back(uint8_t((band ? 35 : 50)+tone));
+        bmp.push_back(uint8_t((band ? 44 : 57)+tone));
+    }
+    return bmp;
+}
+// Keep the opening at the brim. An inward-facing shell follows even a folded
+// crown or a cap's peak. Stitch only real boundaries, ignoring UV seams.
+inline void lineProp(std::vector<Vertex> &vertices, std::vector<Group> &groups, V3 centre, uint16_t material) {
+    size_t count=vertices.size();
+    if (count>32767 || groups.size()>=255) throw Reader::Invalid{};
+    Group lining{material,{}};
+    using Edge=std::pair<scalp::Point,scalp::Point>;
+    struct Use { unsigned count{}; uint16_t a{},b{}; };
+    std::map<Edge,Use> edges;
+    scalp::Bounds bounds;
+    for (const Vertex &v:vertices) bounds.add(v.pos);
+    for (size_t i=0;i<count;++i) {
+        auto v=vertices[i];
+        float height=(v.pos.y-bounds.lo.y)/std::max(.001f,bounds.hi.y-bounds.lo.y);
+        v.uv[0]=.5f+std::atan2(v.pos.z-centre.z,v.pos.x-centre.x)/6.2831853f;
+        v.uv[1]=.01f+.98f*height;
+        v.pos=centre+(v.pos-centre)*.985f;
+        v.normal=-v.normal;
+        vertices.push_back(v);
+    }
+    auto inner=[count](uint16_t i){return uint16_t(count+i);};
+    for (const auto &group:groups) for (size_t i=0;i<group.index.size();i+=3) {
+        const auto *t=group.index.data()+i;
+        lining.index.insert(lining.index.end(),{inner(t[2]),inner(t[1]),inner(t[0])});
+        for (int j=0;j<3;++j) {
+            auto a=t[j],b=t[(j+1)%3];
+            auto pa=scalp::key(vertices[a].pos),pb=scalp::key(vertices[b].pos);
+            if (pa==pb) continue;
+            auto &edge=edges[std::minmax(pa,pb)];
+            ++edge.count; edge.a=a; edge.b=b;
+        }
+    }
+    for (auto &[_,edge]:edges) if (edge.count==1) {
+        auto a=edge.a,b=edge.b;
+        lining.index.insert(lining.index.end(),{b,a,inner(a),b,inner(a),inner(b)});
+    }
+    if (lining.index.size()/3>65535) throw Reader::Invalid{};
+    groups.push_back(std::move(lining));
+}
+inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre, bool worn, uint16_t lining=0) {
     Bytes mesh;
     put(mesh,uint16_t(0));
     const size_t count=worn ? lods.size() : 1;
@@ -148,6 +208,7 @@ inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre, bool wo
             centre=(lo+hi)*.5f;
             if (!(Len(hi-lo)<1.2f && Len(hi-lo)>.08f)) throw Reader::Invalid{};
         }
+        if (!worn) lineProp(vertices,groups,centre,lining);
         if (vertices.empty()) {
             // Native objects keep a valid draw range even at a distance where
             // the original skin omits the hat. This LOD has zero surface area.
@@ -221,9 +282,16 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
         removeHatFaces(hatLods,edits);
         repairCrowns(hatLods,edits);
         V3 centre{};
-        Bytes mesh=object(hatLods,joint,centre,false);
-        prop.assign(source.begin(),source.begin()+countAt);
-        person=prop; put(prop,uint16_t(1)); put(person,uint16_t(count+1));
+        if (hats.size()>65535) return false;
+        const auto lining=uint16_t(hats.size());
+        Bytes mesh=object(hatLods,joint,centre,false,lining);
+        person.assign(source.begin(),source.begin()+countAt);
+        prop=person;
+        memcpy(prop.data()+14,&lining,sizeof lining); // 4DS material count
+        put(prop,uint32_t(1u<<18));
+        put(prop,V3{.65f,.65f,.65f}); put(prop,V3{.85f,.85f,.85f});
+        put(prop,V3{}); put(prop,1.f); str(prop,"rd_lining.bmp");
+        put(prop,uint16_t(1)); put(person,uint16_t(count+1));
         node(prop,mesh,"hat",0,{});
         put(prop,uint8_t(0)); // no model animation
         std::sort(edits.begin(),edits.end(),[](auto &a,auto &b){return a.start<b.start;});

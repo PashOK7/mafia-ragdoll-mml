@@ -5,7 +5,7 @@ from collections import Counter
 from pathlib import Path
 
 
-def skin_lods(data):
+def skin_lods(data, lined_prop=False):
     stream = io.BytesIO(data)
 
     def read(fmt):
@@ -17,7 +17,8 @@ def skin_lods(data):
 
     assert stream.read(4) == b'4DS\0' and read('H') == (29,)
     stream.read(8)
-    for _ in range(read('H')[0]):
+    materials, = read('H')
+    for _ in range(materials):
         flags, = read('I')
         stream.read(40)
         if flags & (1 << 19):
@@ -49,14 +50,22 @@ def skin_lods(data):
         elif kind == 10:
             stream.read(68)
         else:
-            assert kind == 1 and visual in (2, 3) and read('H') == (0,)
+            assert kind == 1 and visual in ((0,) if lined_prop else (2, 3)) and read('H') == (0,)
             for _ in range(read('B')[0]):
                 stream.read(4)
                 vertices = [read('8f')[:3] for _ in range(read('H')[0])]
                 faces = []
-                for _ in range(read('B')[0]):
-                    faces.extend(read('3H') for _ in range(read('H')[0]))
-                    stream.read(2)
+                groups, = read('B')
+                for group in range(groups):
+                    tris = [read('3H') for _ in range(read('H')[0])]
+                    material, = read('H')
+                    if lined_prop and group == groups-1:
+                        half = len(vertices)//2
+                        assert material == materials and faces
+                        assert tris[:len(faces)] == [tuple(half+i for i in reversed(t)) for t in faces]
+                        for outer, inner in zip(vertices[:half], vertices[half:], strict=True):
+                            assert all(abs(a*.985-b) < 1e-5 for a, b in zip(outer, inner))
+                    faces.extend(tris)
                 yield vertices, faces
             return
     raise AssertionError('no character skin in model')
@@ -107,6 +116,11 @@ def check(game):
     wearers = [Path(f['path']) for f in files if f['mod'] == 'ragdoll' and
                f['name'].startswith('models\\') and not f['name'].startswith('models\\rdhat_')]
     assert wearers
+    props = {Path(f['path']).stem: Path(f['path']) for f in files if f['mod'] == 'ragdoll'
+             and f['name'].startswith('models\\rdhat_')}
+    for path in wearers:
+        prop = props['rdhat_' + path.stem + '_lined']
+        assert len(list(skin_lods(prop.read_bytes(), lined_prop=True))) == 1
     levels = 0
     for path in wearers:
         prepared = list(skin_lods(path.read_bytes()))

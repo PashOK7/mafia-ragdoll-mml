@@ -743,3 +743,13 @@ Both windowed labs registered 114 wearers. The independent skin test found upwar
 In each lab two copies of each of civil19, freegang01, TommyHAT, pauliecoathat and czena08 were spawned together. Only the struck wearer's hat detached, and each physical hat moved at least 1.50 m in the final run. Bareheaded Tommy produced no hat. These are geometry and gameplay checks. They do not assess the appearance of hair on every face atlas.
 
 The owner's 1.0 process hot-loaded 0.1.16 at 10:49:19 and prepared all 114 models. The installed DLL and the live DLL in the subsequent freeride session both have SHA-256 `dcaf20de80e7c5cb97074af7c6f871e34a981653aae5058e45b314b467a34f36`.
+
+## 2026-11-21 — Hat retention and lining (0.1.17)
+
+The fit tracks the simulated crown's point velocity. Gravity relative to crown acceleration loads the hat sideways or lifts it. Pressure into the head increases lateral grip. A damped fit returns toward its seat during small disturbances. Four centimetres of accumulated slip releases the hat. Its world placement comes from the current physical neck and the worn visual's local transform. The prop inherits head point velocity plus relative slip. Each release records ragdoll age, head orientation, slip, position and velocity.
+
+The detached prop has an inward-facing shell with reversed normals and stitched open edges. A shared 64 × 64 opaque cloth texture includes a dark sweatband. The original exterior and character models are unchanged from 0.1.16. Versioned prop names bypass old cached geometry and work with already loaded 0.1.16 wearers.
+
+In both windowed labs all 114 registered props passed the interior triangle test and all 212 wearer detail levels passed the crown tests. Civil19, freegang01, TommyHAT, pauliecoathat and czena08 kept their hats on activation and released during the fall after 0.544–0.624 s across ten trials. Matching bystanders kept their hats and bareheaded Tommy produced no prop. From below, civil19, freegang01 and TommyHAT covered the sky through the opening in each build. The archived civil19 screenshot shows the brim, inner wall and crown. The fit regression passed at 20, 30, 60 and 144 Hz for upright travel, a steady 30-degree lean, free fall, inversion and a lateral jolt.
+
+The owner's 1.0 game hot-loaded generation 2 of 0.1.17 at 11:01:16, prepared 114 wearers and logged a civil17 hat releasing after 0.197 s. The installed and live DLL hash is `39c3d80d57749c9ad8bf59390c28dd36f9fafe8cc897bbbaf4fd5c7cc721fbc1`.

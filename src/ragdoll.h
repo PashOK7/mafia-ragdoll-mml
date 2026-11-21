@@ -3,6 +3,7 @@
 #include <string>
 #include "mathx.h"
 #include "collision.h"
+#include "hat_fit.h"
 
 struct MmlCapsule;
 
@@ -38,6 +39,7 @@ public:
     void *actor = nullptr;     // identity: a C_human, or a traffic pedestrian element (not an actor)
     void *model = nullptr;     // the model frame whose skeleton is driven
     bool headwearChecked = false;
+    HatFit hatFit;
     bool pedestrian = false;   // `actor` is a pedestrian manager element
     bool carExtraction = false; // follow the puller's track, which outlasts the victim's track
     uint32_t keyVtable = 0;    // the actor's vtable when the ragdoll started (detects a reused address)
