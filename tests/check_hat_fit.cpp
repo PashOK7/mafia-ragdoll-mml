@@ -3,6 +3,17 @@
 #include "../src/hat_fit.h"
 
 int main() {
+    // Diagonal torso travel with a crown slowed by the head rotating back.
+    // A shot-axis projection can lose most of the wearer's actual motion.
+    HatFit diagonal;
+    diagonal.torsoMotion={1.867f,-.380f,1.695f};
+    diagonal.hatMotion={1.358f,-.206f,.191f};
+    diagonal.shotMotion={.45f,-.20f,.89f};
+    const V3 axis=diagonal.carryAxis();
+    const V3 velocity=diagonal.shotReleaseVelocity(diagonal.hatMotion,{0,1,0});
+    assert(Dot(velocity,axis)>=Dot(diagonal.torsoMotion,axis)-.001f);
+    assert(std::abs(Dot(velocity-diagonal.hatMotion,{axis.z,0,-axis.x}))<.001f);
+    assert(std::abs(velocity.y-diagonal.hatMotion.y)<.001f);
     for (float fps : {20.f,30.f,60.f,144.f}) {
         const float dt=1/fps;
         const V3 up{0,1,0};

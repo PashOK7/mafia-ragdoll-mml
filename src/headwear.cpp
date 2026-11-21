@@ -617,8 +617,7 @@ void Drop(Ragdoll &body, float dt) {
         }
         JPH::Quat q(-wornRotation.x,-wornRotation.y,-wornRotation.z,wornRotation.w);
         const V3 seated=position;
-        const V3 seatedVelocity=fit.releaseVelocity(body.PointVelocity(Ragdoll::B_HEAD,seated),body.age);
-        const bool shotRelease=fit.ridingShot || Len(seatedVelocity-fit.hatMotion)>.05f;
+        const bool shotRelease=fit.ridingShot;
         const float radius=model.mesh.radius*scale;
         // A bullet can tip the rim, but the collar still has to lift off the head.
         const bool clear=shotRelease ? ClearShotRelease(shape,q,up,fit.shotMotion,fit.depth,radius,position)
@@ -634,11 +633,8 @@ void Drop(Ragdoll &body, float dt) {
             H->prop_remove(M,prop);
             return;
         }
-        V3 velocity=fit.releaseVelocity(body.PointVelocity(Ragdoll::B_HEAD,position),body.age);
-        if (shotRelease) {
-            // The separating band has velocity relative to the skull, too.
-            velocity+=up*std::clamp(fit.liftRate,0.f,1.1f);
-        }
+        const V3 velocity=shotRelease ? fit.shotReleaseVelocity(body.PointVelocity(Ragdoll::B_HEAD,position),up)
+                                     : fit.hatMotion;
         JPH::BodyCreationSettings settings(shape,J(jolt_world::ToJolt(position)),q,
                                            JPH::EMotionType::Dynamic,jolt_world::kDynamic);
         settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
@@ -660,7 +656,7 @@ void Drop(Ragdoll &body, float dt) {
         if (shotRelease) {
             hat.releaseGroup=jolt_ragdoll::CollisionGroupOf(&body);
             hat.shotStart=position;
-            hat.shotAxis=Norm({fit.shotMotion.x,0,fit.shotMotion.z},{});
+            hat.shotAxis=fit.carryAxis();
             hat.flightSamples=32;
         }
         fallen.emplace(frame,hat);
@@ -669,6 +665,8 @@ void Drop(Ragdoll &body, float dt) {
             Log("headwear shot carry %.3f m/s tracked %.3f m/s lift along head %.3f m lateral %.3f m",
                 Len(velocity),Len(fit.hatMotion),Dot(position-seated,up),Len(Cross(position-seated,up)));
             Log("headwear shot worn travel %.3f m",Dot(fit.lastTorso-fit.firstTorso,hat.shotAxis));
+            Log("headwear shot along wearer's path %.3f m/s at release, torso %.3f m/s, crown %.3f m/s",
+                Dot(velocity,hat.shotAxis),Dot(fit.torsoMotion,hat.shotAxis),Dot(fit.hatMotion,hat.shotAxis));
         }
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,

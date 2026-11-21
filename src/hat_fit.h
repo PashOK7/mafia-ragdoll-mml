@@ -24,18 +24,22 @@ struct HatFit {
         shotAge=age;
     }
 
-    V3 releaseVelocity(V3 headVelocity,float age) const {
-        float speed=Len(shotMotion);
-        if (speed<1e-4f) return hatMotion;
-        V3 axis=shotMotion*(1.f/speed);
-        float residue=std::exp(-std::max(0.f,age-shotAge)/.18f);
-        float inherited=Dot(hatMotion,axis);
-        // A shot changes the head velocity before the position-tracking filter
-        // catches up. Keep the actual forward speed and give the loosened
-        // band a small departure speed so it clears the following skull.
-        float forward=std::max(inherited,Dot(headVelocity,axis))+
-                      std::min(1.8f,.40f*speed)*residue;
-        return hatMotion+axis*((forward-inherited)*residue);
+    V3 carryAxis() const {
+        const V3 travel{torsoMotion.x,0,torsoMotion.z};
+        return Norm(travel,Norm({shotMotion.x,0,shotMotion.z},{}));
+    }
+
+    V3 shotReleaseVelocity(V3 headVelocity,V3 up) const {
+        const V3 axis=carryAxis();
+        const V3 opening=up*std::clamp(liftRate,0.f,1.1f);
+        const V3 velocity=hatMotion+opening;
+        // The fitted band still carries the wearer's translation at the lip
+        // of the crown. Head rotation can subtract from the tracked point's
+        // speed along that path. Keep the translation and any faster forward
+        // head motion, with the measured sideways and vertical components.
+        const float inherited=Dot(velocity,axis);
+        const float forward=std::max({inherited,Dot(torsoMotion,axis),Dot(headVelocity+opening,axis)});
+        return velocity+axis*(forward-inherited);
     }
 
     bool clearsShotGuide(float span,float dt) {

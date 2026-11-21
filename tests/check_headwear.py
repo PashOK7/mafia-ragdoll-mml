@@ -53,16 +53,29 @@ def check_truck_carry(game):
         game.cleanup()
 
 
-def check_shotgun_carry(game, axis=(0,0,1), model='civil17'):
+def check_shotgun_carry(game, axis=(0,0,1), model='civil17', moving=False):
     ground=game.call('world.ground',at=[-1984,0,75])['height']
     player_start=game.pos('player')
-    game.tool('teleport',to=[-1988,ground+.10,72],dir=[0,0,1])
-    actor=game.spawn_human(model,[-1984,ground+.03,75])
+    actor_at=[player_start[0]-1.5,player_start[1],player_start[2]-7] if moving else [-1984,ground+.03,75]
+    player_at=[actor_at[0]-4,actor_at[1],actor_at[2]+1] if moving else [-1988,ground+.10,72]
+    game.tool('teleport',to=player_at,dir=[1,0,0] if moving else [0,0,1])
+    actor=game.spawn_human(model,actor_at)
     try:
-        game.call('human.anim',actor=actor,play='stand')
-        if model=='civil52':
-            game.call('human.health',actor=actor,set=30)
+        if not moving:
+            game.call('human.anim',actor=actor,play='stand')
+        if model in ('civil52','civil15'):
+            game.call('human.health',actor=actor,set=20 if moving else 30)
         game.sleep(2400)
+        if moving:
+            start=game.pos(actor)
+            order=game.call('human.go',actor=actor,to=[start[0],start[1],start[2]-10],run=True)
+            for _ in range(60):
+                game.sleep(40)
+                at=game.pos(actor)
+                if start[2]-at[2]>.55:
+                    break
+            else:
+                raise AssertionError((model,order,start,at))
         bones=game.call('human.skeleton',actor=actor)['bones']
         x,y,z=next(b['world_pos'] for b in bones if b['name'].lower()=='neck')
         mission=int(game.call('game')['mission'],16)
@@ -72,12 +85,18 @@ def check_shotgun_carry(game, axis=(0,0,1), model='civil17'):
             return struct.unpack('<I',struct.pack('<f',v))[0]
         seq=game.latest()
         previous=game.tool('log_tail',lines=100).splitlines()
-        origin=[x-.85*axis[0],y-.20,z-.85*axis[2]]
-        game.call('native.call',at='0x5A84A0' if game.build=='1.2' else '0x5E3DF0',
-                  conv='thiscall',this=engine,ret='uint',
-                  args=[shooter,*map(bits,origin),*map(bits,[160*v for v in axis]),bits(200),0,0,8])
-        shot=game.call('events.since',seq=seq,types='SHOT')['events']
-        assert any(e['data']['shots']==8 for e in shot),shot
+        if moving:
+            # Give the engine's bullet Hit directly while the AI is running.
+            # The standing cases below still cover the native pellet queue.
+            hit=game.call('human.hit',actor=actor,type=0,damage=50,dir=list(axis),pos=[x,y-.08,z])
+            assert hit['was_alive'] and not hit['alive'],hit
+        else:
+            origin=[x-.85*axis[0],y-.20-.85*axis[1],z-.85*axis[2]]
+            game.call('native.call',at='0x5A84A0' if game.build=='1.2' else '0x5E3DF0',
+                      conv='thiscall',this=engine,ret='uint',
+                      args=[shooter,*map(bits,origin),*map(bits,[160*v for v in axis]),bits(200),0,0,8])
+            shot=game.call('events.since',seq=seq,types='SHOT')['events']
+            assert any(e['data']['shots']==8 for e in shot),shot
         flight=[]
         for _ in range(20):
             game.sleep(20)
@@ -85,7 +104,8 @@ def check_shotgun_carry(game, axis=(0,0,1), model='civil17'):
             for prop in props:
                 if prop['model'].lower()==f'rdhat_{model}_lined.i3d':
                     flight.append(sum((v-p)*d for v,p,d in zip(prop['pos'],(x,y,z),axis)))
-        assert len(flight)>=4 and max(flight)>.60,(flight,game.call('events.since',seq=seq,types='HUMAN_HIT,BULLET_HIT')['events'])
+        assert len(flight)>=4 and (moving or max(flight)>.60),(
+            flight,game.call('events.since',seq=seq,types='HUMAN_HIT,BULLET_HIT')['events'])
         logs=[line for line in game.tool('log_tail',lines=100).splitlines() if line not in previous]
         lift=next((line.split(' lift along head ')[1].split() for line in logs
                    if 'headwear shot carry' in line),None)
@@ -95,8 +115,15 @@ def check_shotgun_carry(game, axis=(0,0,1), model='civil17'):
                    if 'headwear shot worn travel' in line),0)
         early_flight=next((float(line.split(' forward ')[1].split()[0]) for line in logs
                            if 'headwear shot flight remaining 24 ' in line),0)
-        assert worn>.20 and early_flight>.50,(worn,early_flight,logs[-15:])
-        print(game.build,model,'eight-pellet shot: hat forward travel',round(max(flight),3),'m')
+        carry=next((line.split("wearer's path ")[1].split() for line in logs
+                    if "headwear shot along wearer's path" in line),None)
+        assert carry and float(carry[0])>=float(carry[5])-.001,logs[-15:]
+        if moving:
+            assert float(carry[5])>1 and early_flight>.22,(worn,early_flight,logs[-15:])
+        else:
+            assert worn>.20 and early_flight>.50,(worn,early_flight,logs[-15:])
+        print(game.build,model,'moving bullet hit' if moving else 'eight-pellet shot',
+              'hat travel in first eight flight frames',early_flight,'m')
     finally:
         game.cleanup()
         game.tool('teleport',to=player_start)
@@ -294,6 +321,7 @@ def check(game):
     check_truck_carry(game)
     check_shotgun_carry(game)
     check_shotgun_carry(game,axis=(.85,0,math.sqrt(1-.85**2)),model='civil52')
+    check_shotgun_carry(game,axis=(math.sqrt(1-.15**2),-.15,0),model='civil15',moving=True)
 
 
 if __name__ == '__main__':
