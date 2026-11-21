@@ -16,6 +16,7 @@ struct SceneryPiece {
     V3 t{}, ax[3]{};                 // pose: world = t + sum local_i * ax[i] (unit, orthogonal, right-handed axes)
     const std::vector<V3> *pos = nullptr;          // the shape, in the piece's frame
     const std::vector<uint32_t> *tris = nullptr;   // three indices per triangle
+    const char *name = nullptr;
 };
 
 // Something the game moves: a human's body part, a car. Each becomes a kinematic body (or a car's body of its mass)

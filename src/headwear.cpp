@@ -64,9 +64,11 @@ struct FallenHat {
     V3 shotStart{}, shotAxis{};
     unsigned flightSamples=0;
     unsigned flightContacts=0;
+    std::vector<void *> visuals;
 };
 std::unordered_map<void *, FallenHat> fallen;
 std::vector<FallenHat> retired;
+std::unordered_set<void *> physicsVisuals;
 constexpr float hatMass=.22f;
 JPH::Vec3 J(V3 v) { return {v.x,v.y,v.z}; }
 V3 F(JPH::RVec3Arg v) { return {float(v.GetX()),float(v.GetY()),float(v.GetZ())}; }
@@ -194,6 +196,7 @@ void Remove(const FallenHat &hat) {
         bi.RemoveBody(hat.body);
         bi.DestroyBody(hat.body);
     }
+    for (void *frame:hat.visuals) physicsVisuals.erase(frame);
     H->prop_remove(M,hat.prop);
 }
 
@@ -502,12 +505,17 @@ void BodyContact(uint32_t propBody) {
     }
 }
 
-void FlightContact(uint32_t id,unsigned layer,V3 normal,float approach) {
+bool OwnsVisual(void *visual) {
+    return physicsVisuals.contains(visual);
+}
+
+void FlightContact(uint32_t id,const JPH::BodyID &other,unsigned layer,V3 point,V3 normal,float approach) {
     for (auto &[_,hat]:fallen) {
         if (!hat.flightSamples || hat.flightContacts>=4 || hat.body.GetIndexAndSequenceNumber()!=id) continue;
         ++hat.flightContacts;
-        Log("headwear shot contact layer %u normal %.3f %.3f %.3f approach %.3f m/s",
-            layer,normal.x,normal.y,normal.z,approach);
+        const char *name=layer==jolt_world::kStatic ? jolt_world::StaticName(other) : "<moving>";
+        Log("headwear shot contact layer %u %s at %.3f %.3f %.3f normal %.3f %.3f %.3f approach %.3f m/s",
+            layer,name,point.x,point.y,point.z,normal.x,normal.y,normal.z,approach);
         break;
     }
 }
@@ -659,7 +667,9 @@ void Drop(Ragdoll &body, float dt) {
             hat.shotAxis=fit.carryAxis();
             hat.flightSamples=32;
         }
-        fallen.emplace(frame,hat);
+        hat.visuals.push_back(prop);
+        game::EnumFramesDeep(prop,&hat.visuals);
+        physicsVisuals.insert(hat.visuals.begin(),hat.visuals.end());
         show(frame,false);
         if (shotRelease) {
             Log("headwear shot carry %.3f m/s tracked %.3f m/s lift along head %.3f m lateral %.3f m",
@@ -671,6 +681,7 @@ void Drop(Ragdoll &body, float dt) {
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
             velocity.x,velocity.y,velocity.z,fit.torsoMotion.x,fit.torsoMotion.y,fit.torsoMotion.z);
+        fallen.emplace(frame,std::move(hat));
         return;
     }
 }

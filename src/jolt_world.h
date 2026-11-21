@@ -34,6 +34,7 @@ void Stop();               // every body gone; before the core unloads
 bool Running();
 JPH::PhysicsSystem *System();
 JPH::BodyInterface &Bodies();   // no-lock body interface (everything runs on the game thread)
+const char *StaticName(const JPH::BodyID &body);
 
 V3 Origin();
 inline V3 ToJolt(const V3 &world) { return world - Origin(); }

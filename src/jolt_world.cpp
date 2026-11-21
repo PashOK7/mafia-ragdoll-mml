@@ -150,9 +150,11 @@ public:
         float approach = (a.GetPointVelocity(p) - b.GetPointVelocity(p)).Dot(n);   // > 0: closing
         V3 nv{n.GetX(), n.GetY(), n.GetZ()};
         if (a.IsDynamic() && !a.GetUserData())
-            headwear::FlightContact(a.GetID().GetIndexAndSequenceNumber(),b.GetObjectLayer(),-nv,approach);
+            headwear::FlightContact(a.GetID().GetIndexAndSequenceNumber(),b.GetID(),b.GetObjectLayer(),
+                                    F(m.GetWorldSpaceContactPointOn2(0))+OriginNow(),-nv,approach);
         if (b.IsDynamic() && !b.GetUserData())
-            headwear::FlightContact(b.GetID().GetIndexAndSequenceNumber(),a.GetObjectLayer(),nv,approach);
+            headwear::FlightContact(b.GetID().GetIndexAndSequenceNumber(),a.GetID(),a.GetObjectLayer(),
+                                    F(p)+OriginNow(),nv,approach);
         if (!g_impact || approach <= 0) return;
         V3 wp = V3{p.GetX(), p.GetY(), p.GetZ()} + OriginNow();
         if (a.IsDynamic()) g_impact(a.GetID(), approach, wp, -nv);
@@ -354,7 +356,7 @@ JPH::Quat YTo(const V3 &d) {
 }
 
 // ---- the static world: one body per scenery piece, one mesh shape per piece shape
-struct Static { JPH::BodyID body; unsigned version = 0, used = 0; };
+struct Static { JPH::BodyID body; unsigned version = 0, used = 0; std::string name; };
 std::unordered_map<const void *, Static> g_statics;               // by piece key
 std::unordered_map<const void *, JPH::RefConst<JPH::Shape>> g_meshes;   // by shape key
 unsigned g_sceneryScans = ~0u, g_sceneryEpoch = ~0u, g_applyRound;
@@ -441,7 +443,7 @@ void ApplyScenery() {
         s.mRestitution = 0.0f;
         JPH::BodyID id = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);
         if (id.IsInvalid()) continue;
-        g_statics[p.key] = Static{id, p.version, round};
+        g_statics[p.key] = Static{id, p.version, round, p.name ? p.name : "<unnamed>"};
         made++;
     }
     for (auto it = g_statics.begin(); it != g_statics.end();) {
@@ -966,6 +968,11 @@ bool Running() { return g_w != nullptr; }
 JPH::PhysicsSystem *System() { return g_w ? g_w->system.get() : nullptr; }
 JPH::BodyInterface &Bodies() { return g_w->system->GetBodyInterfaceNoLock(); }
 V3 Origin() { return g_w ? g_w->origin : V3{}; }
+const char *StaticName(const JPH::BodyID &body) {
+    for (const auto &[_,piece] : g_statics)
+        if (piece.body==body) return piece.name.c_str();
+    return "<unknown>";
+}
 
 void AddFocus(const V3 &lo, const V3 &hi) {
     g_focusLo = {std::min(g_focusLo.x, lo.x), std::min(g_focusLo.y, lo.y), std::min(g_focusLo.z, lo.z)};

@@ -53,17 +53,18 @@ def check_truck_carry(game):
         game.cleanup()
 
 
-def check_shotgun_carry(game, axis=(0,0,1), model='civil17', moving=False):
-    ground=game.call('world.ground',at=[-1984,0,75])['height']
+def check_shotgun_carry(game, axis=(0,0,1), model='civil17', moving=False, location=(-1984,75)):
+    street_x,street_z=location
+    ground=game.call('world.ground',at=[street_x,0,street_z])['height']
     player_start=game.pos('player')
-    actor_at=[player_start[0]-1.5,player_start[1],player_start[2]-7] if moving else [-1984,ground+.03,75]
-    player_at=[actor_at[0]-4,actor_at[1],actor_at[2]+1] if moving else [-1988,ground+.10,72]
+    actor_at=[player_start[0]-1.5,player_start[1],player_start[2]-7] if moving else [street_x,ground+.03,street_z]
+    player_at=[actor_at[0]-4,actor_at[1],actor_at[2]+1] if moving else [street_x-4,ground+.10,street_z-3]
     game.tool('teleport',to=player_at,dir=[1,0,0] if moving else [0,0,1])
     actor=game.spawn_human(model,actor_at)
     try:
         if not moving:
             game.call('human.anim',actor=actor,play='stand')
-        if model in ('civil52','civil15'):
+        if model in ('civil52','civil15','civil12'):
             game.call('human.health',actor=actor,set=20 if moving else 30)
         game.sleep(2400)
         if moving:
@@ -122,6 +123,14 @@ def check_shotgun_carry(game, axis=(0,0,1), model='civil17', moving=False):
             assert float(carry[5])>1 and early_flight>.22,(worn,early_flight,logs[-15:])
         else:
             assert worn>.20 and early_flight>.50,(worn,early_flight,logs[-15:])
+        ghost_contacts=[line for line in logs if 'headwear shot contact layer 0 rdhat_' in line]
+        assert not ghost_contacts,ghost_contacts
+        if model=='civil12':
+            later=next((line for line in logs if 'headwear shot flight remaining 16 ' in line),None)
+            assert later,logs[-15:]
+            forward=float(later.split(' forward ')[1].split()[0])
+            speed=float(later.split(' speed ')[1].split()[0])
+            assert forward-early_flight>.25 and speed>1.0,logs[-15:]
         print(game.build,model,'moving bullet hit' if moving else 'eight-pellet shot',
               'hat travel in first eight flight frames',early_flight,'m')
     finally:
@@ -322,6 +331,7 @@ def check(game):
     check_shotgun_carry(game)
     check_shotgun_carry(game,axis=(.85,0,math.sqrt(1-.85**2)),model='civil52')
     check_shotgun_carry(game,axis=(math.sqrt(1-.15**2),-.15,0),model='civil15',moving=True)
+    check_shotgun_carry(game,axis=(.65,0,math.sqrt(1-.65**2)),model='civil12',location=(-1969.85,-10.68))
 
 
 if __name__ == '__main__':

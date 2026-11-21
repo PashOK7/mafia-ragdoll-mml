@@ -19,6 +19,8 @@
 #include <memory>
 #include <unordered_map>
 #include "mod.h"
+#include "game.h"
+#include "headwear.h"
 
 using namespace mod;
 
@@ -179,6 +181,7 @@ bool UpdateSlabs() {
         piece.ax[2] = Cross(piece.ax[0], piece.ax[1]);
         piece.pos = &shape.pos;
         piece.tris = &shape.tris;
+        piece.name = "native slab";
         g_slabs.push_back(piece);
     }
     return true;
@@ -219,6 +222,9 @@ void Tick() {
     g_raw.resize(n);
     if (n) n = H->scene_pieces(M, g_raw.data(), n);
     g_raw.resize(std::max(n, 0));
+    // Detached hats already have dynamic hulls in Jolt. A prop may enter
+    // the visual cache as stationary on its first scan.
+    std::erase_if(g_raw, [](const MmlMeshPiece &p) { return headwear::OwnsVisual(p.visual); });
     // a new set only when the host's pieces changed (their visuals and versions)
     // (the host gives them in no fixed order: a sum of each one's mixed key, not a chain)
     uint64_t sig = g_raw.size() * 0x9E3779B97F4A7C15ull;
@@ -258,6 +264,7 @@ void Tick() {
         sp.ax[2] = r.r[2];
         sp.pos = &sh->pos;
         sp.tris = &sh->tris;
+        sp.name = game::at<const char *>(p.visual,game::kFrameName);
         g_pieces.push_back(sp);
     }
     bool covered = false;

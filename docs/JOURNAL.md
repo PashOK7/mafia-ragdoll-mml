@@ -851,3 +851,13 @@ The owner reproduced the drop on civil15 after the live game confirmed 0.1.30. T
 Release now transfers the wearer's measured horizontal translation along the torso's trajectory, keeping the crown's faster forward motion when it has one. Sideways and vertical components still come from the mounted point and the band's axial opening. The flight diagnostic uses the torso's direction and records all three velocities projected onto it. The standalone regression covers the slow-crown diagonal case.
 
 Both windowed headwear suites passed. A running civil15 received a transverse native bullet Hit and its hat travelled 0.516–0.532 m along the wearer's path in the first eight steps. The four standing eight-pellet cases travelled 0.793–0.829 m over the same interval. The owner's exact shot geometry still needs an in-game retest. Owner installation SHA-256 `0b1fdbc2a2647253f8bf3da57f449c6fa00a3640a56d2cc2ab89d497fb05dd71`.
+
+## 2026-11-21 — Exclude simulated hat visuals from static scenery (0.1.32)
+
+On the owner's 0.1.31 civil12 shot, forward speed dropped from 5.34 m/s to zero after about 0.82 m of flight, roughly a metre above the street. Native static rays and 12 cm sweeps along the flight corridor found no obstacle on either build. A close-range eight-pellet fixture with civil12 at the reported location reproduced the stall in both labs. The Jolt contact record identified `rdhat_civil12_lined_prop1.hat`: the moving convex body had met its own rendered prop's triangles in the static layer. The visual cache can classify a fresh prop as stationary before it samples enough motion.
+
+The prop and its descendant frame identities are registered at creation and removed with the physical hat. Scenery filters those identities before hashing or cooking the scene pieces. The dynamic hull continues to meet the rest of the scenery and other bodies. The flight contact log includes the collider's name and world contact point.
+
+The new regression fires at civil12 on the same street and checks both sustained travel and the absence of static hat copies. In the focused run the hats travelled 1.10–1.26 m in 16 steps and 1.76–2.01 m in 32 steps. Before filtering, the same fixture stopped forward travel at 0.64–0.85 m. Owner installation SHA-256 `a99c44770cbe218314d8a7f5f9d0001ec1d9cd4392e3f564a3cefcfe95cb7c68`.
+
+Both full headwear suites passed. The flight regression checks for continued motion between steps eight and sixteen to allow different initial pellet velocities. The running, walking, truck, and ground-shot checks also passed.
