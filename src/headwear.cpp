@@ -17,6 +17,9 @@
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
 namespace headwear {
@@ -49,11 +52,12 @@ struct FallenHat {
     void *prop, *pedestrian, *model;
     bool wasDead;
     JPH::BodyID body;
-    V3 previous;
+    V3 previous, drawn;
     const hats::PropMesh *mesh;
     float scale;
     bool touchedRagdoll=false;
     bool reportedGround=false;
+    bool sleeping=false;
 };
 std::unordered_map<void *, FallenHat> fallen;
 std::vector<FallenHat> retired;
@@ -66,6 +70,41 @@ float Support(const FallenHat &hat,JPH::QuatArg rotation,V3 normal) {
     float reach=0.f;
     for (const auto &vertex:hat.mesh->vertices) reach=std::max(reach,-Dot(local,vertex));
     return reach*hat.scale;
+}
+
+bool StaticFloor(V3 from,V3 to,MmlHit &hit) {
+    return H->world_ray(M,&from.x,&to.x,MML_WORLD_STATIC,nullptr,&hit) &&
+           hit.normal[1]>.5f && (hit.flags>>24)!=31 && (hit.flags>>24)!=44;
+}
+
+float DrawClearance(const FallenHat &hat,V3 pos,JPH::QuatArg q) {
+    const float low=pos.y-Support(hat,q,{0,1,0});
+    MmlHit ground{};
+    if (!StaticFloor(pos+V3{0,.025f,0},{pos.x,low-.045f,pos.z},ground)) return 0;
+    constexpr float gap=.004f;
+    const V3 normal{ground.normal[0],ground.normal[1],ground.normal[2]};
+    const V3 surface{ground.pos[0],ground.pos[1],ground.pos[2]};
+    float lift=(Support(hat,q,normal)+gap-Dot(pos-surface,normal))/normal.y;
+
+    // At a slope change the central ray's plane can miss a low edge.
+    // Probe the lowest rendered point in each quadrant of the footprint.
+    std::array<V3,4> lowest{};
+    std::array<bool,4> found{};
+    for (const auto &v:hat.mesh->vertices) {
+        const V3 offset=F(q*J(v))*hat.scale;
+        const unsigned quadrant=(offset.x>=0 ? 1u : 0u)+(offset.z>=0 ? 2u : 0u);
+        if (!found[quadrant] || offset.y<lowest[quadrant].y) {
+            found[quadrant]=true;
+            lowest[quadrant]=offset;
+        }
+    }
+    for (size_t i=0;i<lowest.size();++i) {
+        if (!found[i]) continue;
+        const V3 point=pos+lowest[i];
+        if (StaticFloor(point+V3{0,.042f,0},point-V3{0,.012f,0},ground))
+            lift=std::max(lift,ground.pos[1]+gap/ground.normal[1]-point.y);
+    }
+    return std::clamp(lift,0.f,.05f);
 }
 
 bool ClearRelease(const JPH::Shape *shape,JPH::QuatArg rotation,float depth,V3 &position) {
@@ -207,6 +246,9 @@ void Sync() {
     if (fallen.empty() || !jolt_world::Running()) return;
     auto &bi=jolt_world::Bodies();
     for (auto &[_,hat]:fallen) {
+        const bool asleep=!bi.IsActive(hat.body);
+        if (asleep && hat.sleeping) continue;
+        hat.sleeping=asleep;
         JPH::RVec3 p;
         JPH::Quat q;
         bi.GetPositionAndRotation(hat.body,p,q);
@@ -218,8 +260,7 @@ void Sync() {
             const V3 from=hat.previous+V3{0,.025f,0};
             const V3 to=pos-V3{0,reach,0};
             MmlHit ground{};
-            if (H->world_ray(M,&from.x,&to.x,MML_WORLD_STATIC,nullptr,&ground) &&
-                ground.normal[1]>.5f && (ground.flags>>24)!=31 && (ground.flags>>24)!=44) {
+            if (StaticFloor(from,to,ground)) {
                 V3 n{ground.normal[0],ground.normal[1],ground.normal[2]};
                 const float support=Support(hat,q,n);
                 const V3 surface{ground.pos[0],ground.pos[1],ground.pos[2]};
@@ -240,8 +281,11 @@ void Sync() {
             }
         }
         hat.previous=pos;
+        // Leave the sleeping body and its contact manifold in Jolt. Move
+        // only the rendered surface clear of the asphalt's depth plane.
+        hat.drawn=pos+V3{0,DrawClearance(hat,pos,q),0};
         const Q rotation{q.GetW(),-q.GetX(),-q.GetY(),-q.GetZ()};
-        H->prop_place(M,hat.prop,&pos.x,&rotation.w,0);
+        H->prop_place(M,hat.prop,&hat.drawn.x,&rotation.w,0);
     }
 }
 
@@ -284,7 +328,7 @@ bool Shot(V3 from,V3 axis,float range,V3 *point,uint32_t *body) {
         JPH::RVec3 p;
         JPH::Quat q;
         bi.GetPositionAndRotation(hat.body,p,q);
-        V3 delta=jolt_world::ToWorld(F(p))-from;
+        V3 delta=hat.drawn-from;
         const V3 nearest=delta-axis*std::clamp(Dot(delta,axis),0.f,range);
         const float radius=hat.scale*hat.mesh->radius;
         if (Dot(nearest,nearest)>radius*radius) continue;
@@ -325,16 +369,30 @@ void BulletImpulse(uint32_t body,V3 direction,V3 point,float damage) {
     JPH::Quat q;
     bi.GetPositionAndRotation(id,p,q);
     const V3 centre=jolt_world::ToWorld(F(p));
-    const float strength=std::min(.12f,damage*.002f);
+    constexpr float response=2.f;
+    const float strength=std::min(.12f,damage*.002f)*response;
     V3 impulse=direction*strength;
     float reboundSpeed=0.f;
     const float below=Support(hat->second,q,{0,1,0});
     const V3 end=centre-V3{0,below+.035f,0};
     MmlHit ground{};
-    bool supported=H->world_ray(M,&centre.x,&end.x,MML_WORLD_STATIC,nullptr,&ground) &&
-                   ground.normal[1]>.5f && (ground.flags>>24)!=31 && (ground.flags>>24)!=44;
+    V3 supportNormal{};
+    if (StaticFloor(centre,end,ground)) {
+        supportNormal={ground.normal[0],ground.normal[1],ground.normal[2]};
+    } else {
+        // A hat can rest on the Jolt surface of a corpse or vehicle.
+        const JPH::RRayCast ray{p,J(end-centre)};
+        JPH::RayCastResult hit;
+        JPH::IgnoreSingleBodyFilter self(id);
+        if (jolt_world::System()->GetNarrowPhaseQueryNoLock().CastRay(ray,hit,{},{},self) &&
+            hit.mFraction>.001f) {
+            supportNormal=F(bi.GetTransformedShape(hit.mBodyID).GetWorldSpaceSurfaceNormal(
+                hit.mSubShapeID2,ray.GetPointOnRay(hit.mFraction)));
+        }
+    }
+    const bool supported=supportNormal.y>.5f;
     if (supported) {
-        const V3 n{ground.normal[0],ground.normal[1],ground.normal[2]};
+        const V3 n=supportNormal;
         const float compression=std::max(0.f,-Dot(direction,n));
         const V3 offset=point-centre;
         const V3 radial=offset-n*Dot(offset,n);
@@ -348,9 +406,9 @@ void BulletImpulse(uint32_t body,V3 direction,V3 point,float damage) {
         const auto normal=J(n);
         const auto velocity=bi.GetLinearVelocity(id);
         const float outgoing=velocity.Dot(normal);
-        reboundSpeed=std::min(1.5f,damage*.045f)*compression;
+        reboundSpeed=std::min(1.5f,damage*.045f)*compression*response;
         const V3 side=Norm(slide,{});
-        const float sideSpeed=std::min(.9f,damage*.026f)*std::min(1.f,Len(slide));
+        const float sideSpeed=std::min(.9f,damage*.026f)*std::min(1.f,Len(slide))*response;
         const float sideGain=std::max(0.f,sideSpeed-velocity.Dot(J(side)));
         bi.SetLinearVelocity(id,velocity+normal*std::max(0.f,reboundSpeed-outgoing)+J(side*sideGain));
     } else {
@@ -493,7 +551,7 @@ void Drop(Ragdoll &body, float dt) {
             return;
         }
         fallen.emplace(frame,FallenHat{prop,body.pedestrian ? body.actor : nullptr,body.model,
-                                       body.pedestrian && !body.puppet,id,position,&model.mesh,scale});
+                                       body.pedestrian && !body.puppet,id,position,position,&model.mesh,scale});
         show(frame,false);
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,

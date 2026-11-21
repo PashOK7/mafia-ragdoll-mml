@@ -817,3 +817,9 @@ The repeated run also resolved all six shots on each build. The walking check us
 The owner's 0.1.25 log contained 16 consecutive detected hits on the ground-supported cap between 13:13:28 and 13:13:42. The earlier regression accepted a few millimetres of displacement. Supported impacts now apply the off-centre impulse at the struck triangle and set a bounded minimum outgoing velocity along the ground normal and tangent. Repeated shots do not add upward rebound to a hat already above that outgoing speed.
 
 The lab checks alternate damage 28 and 50 and sample the position during the rise. All 12 direct shots registered once and preserved the native floor-effect suppression. Eleven rose 0.061–0.102 m with measured displacement up to 0.278 m. One registered impact rose only 0.002 m. Owner installation SHA-256 `1a3673f254de95757e72410a42373141445f276fe81b9ac10d14b94527456932`.
+
+## 2026-11-21 — Brim depth clearance and double bullet response (0.1.27)
+
+The rendered hat keeps a 4 mm gap along the native floor normal. The central plane and the lowest mesh vertices in each footprint quadrant supply the correction on uneven pavement. Bullet triangles use the corrected visible placement. The separation only adjusts rendering and its shot query. It leaves the sleeping Jolt body where it settled.
+
+Bullet impulse, target rebound speed and target lateral speed have doubled. The ground query also checks for solid Jolt support beneath the hat if the native surface is out of range. In both windowed labs six of six aimed shots registered. On open ground the two fixture strengths produce up to 2.52 and 3.00 m/s of normal rebound, with observed peaks up to 0.342 m. Contact with another body can arrest the rise. Five resting models in each lab passed the positive-clearance check at five low mesh points. The owner's exact screenshot pose was not captured. Installed DLL SHA-256 `e7f444afae23af33f0b9129b4ced1a075c110091339e84075ceb2c3ec0e42618`.

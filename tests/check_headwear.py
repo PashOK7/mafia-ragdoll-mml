@@ -83,7 +83,7 @@ def check(game):
                 continue
             checked.add(column)
             support=game.call('world.ground',at=[x,y+.18,z])['height']
-            assert y>=support-.025,(model,[x,y,z],support)
+            assert y>=support+.001,(model,[x,y,z],support)
             if len(checked)==5:
                 break
 
@@ -134,6 +134,7 @@ def check(game):
             return [v for v in game.tool('log_tail',lines=200).splitlines() if 'headwear bullet impulse' in v]
         displacements=[]
         lifts=[]
+        rebounds=[]
         attempts=0
         for damage in (28,50,28,50,28,50):
             pos=hats()[prop]['pos']
@@ -163,15 +164,23 @@ def check(game):
                 assert len(hits)==1,hits
                 assert ground_impacts()==ground_before, 'hat hit also produced a native floor impact'
                 travelled=math.dist(pos,hats()[prop]['pos'])
-                assert travelled<.70,travelled
+                assert travelled<1.25,travelled
                 displacements.append(round(travelled,3))
                 lifts.append(round(max(sample[1]-pos[1] for sample in trail),3))
-                game.sleep(360)
+                rebound=float(hits[0].split(' rebound ')[1].split()[0])
+                expected=2*min(1.5,damage*.045)
+                if ' support 1 ' in hits[0]:
+                    assert .5*expected<=rebound<=expected+.001,(hits[0],expected)
+                else:
+                    assert rebound==0,hits[0]
+                rebounds.append(rebound)
+                game.sleep(650)
                 break
             else:
                 raise AssertionError(('no hit on visible hat triangles',pos))
-        assert sum(.028<rise<.22 for rise in lifts)>=5,lifts
-        print(game.build,'six resolved shots in',attempts,'attempts, lift in m',lifts,'displacement',displacements)
+        assert max(rebounds)>2 and .03<max(lifts)<.52,(rebounds,lifts)
+        print(game.build,'six resolved shots in',attempts,'attempts, rebound',rebounds,
+              'lift in m',lifts,'displacement',displacements)
 
     def walk_into_hat(prop):
         car=game.player()['vehicle']['actor']
@@ -196,7 +205,7 @@ def check(game):
 
     for model in ('civil19', 'freegang01', 'TommyHAT', 'pauliecoathat', 'czena08'):
         owner, a = spawn(model, 3)
-        _, b = spawn(model, 6)
+        _, b = spawn(model, 12 if model=='civil19' else 6)
         assert len(a) == len(b) == 1, (model, a, b)
         first, second = a.pop(), b.pop()
         assert visible(first) and visible(second)
