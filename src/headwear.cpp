@@ -13,10 +13,11 @@
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
-#include <Jolt/Physics/Collision/Shape/BoxShape.h>
-#include <Jolt/Physics/Collision/RayCast.h>
-#include <Jolt/Physics/Collision/CastResult.h>
-#include <Jolt/Physics/Collision/TransformedShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/PhysicsSystem.h>
 
 namespace headwear {
 namespace {
@@ -37,13 +38,20 @@ const char *candidates =
     "salman02k;salman03k;salman05k;samcoathat;synrad1;synrad1blood;synrad1dead;tommycoat;tommycoathat;"
     "tommydelnik;tommydelnikhigh;tommyhat;tommyhict bezt;tommyhighcoathat;tommyhighhat;tommytaxidriver;"
     "tommytaxidriverhigh;tony;vrabec;vratny1;vypravci2;willg2;willman01;willman02;zenarad01";
-std::unordered_map<std::string,V3> ready;
+struct HatModel {
+    V3 dimensions{};
+    hats::PropMesh mesh;
+    JPH::RefConst<JPH::Shape> hull;
+};
+std::unordered_map<std::string,HatModel> ready;
 bool prepared = false;
 struct FallenHat {
     void *prop, *pedestrian, *model;
     bool wasDead;
     JPH::BodyID body;
-    V3 previous, half;
+    V3 previous;
+    const hats::PropMesh *mesh;
+    float scale;
     bool touchedRagdoll=false;
     bool reportedGround=false;
 };
@@ -52,6 +60,37 @@ std::vector<FallenHat> retired;
 constexpr float hatMass=.22f;
 JPH::Vec3 J(V3 v) { return {v.x,v.y,v.z}; }
 V3 F(JPH::RVec3Arg v) { return {float(v.GetX()),float(v.GetY()),float(v.GetZ())}; }
+
+float Support(const FallenHat &hat,JPH::QuatArg rotation,V3 normal) {
+    const V3 local=F(rotation.Conjugated()*J(normal));
+    float reach=0.f;
+    for (const auto &vertex:hat.mesh->vertices) reach=std::max(reach,-Dot(local,vertex));
+    return reach*hat.scale;
+}
+
+bool ClearRelease(const JPH::Shape *shape,JPH::QuatArg rotation,float depth,V3 &position) {
+    const V3 initial=position;
+    const auto &query=jolt_world::System()->GetNarrowPhaseQueryNoLock();
+    JPH::CollideShapeSettings settings;
+    for (int i=0;i<12;++i) {
+        const auto transform=JPH::RMat44::sRotationTranslation(rotation,J(jolt_world::ToJolt(position)))
+                                 .PreTranslated(shape->GetCenterOfMass());
+        JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> hits;
+        query.CollideShape(shape,JPH::Vec3::sOne(),transform,settings,JPH::RVec3::sZero(),hits);
+        const JPH::CollideShapeResult *deepest=nullptr;
+        float penetration=.002f;
+        for (const auto &hit:hits.mHits) {
+            if (hit.mPenetrationDepth>penetration) {
+                deepest=&hit;
+                penetration=hit.mPenetrationDepth;
+            }
+        }
+        if (!deepest) return true;
+        position-=F(deepest->mPenetrationAxis.NormalizedOr(JPH::Vec3::sAxisY()))*(penetration+.002f);
+        if (Len(position-initial)>depth) return false;
+    }
+    return false;
+}
 
 void Remove(const FallenHat &hat) {
     if (jolt_world::Running()) {
@@ -125,8 +164,8 @@ void Prepare() {
         hats::Bytes source(static_cast<size_t>(size)), person, prop;
         if (H->file_read(M,gameName.c_str(),source.data(),source.size(),MML_FILE_GAME)!=size) continue;
         std::string marker = "rdhat_"+name;
-        V3 dimensions{};
-        if (!hats::split(source,marker+"_scalp",person,prop,dimensions)) continue;
+        HatModel model;
+        if (!hats::split(source,marker+"_scalp",person,prop,model.dimensions,model.mesh)) continue;
         const std::string propPath = dir+marker+"_lined.4ds";
         const std::string propName = "models\\"+marker+"_lined.4ds";
         if (otherProvider(propName,propPath) || !save(propPath,prop) || !save(personPath,person)) continue;
@@ -135,7 +174,7 @@ void Prepare() {
             H->file_add(M,propName.c_str(),nullptr);
             continue;
         }
-        ready.emplace(marker,dimensions);
+        ready.emplace(marker,std::move(model));
     }
     Log("detachable headwear prepared for %u installed character models",unsigned(ready.size()));
 }
@@ -175,17 +214,14 @@ void Sync() {
         if (pos.y<hat.previous.y) {
             // The nearby visual-mesh cache does not contain every native floor.
             // Check the path before the render transform is committed.
-            const V3 up=F(q.Conjugated()*JPH::Vec3::sAxisY());
-            const float reach=std::abs(up.x)*hat.half.x+std::abs(up.y)*hat.half.y+std::abs(up.z)*hat.half.z;
+            const float reach=Support(hat,q,{0,1,0});
             const V3 from=hat.previous+V3{0,.025f,0};
             const V3 to=pos-V3{0,reach,0};
             MmlHit ground{};
             if (H->world_ray(M,&from.x,&to.x,MML_WORLD_STATIC,nullptr,&ground) &&
                 ground.normal[1]>.5f && (ground.flags>>24)!=31 && (ground.flags>>24)!=44) {
                 V3 n{ground.normal[0],ground.normal[1],ground.normal[2]};
-                const V3 local=F(q.Conjugated()*J(n));
-                const float support=std::abs(local.x)*hat.half.x+std::abs(local.y)*hat.half.y+
-                                    std::abs(local.z)*hat.half.z;
+                const float support=Support(hat,q,n);
                 const V3 surface{ground.pos[0],ground.pos[1],ground.pos[2]};
                 const float penetration=support-Dot(pos-surface,n);
                 if (penetration>.008f) {
@@ -242,17 +278,39 @@ void ApplyAirDrag(float dt) {
 
 bool Shot(V3 from,V3 axis,float range,V3 *point,uint32_t *body) {
     if (fallen.empty() || !jolt_world::Running()) return false;
-    JPH::RRayCast ray{J(jolt_world::ToJolt(from)),J(axis*range)};
-    JPH::RayCastResult hit;
-    hit.mFraction=1.f;
+    auto &bi=jolt_world::Bodies();
     bool found=false;
-    for (const auto &[_,hat]:fallen)
-        if (jolt_world::Bodies().GetTransformedShape(hat.body).CastRay(ray,hit)) {
+    for (const auto &[_,hat]:fallen) {
+        JPH::RVec3 p;
+        JPH::Quat q;
+        bi.GetPositionAndRotation(hat.body,p,q);
+        V3 delta=jolt_world::ToWorld(F(p))-from;
+        const V3 nearest=delta-axis*std::clamp(Dot(delta,axis),0.f,range);
+        const float radius=hat.scale*hat.mesh->radius;
+        if (Dot(nearest,nearest)>radius*radius) continue;
+        const V3 origin=F(q.Conjugated()*J(-delta))*(1.f/hat.scale);
+        const V3 dir=F(q.Conjugated()*J(axis))*(1.f/hat.scale);
+        const auto &mesh=*hat.mesh;
+        for (size_t i=0;i<mesh.indices.size();i+=3) {
+            const V3 a=mesh.vertices[mesh.indices[i]];
+            const V3 e=mesh.vertices[mesh.indices[i+1]]-a,f=mesh.vertices[mesh.indices[i+2]]-a;
+            const V3 perpendicular=Cross(dir,f);
+            const float det=Dot(e,perpendicular);
+            if (std::abs(det)<1e-8f) continue;
+            const V3 offset=origin-a;
+            const float u=Dot(offset,perpendicular)/det;
+            if (u<0 || u>1) continue;
+            const V3 across=Cross(offset,e);
+            const float v=Dot(dir,across)/det;
+            const float distance=Dot(f,across)/det;
+            if (v<0 || u+v>1 || distance<0 || distance>=range) continue;
+            range=distance;
             *body=hat.body.GetIndexAndSequenceNumber();
             found=true;
         }
+    }
     if (!found) return false;
-    *point=from+axis*(range*hit.mFraction);
+    *point=from+axis*range;
     return true;
 }
 
@@ -338,9 +396,9 @@ void Drop(Ragdoll &body, float dt) {
         auto f=std::find(body.Frames(),body.Frames()+19,neck);
         if (f==body.Frames()+19) return;
         auto idx=f-body.Frames();
-        const V3 position=origins[idx]+bones[idx].Apply(local);
+        V3 position=origins[idx]+bones[idx].Apply(local);
         if (!fit.tracking) {
-            const V3 size=ready.at(name);
+            const V3 size=ready.at(name).dimensions;
             const float scale=Len(M3::Raw(world).r[0]);
             fit.depth=.60f*size.y*scale;
             fit.leverage=size.y/std::max(.001f,std::min(size.x,size.z));
@@ -351,19 +409,35 @@ void Drop(Ragdoll &body, float dt) {
         }
         const Q rotation=QuatOf(M3::FromWorld(world)*nativeNeck.T()*bones[idx]);
         const float scale = Len(M3::Raw(world).r[0]);
-        void *prop = H->prop_create(M,(name+"_lined").c_str(),nullptr,&position.x,&rotation.w,scale);
+        auto &model=ready.at(name);
+        if (!model.hull) {
+            JPH::Array<JPH::Vec3> points;
+            points.reserve(model.mesh.vertices.size());
+            for (V3 vertex:model.mesh.vertices) points.push_back(J(vertex));
+            auto cooked=JPH::ConvexHullShapeSettings(points,.002f).Create();
+            if (cooked.IsValid()) model.hull=cooked.Get();
+        }
+        if (!model.hull) return;
+        JPH::RefConst<JPH::Shape> shape=model.hull;
+        if (scale!=1.f) {
+            auto scaled=shape->ScaleShape(JPH::Vec3::sReplicate(scale));
+            if (!scaled.IsValid()) return;
+            shape=scaled.Get();
+        }
+        JPH::Quat q(-rotation.x,-rotation.y,-rotation.z,rotation.w);
+        // Resolve overlap only within the hat's own bounds. If there is no
+        // room yet, keep it worn until the moving head opens a clear pose.
+        if (!ClearRelease(shape,q,model.mesh.radius*scale,position)) {
+            body.headwearChecked=false;
+            return;
+        }
+        void *prop=H->prop_create(M,(name+"_lined").c_str(),nullptr,&position.x,&rotation.w,scale);
         if (!prop) return;
-        V3 velocity=fit.hatMotion;
         if (!H->frame_watch(M,frame,gone,nullptr)) {
             H->prop_remove(M,prop);
             return;
         }
-        V3 bounds=ready.at(name)*(.5f*scale);
-        V3 half{std::max(.025f,bounds.x*.70f),std::max(.018f,bounds.y*.65f),std::max(.025f,bounds.z*.70f)};
-        // The central volume carries mass. Leave the soft brim out of the
-        // solid shape so a release from the scalp starts with little overlap.
-        auto shape=new JPH::BoxShape(J(half),.008f);
-        JPH::Quat q(-rotation.x,-rotation.y,-rotation.z,rotation.w);
+        const V3 velocity=fit.hatMotion;
         JPH::BodyCreationSettings settings(shape,J(jolt_world::ToJolt(position)),q,
                                            JPH::EMotionType::Dynamic,jolt_world::kDynamic);
         settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
@@ -381,7 +455,7 @@ void Drop(Ragdoll &body, float dt) {
             return;
         }
         fallen.emplace(frame,FallenHat{prop,body.pedestrian ? body.actor : nullptr,body.model,
-                                       body.pedestrian && !body.puppet,id,position,half});
+                                       body.pedestrian && !body.puppet,id,position,&model.mesh,scale});
         show(frame,false);
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,

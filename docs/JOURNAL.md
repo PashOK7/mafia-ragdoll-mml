@@ -795,3 +795,11 @@ The owner's game hot-loaded 0.1.22 at 11:58:57.912, generation 6. DLL SHA-256 `6
 Loose hats now contribute their own local scenery focus while moving. A native static collision query also checks the descending path and uses the rotated core's extent along the support normal. If the Jolt pose penetrates that support, the hat is moved out along the normal and its inward velocity is removed. Water faces and steep sides do not count as floor support. Normal hat-body contacts stay in Jolt.
 
 The windowed labs logged native support corrections up to 0.052 m. Five wearer tests on each build checked the final hat height against the native ground. The shot and walking checks passed, and the truck hats moved a further 2.93 m on 1.0 and 2.91 m on 1.2 after release. The owner's specific through-ground occurrence had no trajectory capture. Installed DLL SHA-256 `d0aabae638cc1fb7fbbc03e5daeab2d1230cd717822922bc43c4ececa936dc51`.
+
+## 2026-11-21 — Match loose headwear to the rendered mesh (0.1.24)
+
+The converter retains the same model-space triangles it writes into the detached visual. Bullet stretches test those triangles on both sides, including the brim and lining. The rigid body uses a cached convex hull of the same vertices. Native floor support measures the furthest rendered vertex along the floor normal. The convex hull still spans the hollow interior.
+
+At release a narrow-phase overlap query resolves penetrations against adjacent geometry and the wearer. The correction must fit within the radius of the hat. If the new pose is still obstructed, the visual stays attached until it can transfer cleanly. This removes forced solver ejection at spawn. It does not prove all angular movement beside an already detached body has been eliminated.
+
+The two final lab runs confirmed bullet impulses on outer visible triangles in the log. Both verified five low points per resting hat against the native floor, along with the walking and truck checks. The tested allowance for resting mesh penetration was 25 mm. Owner installation SHA-256 `7466815908e2f95a225aab3693a8034be3a881296cc00e89d46933fe1e206ab7`.

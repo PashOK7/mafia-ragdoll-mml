@@ -1,10 +1,11 @@
 """Check per-wearer visibility and falling props in a running freeride lab."""
 import math
 import struct
+from pathlib import Path
 import sys
 
 from check_transport_occupants import Game
-from check_scalp_meshes import check as check_scalps
+from check_scalp_meshes import check as check_scalps, skin_lods
 
 
 def check_truck_carry(game):
@@ -59,10 +60,32 @@ def check(game):
     def hats():
         return {p['prop']: p for p in game.call('props.list')['props'] if p['model'].startswith('rdhat_')}
 
+    def mesh_world(prop):
+        pos=hats()[prop]['pos']
+        frame=game.call('frame',addr=prop)
+        model=hats()[prop]['model'].rsplit('.',1)[0]
+        files=game.call('files.list',mod='ragdoll')['files']
+        path=next(Path(f['path']) for f in files if f['name']=='models\\'+model+'.4ds')
+        vertices,faces=next(skin_lods(path.read_bytes(),lined_prop=True))
+        points=[[pos[j]+sum(v[i]*frame['axes'][i][j] for i in range(3)) for j in range(3)] for v in vertices]
+        return model,points,faces
+
     def above_ground(prop, start):
         pos=hats()[prop]['pos']
         height=game.call('world.ground',at=[pos[0],max(start[1],pos[1])+.3,pos[2]])['height']
         assert -.045<pos[1]-height<.35, (pos,height)
+        model,points,_=mesh_world(prop)
+        lowest=sorted(points,key=lambda v:v[1])
+        checked=set()
+        for x,y,z in lowest:
+            column=round(x,2),round(z,2)
+            if column in checked:
+                continue
+            checked.add(column)
+            support=game.call('world.ground',at=[x,y+.18,z])['height']
+            assert y>=support-.025,(model,[x,y,z],support)
+            if len(checked)==5:
+                break
 
     def spawn(name, offset):
         marker = '.rdhat_' + name.lower()
@@ -87,21 +110,33 @@ def check(game):
         shooter=int(game.call('game')['player'],16)
         def bits(value):
             return struct.unpack('<I',struct.pack('<f',value))[0]
-        # Try the open side of the hat. A nearby corpse can occlude one side.
-        for x,z in ((0,1),(0,-1),(1,0),(-1,0)):
-            pos=hats()[prop]['pos']
-            origin=[pos[0]-.45*x,pos[1]+.018,pos[2]-.45*z]
+        _,points,faces=mesh_world(prop)
+        targets=[]
+        for i,j,k in faces:
+            a,b,c=points[i],points[j],points[k]
+            area=(b[0]-a[0])*(c[2]-a[2])-(c[0]-a[0])*(b[2]-a[2])
+            if abs(area)<.00004:
+                continue
+            centre=[(a[d]+b[d]+c[d])/3 for d in range(3)]
+            targets.append(centre)
+        targets.sort(key=lambda v:math.hypot(v[0]-pos[0],v[2]-pos[2]),reverse=True)
+        def latest_hit():
+            return next((v for v in reversed(game.tool('log_tail',lines=150).splitlines())
+                         if 'headwear bullet impulse' in v),None)
+        before=latest_hit()
+        for x,y,z in targets[:12]:
+            origin=[x,y+.20,z]
             game.call('native.call',at='0x5A84A0' if game.build=='1.2' else '0x5E3DF0',
                       conv='thiscall',this=engine,ret='uint',
-                      args=[shooter,*map(bits,origin),*map(bits,[160*x,-6.4,160*z]),bits(28),0,0,1])
-            game.sleep(650)
+                      args=[shooter,*map(bits,origin),*map(bits,[0,-160,0]),bits(28),0,0,1])
+            game.sleep(200)
             travelled=math.dist(pos,hats()[prop]['pos'])
             assert travelled<1.4, travelled
-            if travelled>.005:
+            if latest_hit()!=before:
                 break
         else:
-            raise AssertionError(('no measurable hat response',pos))
-        print(game.build,'hat displaced by bullet',round(travelled,3),'m')
+            raise AssertionError(('no hit on visible hat triangles',pos))
+        print(game.build,'shot confirmed on outer hat mesh, displacement',round(travelled,3),'m')
 
     def walk_into_hat(prop):
         car=game.player()['vehicle']['actor']

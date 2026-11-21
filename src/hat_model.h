@@ -173,7 +173,12 @@ inline void lineProp(std::vector<Vertex> &vertices, std::vector<Group> &groups, 
     if (lining.index.size()/3>65535) throw Reader::Invalid{};
     groups.push_back(std::move(lining));
 }
-inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre, bool worn, uint16_t lining=0) {
+struct PropMesh {
+    std::vector<V3> vertices;
+    std::vector<uint16_t> indices;
+    float radius=0;
+};
+inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre, bool worn, uint16_t lining=0, PropMesh *collision=nullptr) {
     Bytes mesh;
     put(mesh,uint16_t(0));
     const size_t count=worn ? lods.size() : 1;
@@ -209,6 +214,15 @@ inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre, bool wo
             if (!(Len(hi-lo)<1.2f && Len(hi-lo)>.08f)) throw Reader::Invalid{};
         }
         if (!worn) lineProp(vertices,groups,centre,lining);
+        if (collision) {
+            for (const auto &v:vertices) {
+                V3 p=v.pos-centre;
+                collision->vertices.push_back(p);
+                collision->radius=std::max(collision->radius,Len(p));
+            }
+            for (const auto &group:groups)
+                collision->indices.insert(collision->indices.end(),group.index.begin(),group.index.end());
+        }
         if (vertices.empty()) {
             // Native objects keep a valid draw range even at a distance where
             // the original skin omits the hat. This LOD has zero surface area.
@@ -231,7 +245,7 @@ inline void node(Bytes &out, const Bytes &mesh, const std::string &name, uint16_
     put(out,pos); put(out,V3{1,1,1}); put(out,Q{1,0,0,0}); put(out,uint8_t(9));
     str(out,name); str(out,""); out.insert(out.end(),mesh.begin(),mesh.end());
 }
-inline bool split(const Bytes &source, const std::string &marker, Bytes &person, Bytes &prop,V3 &dimensions) {
+inline bool split(const Bytes &source, const std::string &marker, Bytes &person, Bytes &prop,V3 &dimensions,PropMesh &collision) {
     try {
         Reader r{source};
         if (r.get<uint32_t>()!=0x00534434 || r.get<uint16_t>()!=29) return false;
@@ -287,7 +301,7 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
         V3 centre{};
         if (hats.size()>65535) return false;
         const auto lining=uint16_t(hats.size());
-        Bytes mesh=object(hatLods,joint,centre,false,lining);
+        Bytes mesh=object(hatLods,joint,centre,false,lining,&collision);
         person.assign(source.begin(),source.begin()+countAt);
         prop=person;
         memcpy(prop.data()+14,&lining,sizeof lining); // 4DS material count
