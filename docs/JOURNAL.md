@@ -705,3 +705,11 @@ Installed DLL SHA-256 `6372f34295b9894261df930c34daf8bf4a8b9e7f77e70e8a26f702dee
 ## 2026-11-21 — Bullet impact (0.1.13)
 
 The default impulse per damage point rose from 1 to 2 N s. The per-shot cap rose from 120 to 240 N s and the local speed allowance from 8 to 16 m/s. The native hit handler distinguishes bullets from other blows, including when carrying recent hits into a new ragdoll. Traffic and railway occupants use the same shot settings. A native projectile to each palm in both windowed labs gave a measured local forearm velocity change of 8.0 m/s on 0.1.12 and 16.0 m/s on 0.1.13. All four shots hit the matching forearm on each build pair. The owner game loaded 0.1.13 as generation 4 in the running process.
+
+## 2026-11-21 — Shots at exposed railway occupants (0.1.14)
+
+On 0.1.13 a real shot through a driver's head hit a second target placed 0.65 m behind it in both builds. The rail-body test skipped the entire stretch whenever the native moving-object ray returned a primitive. At the existing TickShoot hook (1.2 0x5A935C, 1.0 0x5E4CAC), both executables pass the native hit position at ESP+B0. Clip the rail-body test to that point and the static impact, then terminate a body-first shot through the game's range check. The frame caches the endpoint at ESP+BC and the squared range at ESP+14C. This prevents a second physical hit farther down the same shot.
+
+In both windowed builds, `tests/check_rail_exit.py --driver-window` checked both target orders. Only the nearer target received the impulse. A separate shot from the street towards the tram struck the driver's head 1.53–1.54 m from the carriage centreline. The ejection test also hit a passenger's head on the street after it separated from the tram. The transport suite confirmed that the carriage floor still blocks shots at a driver, a tram passenger and a rear train passenger. Its first run in the small city stopped at a traffic driver's drawn-neck tolerance before testing shots. The full run in the standard city passed on both builds.
+
+The owner game hot-loaded 0.1.14 as generation 5 in PID 6896. DLL SHA-256 is `91db8e0a989f62caea2ca188bd467d04457de6f8922702b3b7dee15df79c668a`.

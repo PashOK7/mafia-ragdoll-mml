@@ -931,9 +931,6 @@ struct Occupant {
     int slot{}, carriage{};
     bool rail{}, driver{}, sampleDraw{};
     float drawnNeckError = -1;
-    void *lastShooter{};
-    V3 lastShotOrigin{}, lastShotEnd{};
-    bool hasShotSegment = false;
     std::unique_ptr<Ragdoll> body;
 };
 std::vector<Occupant> g_occupants;
@@ -1133,11 +1130,10 @@ void ApplyTransportShot(const TransportShot &shot, const V3 &from, const V3 &dir
     ++g_corpseHits;
 }
 
-// TickShoot's collision query can return an empty stretch through a dead rider:
-// the engine has no actor there. Test only that travelled stretch, up to the
-// precomputed static impact. The native Hit virtual handles vehicle contacts.
+// A dead rider has no native actor. Compare the body with the first native
+// moving hit and the precomputed static hit on this stretch of the shot.
 void RailBulletStretch(MmlMidContext *ctx, void *) {
-    if (ctx->eax || g_occupants.empty() || !g_cfg.enabled || !g_cfg.bullets) return;
+    if (g_occupants.empty() || !g_cfg.enabled || !g_cfg.bullets) return;
     auto trace = [&] {
         void *stack = reinterpret_cast<void *>(ctx->esp);
         auto *gameObject = reinterpret_cast<void *>(ctx->ebp);
@@ -1151,11 +1147,14 @@ void RailBulletStretch(MmlMidContext *ctx, void *) {
         if (!(length > 0.0001f && damage > 0)) return;
         const V3 axis = delta * (1.f / length);
         float limit = length;
+        // collRayTest's third argument is its output hit position (ESP+B0 on
+        // return at 5A935C / 5E4CAC). It is valid only for a non-null primitive.
+        if (ctx->eax)
+            limit = std::min(limit, Dot(game::at<V3>(stack, 0xB0) - from, axis));
         if (game::at<uint8_t>(shot, game::kShotHits))
             limit = std::min(limit, Dot(game::at<V3>(shot, game::kShotHitPos) - from, axis));
         if (!(limit > 0)) return;
         const V3 origin = game::at<V3>(shot, game::kShotFrom);
-        void *shooter = game::at<void *>(shot, game::kShotShooter);
         Occupant *target = nullptr;
         int part = -1;
         V3 point{};
@@ -1174,16 +1173,20 @@ void RailBulletStretch(MmlMidContext *ctx, void *) {
             part = segment;
         }
         if (!target) return;
-        const bool continuing = target->hasShotSegment && target->lastShooter == shooter &&
-            Len(target->lastShotOrigin - origin) < .0001f && Len(target->lastShotEnd - from) < .0001f;
-        target->lastShotOrigin = origin;
-        target->lastShotEnd = from + delta;
-        target->lastShooter = shooter;
-        target->hasShotSegment = true;
-        if (continuing) return;
         const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
         g_lastBullet = {target->model, point, part, part, dv};
         ++g_corpseHits;
+        // Finish this shot at the body using TickShoot's ordinary end-of-range
+        // path. Both builds cache the endpoint and squared range on the stack.
+        // A wall or another person farther down the ray must not receive it too.
+        const V3 way = point - origin;
+        game::at<V3>(shot, game::kShotWay) = way;
+        game::at<V3>(shot, game::kShotNow) = point;
+        game::at<void *>(shot, game::kShotPrim) = nullptr;
+        game::at<uint8_t>(shot, game::kShotHits) = 0;
+        game::at<V3>(stack, 0xBC) = point;
+        game::at<float>(stack, 0x14C) = Dot(way, way);
+        ctx->eax = 0;
     };
     Guarded(trace);
 }

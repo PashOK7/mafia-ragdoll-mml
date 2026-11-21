@@ -3,15 +3,17 @@
 Run against a windowed city freeride lab with ragdoll loaded. Moves the lab
 player near a tram and places one passenger at the edge before the native kill.
 """
+import argparse
 import math
 import struct
 import sys
 import time
 
 from check_transport_occupants import Game
+from test_hits import fire_at
 
 
-def check(game):
+def check(game, driver_window=False):
     state = game.call('game')
     v12 = state['build'] == '1.2'
     assert state['mission_state'] == 'running' and game.call('ragdoll.state')['enabled']
@@ -56,7 +58,7 @@ def check(game):
     spawn = street['pos']
     game.call('world.teleport', to=[spawn[0], spawn[1] + .35, spawn[2]])
     time.sleep(.6)
-    person = riders[0]
+    person = carrier + 0x2B0 if driver_window else riders[0]
     model = word(person + 4)
     engine = word(int(state['mission'], 16) + 0x24)
     shooter = int(state['player'], 16)
@@ -65,6 +67,13 @@ def check(game):
         return next(o for o in game.call('ragdoll.state')['occupants'] if int(o['model'], 16) == model)
 
     scale = game.call('state.time')['scale']
+    if driver_window:
+        blocker = game.spawn_human('civil15', [spawn[0]+4, spawn[1]+.2, spawn[2]])
+        game.call('human.hit', actor=blocker, type=0, damage=1000, dir=[0,0,0])
+        deadline = time.monotonic()+18
+        while not any(b['actor'] == blocker and b['sleeping'] for b in game.call('ragdoll.state')['ragdolls']):
+            assert time.monotonic() < deadline, 'control target did not settle'
+            time.sleep(.2)
     try:
         game.call('state.time', scale=0)
         w = matrix(frame)
@@ -79,6 +88,49 @@ def check(game):
         native(word(vtable + 0x18), 'stdcall', [model])
         native(0x484230 if v12 else 0x4D5160, 'thiscall', [carrier], person)
         assert rider()['in_cabin']
+        if driver_window:
+            # A head outside the window and an independent registered corpse capsule on the same ray.
+            # Reverse their order to check that the front target alone receives each shot.
+            direction = list(w[8:11])
+            def window_shot(head, axis, distance):
+                start = [p-distance*d for p,d in zip(head,axis)]
+                native(0x5A84A0 if v12 else 0x5E3DF0, 'thiscall',
+                       [shooter, *({'float': v} for v in start),
+                        *({'float': d*80} for d in axis), {'float': 5}, 0, 0, 1], engine)
+                game.call('state.time', scale=.06)
+                time.sleep(.16)
+                game.call('state.time', scale=0)
+                return game.call('ragdoll.state')
+
+            try:
+                for offset in (.65, -.65):
+                    head = rider()['head']
+                    centre = [p+offset*d for p,d in zip(head, direction)]
+                    game.call('hits.shape', actor=blocker, capsules=[[*centre, *centre, .16]])
+                    before = game.call('ragdoll.state')['corpse_hits']
+                    result = window_shot(head, direction, 1.7)
+                    hit = result['last_bullet']
+                    expected = model if offset > 0 else int(blocker,16)
+                    print(game.build, offset, 'expected', hex(expected), 'actual', hit, flush=True)
+                    assert result['corpse_hits'] == before+1 and hit and int(hit['actor'],16) == expected, hit
+                    if offset > 0:
+                        assert hit['part'] == 4 and hit['local_dv'] > 0, hit
+            finally:
+                game.call('hits.shape', actor=blocker, clear=True)
+                game.call('world.remove', actor=blocker)
+            # Fire from the street towards the tram with the carriage behind the head.
+            head = rider()['head']
+            w = matrix(frame)
+            side = sum((p-c)*d for p,c,d in zip(head, w[12:15], w[:3]))
+            assert side > 1.25, ('head is not at the window', side)
+            before = game.call('ragdoll.state')['corpse_hits']
+            axis = [-w[i] - .35*w[i+4] for i in range(3)]
+            result = window_shot(head, [v/math.hypot(*axis) for v in axis], 2)
+            hit = result['last_bullet']
+            assert result['corpse_hits'] == before+1 and hit and int(hit['actor'],16) == model, hit
+            assert hit['part'] == 4 and hit['local_dv'] > 0, hit
+            print(game.build, 'street to driver window, head offset', round(side,3), 'm')
+            return
         game.call('state.time', scale=.22)
         hits = 0
         for _ in range(30):
@@ -107,15 +159,28 @@ def check(game):
             clearance = y - floor['height']
             assert .02 < clearance < 1.3, (body, floor)
         print(game.build, car['model'], hits, 'hits, pelvis above street', round(clearance, 3), 'm')
+        head = body['head']
+        outward = [p-q for p,q in zip(head,body['pelvis'])]
+        outward[1] = max(.25, outward[1])
+        direction = [-v/math.hypot(*outward) for v in outward]
+        before = game.call('ragdoll.state')['corpse_hits']
+        fire_at(game, head, direction, distance=.55)
+        result = game.call('ragdoll.state')
+        hit = result['last_bullet']
+        assert result['corpse_hits'] == before+1 and hit and int(hit['actor'],16) == model, result['last_bullet']
+        assert hit['part'] == 4 and hit['local_dv'] > 0, hit
+        print(game.build, 'street head hit', hit['local_dv'], 'm/s')
     finally:
         game.call('state.time', scale=scale)
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] not in (['1.0'], ['1.2']):
-        raise SystemExit('Pass one configured lab build (1.0 or 1.2).')
-    lab = Game(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('build', choices=['1.0','1.2'])
+    parser.add_argument('--driver-window', action='store_true')
+    args = parser.parse_args()
+    lab = Game(args.build)
     try:
-        check(lab)
+        check(lab, args.driver_window)
     finally:
         lab.close()

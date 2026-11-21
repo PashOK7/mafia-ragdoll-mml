@@ -32,7 +32,7 @@ into the folder containing Game.exe. [Download the latest release](https://githu
   shot body moves where it was struck. Cars driven over or into bodies are slowed by them.
 - **Trams and trains.** Drivers and passengers fall against the visible benches, walls and floor of their own
   carriage, including the rear train car. Bullets push the part of the body they strike, both on the fatal shot
-  and after the body has settled.
+  and after the body has settled. You can hit exposed body parts from the street, including after a rider falls out.
 - **In cars.** A traffic driver becomes a ragdoll as soon as the game registers a fatal hit. Someone killed in his seat slumps there and stays in the cabin while the car drives, turns, brakes or
   crashes or moves with a mission script. When Tommy pulls a dead driver out, he reaches with both hands for the
   ribs, waist, hips or upper thigh, depending on what he can reach in the driver's current pose. He starts pulling
