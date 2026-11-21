@@ -89,6 +89,8 @@ struct Dog {
     bool captured=false, renderPose=false, releaseMotors=false;
     unsigned seen=0;
     float age=0, poseError=0;
+    unsigned corpseHits=0;
+    int lastHitPart=-1;
 };
 std::unordered_map<void *, Dog> tracked;
 std::unordered_map<std::string,std::array<Transform,BoneCount>> restByModel;
@@ -255,6 +257,18 @@ void Joint(JPH::RagdollSettings::Part &part,int index,V3 anchor,
             {child.r[1],child.r[0]},spec.flex,spec.side,-spec.twist,spec.twist,4.f);
     }
 }
+void Push(Dog &d,int part,V3 point,V3 impulse) {
+    const auto id=d.body->GetBodyID(part);
+    auto &physics=jolt_world::Bodies();
+    const V3 centre=Vec(physics.GetCenterOfMassPosition(id));
+    const V3 offset=jolt_world::ToJolt(point)-centre;
+    // Native hit volumes can extend beyond the animated mesh.
+    const V3 contact=centre+Norm(offset)*std::min(Len(offset),.18f);
+    physics.AddImpulse(id,Vec(impulse*.64f),Vec(contact));
+    physics.AddImpulse(d.body->GetBodyID(0),Vec(impulse*.16f));
+    physics.AddImpulse(d.body->GetBodyID(1),Vec(impulse*.20f));
+}
+
 bool Add(Dog &d) {
     JPH::Ref<JPH::Skeleton> skeleton=new JPH::Skeleton;
     JPH::Ref<JPH::RagdollSettings> settings=new JPH::RagdollSettings;
@@ -310,15 +324,8 @@ bool Add(Dog &d) {
         for (int i=1;i<PartCount;++i)
             if (Len(points[parts[i].frame].pos-d.shot.pos)<Len(points[parts[closest].frame].pos-d.shot.pos)) closest=i;
         const float strength=std::clamp(.053f*d.shot.damage,.5f,5.8f);
-        const auto id=d.body->GetBodyID(closest);
-        auto &physics=jolt_world::Bodies();
-        const V3 centre=Vec(physics.GetCenterOfMassPosition(id));
-        const V3 offset=jolt_world::ToJolt(d.shot.pos)-centre;
-        // Native hit volumes can extend well beyond the animated mesh.
-        const V3 point=centre+Norm(offset)*std::min(Len(offset),.18f);
-        physics.AddImpulse(id,Vec(d.shot.dir*(strength*.64f)),Vec(point));
-        physics.AddImpulse(d.body->GetBodyID(0),Vec(d.shot.dir*(strength*.16f)));
-        physics.AddImpulse(d.body->GetBodyID(1),Vec(d.shot.dir*(strength*.20f)));
+        Push(d,closest,d.shot.pos,d.shot.dir*strength);
+        d.shot={};
     }
     return true;
 }
@@ -412,6 +419,8 @@ void PrepareStep(float dt,const V3 &player) {
         if (!Dead(actor)) {
             dog.shot.remaining-=dt;
             if (dog.body) Remove(dog);
+            dog.corpseHits=0;
+            dog.lastHitPart=-1;
             Pose current=Capture(dog);
             TrackMotion(dog,current,dt);
             dog.pose=std::move(current);
@@ -451,6 +460,40 @@ void Bullet(const MmlBulletHit &hit) {
     if (it==tracked.end() || it->second.body) return;
     it->second.shot={{hit.pos.x,hit.pos.y,hit.pos.z},{hit.dir.x,hit.dir.y,hit.dir.z},hit.damage,.25f};
 }
+std::size_t AppendShotExclusions(void **objects,std::size_t count,std::size_t capacity) {
+    // C_dog::Death removes these two volumes at the end of the native death clip.
+    constexpr int nativeVolumes[]={0x234,0x238};
+    for (const auto &[actor,dog]:tracked) {
+        if (!dog.body || !Dead(actor)) continue;
+        for (int offset:nativeVolumes) {
+            if (count==capacity) return count;
+            void *volume=game::at<void *>(actor,offset);
+            if (volume && std::find(objects,objects+count,volume)==objects+count)
+                objects[count++]=volume;
+        }
+    }
+    return count;
+}
+bool TraceShot(V3 from,V3 axis,float limit,ShotHit &hit) {
+    for (const auto &[actor,dog]:tracked) {
+        if (!dog.body || !Dead(actor)) continue;
+        const V3 to=Centre(dog)-from;
+        if (Len(to-axis*std::clamp(Dot(to,axis),0.f,limit))>2.f) continue;
+        V3 point{};
+        const int part=articulation::ShotPart(*dog.body,from,axis*limit,&point);
+        if (part<0) continue;
+        limit=Len(point-from);
+        hit={actor,part,point};
+        if (!(limit>0.f)) break;
+    }
+    return hit.actor!=nullptr;
+}
+void HitBody(const ShotHit &hit,V3 direction,float strength) {
+    auto &dog=tracked.at(hit.actor);
+    if (strength>0.f) Push(dog,hit.part,hit.point,direction*std::min(strength,5.8f));
+    ++dog.corpseHits;
+    dog.lastHitPart=hit.part;
+}
 void DrawPose() {
     for (auto &[actor,dog]:tracked)
         if (dog.body && Dead(actor) && game::at<void *>(actor,game::kActorFrame)==dog.model) Apply(dog);
@@ -480,9 +523,10 @@ std::string State() {
             for (int i=0;i<PartCount;++i)
                 maxSpeed=std::max(maxSpeed,physics.GetLinearVelocity(dog.body->GetBodyID(i)).Length());
         }
-        result+=Fmt("{\"actor\":\"0x%08X\",\"bound\":%s,\"active\":%s,\"sleeping\":%s,\"parts\":%d,\"age\":%.3f,\"centre\":[%.4f,%.4f,%.4f],\"pose_error\":%.5f,\"max_speed\":%.4f}",
+        result+=Fmt("{\"actor\":\"0x%08X\",\"bound\":%s,\"active\":%s,\"sleeping\":%s,\"parts\":%d,\"age\":%.3f,\"centre\":[%.4f,%.4f,%.4f],\"pose_error\":%.5f,\"max_speed\":%.4f,\"corpse_hits\":%u,\"last_hit_part\":\"%s\"}",
                     (unsigned)(uintptr_t)actor,dog.frames[0]?"true":"false",dog.body?"true":"false",sleeping?"true":"false",
-                    dog.body?PartCount:0,dog.age,p.x,p.y,p.z,dog.poseError,maxSpeed);
+                    dog.body?PartCount:0,dog.age,p.x,p.y,p.z,dog.poseError,maxSpeed,
+                    dog.corpseHits,dog.lastHitPart<0?"":parts[dog.lastHitPart].name);
     }
     return result+"]";
 }

@@ -931,21 +931,7 @@ float GripDistance(const Ragdoll *r, V3 *contact) {
 
 int ShotPart(const Ragdoll *r, const V3 &from, const V3 &delta, V3 *point) {
     auto it = g_entries.find(r);
-    if (it == g_entries.end()) return -1;
-    const JPH::RRayCast ray{J(jolt_world::ToJolt(from)), J(delta)};
-    const auto &bi = jolt_world::Bodies();
-    float closest = 1;
-    int part = -1;
-    for (int i = 0; i < BODIES; ++i) {
-        JPH::RayCastResult hit;
-        hit.mFraction = closest;
-        if (bi.GetTransformedShape(it->second.ragdoll->GetBodyID(i)).CastRay(ray, hit)) {
-            closest = hit.mFraction;
-            part = i;
-        }
-    }
-    if (part >= 0) *point = from + delta * closest;
-    return part;
+    return it == g_entries.end() ? -1 : articulation::ShotPart(*it->second.ragdoll,from,delta,point);
 }
 
 bool CabinBlocksShot(const void *key, const V3 &from, const V3 &point, bool requireCabin) {

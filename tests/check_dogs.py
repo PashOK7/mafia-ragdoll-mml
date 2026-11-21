@@ -63,6 +63,44 @@ def check(game):
             time.sleep(.1)
         raise AssertionError(('Dog did not settle', tracked()))
 
+    def check_corpse_shot(dog, engine, player):
+        # Observe TickShoot's static impact branch. A miss must reach the ground.
+        # A shot resolved by a dog segment must stop before that same ground.
+        tap_at = {'1.0': '5E5975', '1.2': '5AA025'}[game.build]
+        tap = game.tool('tap', cmd=tap_at + ' n=0').split()[1].rstrip(':')
+
+        def ground_impacts():
+            return int(game.tool('tap', cmd='show ' + tap).split(': ', 1)[1].split()[0])
+
+        def fire(x, y, z):
+            native(shoot_at, engine, player, *[{'float': f} for f in (x, y, z, 60, -160, 0, 100)], 0, 0, 1)
+
+        try:
+            x, y, z = dog['centre']
+            assert not dog['corpse_hits'] and dog['sleeping'], dog
+            fire(x - .375, y + 1, z + 1.5)
+            time.sleep(.25)
+            assert ground_impacts() == 1 and tracked()['corpse_hits'] == 0
+            origin = [x - .375, y + 1, z]
+            static = game.call('world.ray', **{'from': origin, 'to': [x + .75, y - 2, z], 'what': 'static'})
+            moving = game.call('world.ray', **{'from': origin, 'to': [x, y, z], 'what': 'moving'})
+            assert static['hit'] and static['pos'][1] < y, static
+            assert not moving['hit'] or moving.get('actor') == dog['actor'], moving
+            fire(*origin)
+            deadline = time.monotonic() + 1
+            result = tracked()
+            while result['corpse_hits'] == 0 and time.monotonic() < deadline:
+                time.sleep(.02)
+                result = tracked()
+            assert result['corpse_hits'] == 1 and result['last_hit_part'], result
+            assert not result['sleeping'] and result['max_speed'] > .05, result
+            time.sleep(.25)
+            assert ground_impacts() == 1 and tracked()['corpse_hits'] == 1, tracked()
+            print(game.build, 'settled corpse intercepted one shot and woke', result,
+                  'native dog volume still in the world' if moving['hit'] else 'native dog volume absent here')
+        finally:
+            game.tool('tap', cmd='off ' + tap)
+
     name = f'ragdoll_pes_{os.getpid()}'
     game.tool('restore', save=name)
     try:
@@ -95,7 +133,9 @@ def check(game):
         hits = game.call('events.since', seq=seq, types='BULLET_HIT')['events']
         assert any(hit['data'].get('struck') == actor for hit in hits), hits
         print(game.build, 'shot', result)
-        print(game.build, 'settled after shot', settled())
+        result = settled()
+        print(game.build, 'settled after shot', result)
+        check_corpse_shot(result, engine, player)
 
         game.tool('restore', load=name)
         dog = tracked()

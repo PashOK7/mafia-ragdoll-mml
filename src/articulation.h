@@ -1,9 +1,13 @@
 #pragma once
 #include <Jolt/Jolt.h>
+#include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/TransformedShape.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
 #include <Jolt/Physics/Ragdoll/Ragdoll.h>
-#include "mathx.h"
+#include "jolt_world.h"
 
 namespace articulation {
 inline JPH::Vec3 Vector(V3 v) { return {v.x,v.y,v.z}; }
@@ -47,5 +51,18 @@ inline void Prepare(JPH::RagdollSettings &rig,const JPH::Mat44 *pose,float toler
     rig.DisableParentChildCollisions(pose,tolerance);
     rig.CalculateConstraintPriorities();
     rig.CalculateBodyIndexToConstraintIndex();
+}
+
+inline int ShotPart(const JPH::Ragdoll &rig,V3 from,V3 delta,V3 *point) {
+    const JPH::RRayCast ray{Vector(jolt_world::ToJolt(from)),Vector(delta)};
+    const auto &bodies=jolt_world::Bodies();
+    JPH::RayCastResult hit;
+    hit.mFraction=1.f;
+    int part=-1;
+    for (int i=0;i<(int)rig.GetBodyCount();++i) {
+        if (bodies.GetTransformedShape(rig.GetBodyID(i)).CastRay(ray,hit)) part=i;
+    }
+    if (part>=0) *point=from+delta*hit.mFraction;
+    return part;
 }
 }

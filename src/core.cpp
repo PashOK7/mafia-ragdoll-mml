@@ -1163,9 +1163,48 @@ void ApplyTransportShot(const TransportShot &shot, const V3 &from, const V3 &dir
     ++g_corpseHits;
 }
 
-// A dead rider has no native actor. Compare the body with the first native
-// moving hit and the precomputed static hit on this stretch of the shot.
-void RailBulletStretch(MmlMidContext *ctx, void *) {
+constexpr int kShotExcludeArray=0x2B8, kShotExcludeCount=0x2BC, kShotExcludeMode=0x2B0;
+struct ShotExclusions {
+    void **original=nullptr;
+    int count=0,mode=0;
+    bool active=false;
+    std::array<void *,256> objects{};
+} g_shotExclusions;
+
+void SetShotExclusions(void **objects,int count,int mode) {
+    using Set=void (__thiscall *)(void *,void **,int,int);
+    reinterpret_cast<Set>(game::Exe().collExclude)(game::Collision(),objects,count,mode);
+}
+
+void BeforePhysicsBulletStretch(MmlMidContext *, void *) {
+    if (!g_cfg.enabled || !g_cfg.bullets) return;
+    auto exclude=[] {
+        void *coll=game::Collision();
+        auto &saved=g_shotExclusions;
+        if (saved.active) return;
+        const int count=game::at<int>(coll,kShotExcludeCount);
+        auto **original=game::at<void **>(coll,kShotExcludeArray);
+        if (count<0 || count>=(int)saved.objects.size() || (count && !original)) return;
+        if (count) std::copy_n(original,count,saved.objects.begin());
+        const auto total=dogs::AppendShotExclusions(saved.objects.data(),count,saved.objects.size());
+        if (total==(unsigned)count) return;
+        saved.original=original;
+        saved.count=count;
+        saved.mode=game::at<int>(coll,kShotExcludeMode);
+        SetShotExclusions(saved.objects.data(),(int)total,saved.mode);
+        saved.active=true;
+    };
+    Guarded(exclude);
+}
+
+// Compare physical bodies with the first native moving hit and the static
+// impact computed when the shot was created.
+void PhysicsBulletStretch(MmlMidContext *ctx, void *) {
+    if (g_shotExclusions.active) {
+        auto &saved=g_shotExclusions;
+        saved.active=false;
+        SetShotExclusions(saved.original,saved.count,saved.mode);
+    }
     if (!g_cfg.enabled || !g_cfg.bullets) return;
     auto trace = [&] {
         void *stack = reinterpret_cast<void *>(ctx->esp);
@@ -1205,22 +1244,28 @@ void RailBulletStretch(MmlMidContext *ctx, void *) {
             point = contact;
             part = segment;
         }
+        const auto humanInFront = [&](V3 point) {
+            if (Dot(point-from,axis)<=0.f) return false;
+            for (const auto &r:g_ragdolls) {
+                if (Len(r->Center()-point)>2.f) continue;
+                V3 contact{};
+                if (jolt_ragdoll::ShotPart(r.get(),from,point-from,&contact)>=0) return true;
+            }
+            return false;
+        };
+        dogs::ShotHit dogHit{};
+        const bool hitDog = dogs::TraceShot(from,axis,limit,dogHit) && !humanInFront(dogHit.point);
+        if (hitDog) limit=Len(dogHit.point-from);
         V3 hatPoint{};
         uint32_t hatBody=0;
-        bool hatHit=headwear::Shot(from,axis,limit,&hatPoint,&hatBody);
-        if (hatHit) {
-            for (const auto &r:g_ragdolls) {
-                if (Len(r->Center()-hatPoint)>2.f) continue;
-                V3 contact{};
-                if (jolt_ragdoll::ShotPart(r.get(),from,hatPoint-from,&contact)>=0) {
-                    hatHit=false;
-                    break;
-                }
-            }
-        }
+        const bool hatHit=headwear::Shot(from,axis,limit,&hatPoint,&hatBody) && !humanInFront(hatPoint);
         if (hatHit) {
             headwear::BulletImpulse(hatBody,axis,hatPoint,damage);
             point=hatPoint;
+        } else if (hitDog) {
+            // Human and dog bodies use the same shot setting with a mass-appropriate dog impulse.
+            dogs::HitBody(dogHit,axis,Momentum(damage,g_cfg.shot)*.0265f);
+            point=dogHit.point;
         } else if (target) {
             const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
             g_lastBullet = {target->model, point, part, part, dv};
@@ -2737,8 +2782,18 @@ void Start() {
     const bool carHit = H->hook(M, v10 ? 0x46A670 : 0x423600, reinterpret_cast<void *>(&CarHit), reinterpret_cast<void **>(&originalCarHit));
     const bool railHit = H->hook(M, v10 ? 0x4E1D90 : 0x490B40, reinterpret_cast<void *>(&RailwayHit), reinterpret_cast<void **>(&originalRailHit));
     LOG("occupant death pose capture: traffic %d, railway %d; shot impulses: traffic %d, railway %d", traffic, rail, carHit, railHit);
-    if (!H->hook_mid(M, game::Exe().bulletRay, RailBulletStretch, nullptr))
-        LOG("rail occupant shot stretch unavailable");
+    const auto bulletRay=game::Exe().bulletRay;
+    if (!H->hook_mid(M,bulletRay,PhysicsBulletStretch,nullptr))
+        LOG("physics bullet stretch unavailable");
+    else {
+        // 5A9336 / 5E4C86: the instruction after TickShoot sets the shooter's
+        // exclusions, before the moving ray and its unmodified return address.
+        constexpr uint8_t prep[]={0x8d,0x8c,0x24,0xf4,0,0,0,0x6a,0x01};
+        const auto prepAt=bulletRay-0x26;
+        if (memcmp(reinterpret_cast<const void *>(prepAt),prep,sizeof prep)!=0 ||
+            !H->hook_mid(M,prepAt,BeforePhysicsBulletStretch,nullptr))
+            LOG("native dog shot-volume exclusion unavailable");
+    }
     Hooks();
     H->hit_filter(M, HitFilter, nullptr);
     const int mission = H->mission_state();

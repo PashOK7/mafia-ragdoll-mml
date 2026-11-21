@@ -931,3 +931,15 @@ Both Motel Clark suites passed the nonlethal control, native bullet, direct nati
 Human pedestrian-motion and trunk-axis offline tests passed. Both builds also passed the full native headwear suite, including human ragdoll falls, hits and the truck test through the shared articulation setup. Both labs were closed and their prior startup flags restored.
 
 The loaded owner DLL matches tested SHA-256 `42ff7ca978043dc9993e7d6b9c7320c68685f79a0a1ecf6176b334537d7b8017`. It reloaded in the paused prison mission as generation 3 in PID 5976. The user's configuration hashes match their pre-install values.
+
+## 2026-11-21 — Bullets meet the simulated dog (0.1.40)
+
+The 0.1.39 native fixture ended its shot coverage after the first lethal hit. A dog that had already entered Jolt did not have a shot query. It could also retain its standing collision box several seconds after the visible death. The two C_dog volumes at +0x234 and +0x238 are removed by Death in both builds. Their owner, collision-grid membership and cleanup remain native.
+
+Before the moving-ray call in TickShoot, the mod appends the active dogs' native volumes to that shot's exclusion list. It preserves the shooter's existing exclusions and restores the list at the ray return. Both builds' call-site bytes and collision exclusion fields were verified. The same Jolt shape query now serves humans and dogs. The shot compares dog segments, physical riders and loose hats against the native moving hit and the precomputed static impact, and finishes at the winning dog segment through the native end-of-range path. A bounded impulse goes to that segment and the trunk. The diagnostics report the count and most recently struck segment.
+
+Both Motel Clark fixtures now fire into a sleeping dog after the original lethal shot. Both dog boxes still showed up in ordinary moving-world queries. A control shot made one native ground impact. The dog intercepted the next shot exactly once, woke and moved, and the ground impact count stayed at one. Both fixtures also passed the nonlethal control, vehicle collision callback, settling and restoration of a living save. Evidence and the pre-install files are in `../MafiaModLoader/build/dog-impacts-0140/`.
+
+Nonlethal hits still use the game's dog reactions. The mod has no quadruped knockdown and get-up transition. Dog ragdolls do not yet receive the mod's explosion impulse, do not have a blood or impact effect for a shot resolved on the corpse, and do not serialize the individual simulated transforms. The validated rigs are `pes` and `pes03`. The direct native car callback exercised the death path. Controlled wheel contact, buoyancy and a shotgun burst against a dog corpse still need native scenarios.
+
+Both full native headwear suites passed, including shots intercepted by loose hats and eight-pellet shots at wearers. The tested DLL SHA-256 is `280b366a6162123ed9028145fa104a125bbb1d52fb84cbda8c5d8b5b986f415f`. The owner copy loaded the same DLL as generation 2 in PID 11492 and remained paused in `mise17-vezeni`. The labs were closed and their original startup flags were restored.
