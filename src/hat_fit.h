@@ -6,7 +6,7 @@
 // crown along the head axis. The fit state describes engagement, not a second
 // moving body: the worn visual travels rigidly with the physical head.
 struct HatFit {
-    V3 mount{},lastHat{},lastTorso{},hatMotion{},torsoMotion{};
+    V3 mount{},lastHat{},lastTorso{},firstTorso{},hatMotion{},torsoMotion{};
     bool tracking=false;
     V3 previousVelocity{};
     V3 shotMotion{};
@@ -15,6 +15,8 @@ struct HatFit {
     float lift=0, liftRate=0;
     float depth=.09f, leverage=.45f;
     bool sampled=false;
+    bool ridingShot=false;
+    float engaged=0.f;
 
     void shot(V3 delta,float age) {
         shotMotion=shotMotion*std::exp(-std::max(0.f,age-shotAge)/.18f)+delta;
@@ -36,6 +38,21 @@ struct HatFit {
         return hatMotion+axis*((forward-inherited)*residue);
     }
 
+    bool clearsShotGuide(float span,float dt) {
+        if (!ridingShot) return true;
+        V3 forward{shotMotion.x,0,shotMotion.z};
+        const V3 direction=Norm(forward,{});
+        const float translation=std::max(0.f,Dot(lastTorso-firstTorso,direction));
+        // While the band is riding over the crown, its motion remains coupled
+        // to the wearer. It clears over the cap's own span as the trunk moves.
+        // If only the head rotates (e.g. a body backed against a wall), let the
+        // measured axial opening carry it free instead.
+        const float forwardSpeed=Dot(torsoMotion,direction);
+        engaged+=std::max(0.f,liftRate)*dt*(1.f-std::clamp(forwardSpeed/.85f,0.f,1.f));
+        if (translation+engaged<span) return false;
+        return true;
+    }
+
     // Follow the actual mounted point. A contact solver can move a body by
     // positional correction while reporting almost zero end-of-step velocity.
     void track(V3 hat,V3 torso,float dt) {
@@ -45,6 +62,7 @@ struct HatFit {
             torsoMotion+=((torso-lastTorso)*(1.f/dt)-torsoMotion)*blend;
         } else {
             hatMotion=torsoMotion={};
+            firstTorso=torso;
             sampled=false;
         }
         lastHat=hat;
@@ -72,6 +90,10 @@ struct HatFit {
         // The shot drives the head before the finite-difference tracker sees
         // that motion. Apply its sideways impulse to the band once.
         const V3 crosswise=pendingShot-up*Dot(pendingShot,up);
+        if (Len(crosswise)>.1f && !ridingShot) {
+            ridingShot=true;
+            engaged=0.f;
+        }
         liftRate+=std::min(2.5f,Len(crosswise)*leverage*2.6f);
         pendingShot={};
         int steps=int(std::ceil(dt*120.f));

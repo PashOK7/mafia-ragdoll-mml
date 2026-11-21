@@ -91,6 +91,11 @@ def check_shotgun_carry(game, axis=(0,0,1), model='civil17'):
                    if 'headwear shot carry' in line),None)
         assert lift and float(lift[0])>0 and float(lift[3])<.34*float(lift[0]),logs[-15:]
         assert any('headwear shot separation' in line for line in logs),logs[-15:]
+        worn=next((float(line.split('worn travel ')[1].split()[0]) for line in logs
+                   if 'headwear shot worn travel' in line),0)
+        early_flight=next((float(line.split(' forward ')[1].split()[0]) for line in logs
+                           if 'headwear shot flight remaining 24 ' in line),0)
+        assert worn>.20 and early_flight>.50,(worn,early_flight,logs[-15:])
         print(game.build,model,'eight-pellet shot: hat forward travel',round(max(flight),3),'m')
     finally:
         game.cleanup()

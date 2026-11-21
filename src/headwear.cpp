@@ -61,6 +61,9 @@ struct FallenHat {
     bool sleeping=false;
     uint32_t releaseGroup=JPH::CollisionGroup::cInvalidGroup;
     unsigned releaseContacts=0;
+    V3 shotStart{}, shotAxis{};
+    unsigned flightSamples=0;
+    unsigned flightContacts=0;
 };
 std::unordered_map<void *, FallenHat> fallen;
 std::vector<FallenHat> retired;
@@ -308,6 +311,12 @@ void Sync() {
         JPH::Quat q;
         bi.GetPositionAndRotation(hat.body,p,q);
         V3 pos=jolt_world::ToWorld(F(p));
+        if (hat.flightSamples && --hat.flightSamples%4==0) {
+            const V3 travelled=pos-hat.shotStart;
+            const float speed=Dot(F(bi.GetLinearVelocity(hat.body)),hat.shotAxis);
+            Log("headwear shot flight remaining %u forward %.3f m vertical %.3f m speed %.3f m/s",
+                hat.flightSamples,Dot(travelled,hat.shotAxis),travelled.y,speed);
+        }
         if (pos.y<hat.previous.y) {
             // The nearby visual-mesh cache does not contain every native floor.
             // Check the path before the render transform is committed.
@@ -493,6 +502,16 @@ void BodyContact(uint32_t propBody) {
     }
 }
 
+void FlightContact(uint32_t id,unsigned layer,V3 normal,float approach) {
+    for (auto &[_,hat]:fallen) {
+        if (!hat.flightSamples || hat.flightContacts>=4 || hat.body.GetIndexAndSequenceNumber()!=id) continue;
+        ++hat.flightContacts;
+        Log("headwear shot contact layer %u normal %.3f %.3f %.3f approach %.3f m/s",
+            layer,normal.x,normal.y,normal.z,approach);
+        break;
+    }
+}
+
 void Drop(Ragdoll &body, float dt) {
     if (body.headwearChecked || !body.model || ready.empty()) return;
     auto &fit=body.hatFit;
@@ -578,6 +597,10 @@ void Drop(Ragdoll &body, float dt) {
         const Q wornRotation=QuatOf(M3::FromWorld(world)*nativeNeck.T()*bones[idx]);
         const float scale = Len(M3::Raw(world).r[0]);
         auto &model=ready.at(name);
+        if (!fit.clearsShotGuide(std::min(model.dimensions.x,model.dimensions.z)*scale,dt)) {
+            body.headwearChecked=false;
+            return;
+        }
         if (!model.hull) {
             JPH::Array<JPH::Vec3> points;
             points.reserve(model.mesh.vertices.size());
@@ -595,7 +618,7 @@ void Drop(Ragdoll &body, float dt) {
         JPH::Quat q(-wornRotation.x,-wornRotation.y,-wornRotation.z,wornRotation.w);
         const V3 seated=position;
         const V3 seatedVelocity=fit.releaseVelocity(body.PointVelocity(Ragdoll::B_HEAD,seated),body.age);
-        const bool shotRelease=Len(seatedVelocity-fit.hatMotion)>.05f;
+        const bool shotRelease=fit.ridingShot || Len(seatedVelocity-fit.hatMotion)>.05f;
         const float radius=model.mesh.radius*scale;
         // A bullet can tip the rim, but the collar still has to lift off the head.
         const bool clear=shotRelease ? ClearShotRelease(shape,q,up,fit.shotMotion,fit.depth,radius,position)
@@ -611,7 +634,11 @@ void Drop(Ragdoll &body, float dt) {
             H->prop_remove(M,prop);
             return;
         }
-        const V3 velocity=fit.releaseVelocity(body.PointVelocity(Ragdoll::B_HEAD,position),body.age);
+        V3 velocity=fit.releaseVelocity(body.PointVelocity(Ragdoll::B_HEAD,position),body.age);
+        if (shotRelease) {
+            // The separating band has velocity relative to the skull, too.
+            velocity+=up*std::clamp(fit.liftRate,0.f,1.1f);
+        }
         JPH::BodyCreationSettings settings(shape,J(jolt_world::ToJolt(position)),q,
                                            JPH::EMotionType::Dynamic,jolt_world::kDynamic);
         settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
@@ -630,12 +657,19 @@ void Drop(Ragdoll &body, float dt) {
         }
         FallenHat hat{prop,body.pedestrian ? body.actor : nullptr,body.model,
                       body.pedestrian && !body.puppet,id,position,position,&model.mesh,scale};
-        if (shotRelease) hat.releaseGroup=jolt_ragdoll::CollisionGroupOf(&body);
+        if (shotRelease) {
+            hat.releaseGroup=jolt_ragdoll::CollisionGroupOf(&body);
+            hat.shotStart=position;
+            hat.shotAxis=Norm({fit.shotMotion.x,0,fit.shotMotion.z},{});
+            hat.flightSamples=32;
+        }
         fallen.emplace(frame,hat);
         show(frame,false);
-        if (shotRelease)
+        if (shotRelease) {
             Log("headwear shot carry %.3f m/s tracked %.3f m/s lift along head %.3f m lateral %.3f m",
                 Len(velocity),Len(fit.hatMotion),Dot(position-seated,up),Len(Cross(position-seated,up)));
+            Log("headwear shot worn travel %.3f m",Dot(fit.lastTorso-fit.firstTorso,hat.shotAxis));
+        }
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
             velocity.x,velocity.y,velocity.z,fit.torsoMotion.x,fit.torsoMotion.y,fit.torsoMotion.z);

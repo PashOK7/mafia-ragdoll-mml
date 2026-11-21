@@ -144,13 +144,17 @@ public:
         DrivenCarContact(a, b, m, s);
         SlidingCabinContact(a, b, s);
         TraceDriver(a, b, m);
-        if (!g_impact || m.mRelativeContactPointsOn1.empty()) return;
+        if (m.mRelativeContactPointsOn1.empty()) return;
         JPH::RVec3 p = m.GetWorldSpaceContactPointOn1(0);
         JPH::Vec3 n = m.mWorldSpaceNormal;   // from a towards b
         float approach = (a.GetPointVelocity(p) - b.GetPointVelocity(p)).Dot(n);   // > 0: closing
-        if (approach <= 0) return;
-        V3 wp = V3{p.GetX(), p.GetY(), p.GetZ()} + OriginNow();
         V3 nv{n.GetX(), n.GetY(), n.GetZ()};
+        if (a.IsDynamic() && !a.GetUserData())
+            headwear::FlightContact(a.GetID().GetIndexAndSequenceNumber(),b.GetObjectLayer(),-nv,approach);
+        if (b.IsDynamic() && !b.GetUserData())
+            headwear::FlightContact(b.GetID().GetIndexAndSequenceNumber(),a.GetObjectLayer(),nv,approach);
+        if (!g_impact || approach <= 0) return;
+        V3 wp = V3{p.GetX(), p.GetY(), p.GetZ()} + OriginNow();
         if (a.IsDynamic()) g_impact(a.GetID(), approach, wp, -nv);
         if (b.IsDynamic()) g_impact(b.GetID(), approach, wp, nv);
     }
