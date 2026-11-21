@@ -23,12 +23,18 @@ int main() {
     for (float fps : {20.f,30.f,60.f,144.f}) {
         const float dt=1/fps;
         const V3 up{0,1,0};
-        HatFit upright,tilted,falling,inverted,impact;
+        HatFit upright,tilted,sideRest,bump,falling,inverted,impact;
+        sideRest.leverage=bump.leverage=.60f;
+        const V3 sideUp{.9682458f,-.25f,0};
+        const V3 bumpUp{.8930286f,.45f,0};
         float inversionTime=0;
         bool released=false;
         for (int i=0;i<int(4*fps);++i) {
             assert(!upright.slips(up,{8,0,0},dt));
             assert(!tilted.slips({.5f,.8660254f,0},{},dt));
+            assert(!sideRest.slips(sideUp,{},dt));
+            const V3 bumpedVelocity=i ? V3{0,0,2.8f} : V3{};
+            assert(!bump.slips(bumpUp,bumpedVelocity,dt));
             V3 freeFall{0,-9.81f*i*dt,0};
             assert(!falling.slips({1,0,0},freeFall,dt));
             if (!released) {
@@ -36,7 +42,7 @@ int main() {
                 inversionTime=i*dt;
             }
         }
-        assert(released && inversionTime>.12f && inversionTime<.40f);
+        assert(released && inversionTime>.27f && inversionTime<.45f);
         // With an upright head, a strong lateral acceleration can tip the
         // band during the shove. Mild acceleration leaves it seated.
         HatFit mild;

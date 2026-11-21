@@ -51,16 +51,19 @@ struct HatFit {
         V3 load=V3{0,-9.81f,0}-(crownVelocity-previousVelocity)*(1.f/dt);
         previousVelocity=crownVelocity;
         float axial=Dot(load,up);
-        // Sideways loading can peel a tipped band over the crown. An upright
-        // band transfers that same load to the hat as the head accelerates.
-        float shear=Len(load-up*axial);
-        // Lateral force applied above the band tips it about the rim.
-        float peel=leverage*shear;
-        float pull=axial+peel-2.8f;
+        const float shear=Len(load-up*axial);
+        // Load pressing the hat into the crown increases the band friction.
+        // Only the remaining sideways load can lever the rim up.
+        constexpr float friction=.45f;
+        constexpr float initialGrip=4.8f;
+        constexpr float stiffness=40.f;
+        constexpr float damping=10.f;
+        const float peel=leverage*std::max(0.f,shear-friction*std::max(0.f,-axial));
+        const float pull=axial+peel-initialGrip;
         int steps=int(std::ceil(dt*120.f));
         float step=dt/steps;
         for (int i=0;i<steps;++i) {
-            liftRate+=(pull-30.f*lift-8.f*liftRate)*step;
+            liftRate+=(pull-stiffness*lift-damping*liftRate)*step;
             lift+=liftRate*step;
             if (lift<0) {
                 lift=0;

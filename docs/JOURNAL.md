@@ -873,3 +873,11 @@ The standalone fit regression and both full windowed headwear suites passed. The
 Three native eight-pellet shots per build, from 0.85 m, moved the loose hat 0.385–0.570 m in the first eight flight samples. The running civil15 bullet-hit fixture measured 0.503 m in both labs. The civil12 replay continued past the old stall point without a static contact against its own visual. The exact owner-controlled shots still lack a manual replay on this version. Both lab DLLs match the build at SHA-256 `48b267e6fb1132ea55dc51f0f326fc98f5d54915de3b6393acc46eb4e58ee43a`. Rollback files are in `../MafiaModLoader/build/hat-unified-0133/`.
 
 Installed the verified 0.1.33 DLL, symbols and manifest in `W:/Mafia10Fixes` at the owner's request. The installed DLL matches the labs by SHA-256 and the local configuration matches its pre-install hash. The previous files are in `../MafiaModLoader/build/hat-unified-0133/owner-before/`. The open game (PID 28612) hot-reloaded 0.1.33 at 14:37:44.077 as generation 16, and its loaded DLL matched the installed hash.
+
+## 2026-11-21 — Stronger fitted-band retention (0.1.34)
+
+The owner reported that 0.1.33 shed hats too readily. In the owner log, some hats released with the torso nearly still and the head around its side. The shared band now subtracts friction proportional to inward axial load before applying the remaining sideways load to the rim. The band has higher initial grip, stiffness and damping. Gunfire, vehicle hits and falls still use the same release path.
+
+The new fit regression keeps a hat seated on a moderately tipped head through a lateral bump and at rest just past horizontal. It checks sustained inversion and a stronger shove across 20, 30, 60 and 144 fps. The 0.1.32/0.1.33 grip fails the new bump assertion. The full headwear suite passed in both 1.0 and 1.2. The truck cap continued another 0.60–0.61 m forward after first observation. The six close-range pellet tests travelled 0.409–0.536 m within the first eight flight samples. The tested DLL has SHA-256 `c5d4e6f4f42ddf5cd9d05781302fe416bd5ee46e747d911207a709de2d9a9495`. Backups are in `../MafiaModLoader/build/hat-retention-0134/`.
+
+The owner copy in `W:/Mafia10Fixes` hot-reloaded 0.1.34 at 14:47:42.067 as generation 17 in PID 28612. The running DLL matched the tested hash. Manual retention feedback for this revision is pending.
