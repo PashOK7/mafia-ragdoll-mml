@@ -53,13 +53,15 @@ def check_truck_carry(game):
         game.cleanup()
 
 
-def check_shotgun_carry(game):
+def check_shotgun_carry(game, axis=(0,0,1), model='civil17'):
     ground=game.call('world.ground',at=[-1984,0,75])['height']
     player_start=game.pos('player')
     game.tool('teleport',to=[-1988,ground+.10,72],dir=[0,0,1])
-    actor=game.spawn_human('civil17',[-1984,ground+.03,75])
+    actor=game.spawn_human(model,[-1984,ground+.03,75])
     try:
         game.call('human.anim',actor=actor,play='stand')
+        if model=='civil52':
+            game.call('human.health',actor=actor,set=30)
         game.sleep(2400)
         bones=game.call('human.skeleton',actor=actor)['bones']
         x,y,z=next(b['world_pos'] for b in bones if b['name'].lower()=='neck')
@@ -69,9 +71,11 @@ def check_shotgun_carry(game):
         def bits(v):
             return struct.unpack('<I',struct.pack('<f',v))[0]
         seq=game.latest()
+        previous=game.tool('log_tail',lines=100).splitlines()
+        origin=[x-.85*axis[0],y-.20,z-.85*axis[2]]
         game.call('native.call',at='0x5A84A0' if game.build=='1.2' else '0x5E3DF0',
                   conv='thiscall',this=engine,ret='uint',
-                  args=[shooter,*map(bits,[x,y-.20,z-.85]),*map(bits,[0,0,160]),bits(200),0,0,8])
+                  args=[shooter,*map(bits,origin),*map(bits,[160*v for v in axis]),bits(200),0,0,8])
         shot=game.call('events.since',seq=seq,types='SHOT')['events']
         assert any(e['data']['shots']==8 for e in shot),shot
         flight=[]
@@ -79,11 +83,15 @@ def check_shotgun_carry(game):
             game.sleep(20)
             props=game.call('props.list')['props']
             for prop in props:
-                if prop['model'].lower()=='rdhat_civil17_lined.i3d':
-                    flight.append(prop['pos'][2]-z)
+                if prop['model'].lower()==f'rdhat_{model}_lined.i3d':
+                    flight.append(sum((v-p)*d for v,p,d in zip(prop['pos'],(x,y,z),axis)))
         assert len(flight)>=4 and max(flight)>.60,(flight,game.call('events.since',seq=seq,types='HUMAN_HIT,BULLET_HIT')['events'])
-        assert 'headwear shot carry' in game.tool('log_tail',lines=100)
-        print(game.build,'eight-pellet shot: hat forward travel',round(max(flight),3),'m')
+        logs=[line for line in game.tool('log_tail',lines=100).splitlines() if line not in previous]
+        lift=next((line.split(' lift along head ')[1].split() for line in logs
+                   if 'headwear shot carry' in line),None)
+        assert lift and float(lift[0])>0 and float(lift[3])<.34*float(lift[0]),logs[-15:]
+        assert any('headwear shot separation' in line for line in logs),logs[-15:]
+        print(game.build,model,'eight-pellet shot: hat forward travel',round(max(flight),3),'m')
     finally:
         game.cleanup()
         game.tool('teleport',to=player_start)
@@ -280,6 +288,7 @@ def check(game):
     game.cleanup()
     check_truck_carry(game)
     check_shotgun_carry(game)
+    check_shotgun_carry(game,axis=(.85,0,math.sqrt(1-.85**2)),model='civil52')
 
 
 if __name__ == '__main__':

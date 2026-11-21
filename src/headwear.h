@@ -12,6 +12,7 @@ void Sync();
 bool Near(V3 point);
 void ApplyAirDrag(float dt);
 bool OwnsBody(uint32_t body);
+bool ReleasingFrom(uint32_t body,uint32_t wearerGroup);
 bool Shot(V3 from,V3 axis,float range,V3 *point,uint32_t *body);
 void BulletImpulse(uint32_t body,V3 direction,V3 point,float damage);
 void BodyContact(uint32_t propBody);

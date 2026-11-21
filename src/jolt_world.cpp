@@ -164,6 +164,12 @@ public:
     // A body passing through a car's hull (SetPassThrough) does not meet that car's hull bodies; it meets the car's
     // cabin, which is not one of them.
     JPH::ValidateResult OnContactValidate(const JPH::Body &a, const JPH::Body &b, JPH::RVec3Arg, const JPH::CollideShapeResult &) override {
+        if (a.IsDynamic() && b.IsDynamic() && bool(a.GetUserData())!=bool(b.GetUserData())) {
+            const auto &loose=a.GetUserData() ? b : a;
+            const auto &wearer=a.GetUserData() ? a : b;
+            if (headwear::ReleasingFrom(loose.GetID().GetIndexAndSequenceNumber(),wearer.GetCollisionGroup().GetGroupID()))
+                return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+        }
         if (a.GetObjectLayer() == kCabin || b.GetObjectLayer() == kCabin) {
             const auto &cabin = a.GetObjectLayer() == kCabin ? a : b;
             const auto &person = a.GetObjectLayer() == kCabin ? b : a;

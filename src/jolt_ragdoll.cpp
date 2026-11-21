@@ -604,6 +604,12 @@ bool WaitingForGround(const Ragdoll *r) {
     return it!=g_entries.end() && it->second.serial==r->serial && it->second.holding;
 }
 
+uint32_t CollisionGroupOf(const Ragdoll *r) {
+    auto it=g_entries.find(r);
+    if (it==g_entries.end() || it->second.serial!=r->serial) return JPH::CollisionGroup::cInvalidGroup;
+    return jolt_world::Bodies().GetCollisionGroup(it->second.ragdoll->GetBodyID(0)).GetGroupID();
+}
+
 bool OwnsBody(uint32_t body) {
     for (const auto &kv : g_entries) {
         const JPH::Ragdoll *rag = kv.second.ragdoll;
