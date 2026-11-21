@@ -35,6 +35,7 @@
 #include <vector>
 #include "game.h"
 #include "jolt_ragdoll.h"
+#include "pull_reach.h"
 #include "jolt_world.h"
 #include "knock.h"
 #include "ragcam.h"
@@ -285,6 +286,7 @@ struct PullSample {
     bool hands, carPose, drawn;
     V3 contact[2]{}, drawnWrist[2]{};
     float ikWeight = 0;
+    const char *gripPart = "";
     std::string cabinContacts;
 };
 
@@ -316,8 +318,8 @@ void EndPullTrace(const char *reason) {
         out += ",\"drawn_head\":" + (s.drawn ? TracePoint(s.drawnHead) : "null");
         out += ",\"drawn_nose\":" + (s.drawn ? TracePoint(s.drawnNose) : "null");
         if (s.ikWeight > 0)
-            out += Fmt(",\"ik_weight\":%.5f", s.ikWeight) +
-                ",\"chest_contacts\":[" + TracePoint(s.contact[0]) + "," + TracePoint(s.contact[1]) + "]" +
+            out += Fmt(",\"ik_weight\":%.5f,\"grip_part\":\"%s\"", s.ikWeight, s.gripPart) +
+                ",\"grip_contacts\":[" + TracePoint(s.contact[0]) + "," + TracePoint(s.contact[1]) + "]" +
                 ",\"drawn_wrists\":[" + TracePoint(s.drawnWrist[0]) + "," + TracePoint(s.drawnWrist[1]) + "]";
         out += ",\"car\":" + (s.carPose ? TracePoint(s.origin) : "null") + ",\"side\":" + (s.carPose ? TracePoint(s.side) : "null") + "}";
     }
@@ -2190,54 +2192,29 @@ void SetPullRotation(int slot, void *frame, const M3 &local) {
     g_pullArms.applied[slot] = game::at<Q>(frame, game::kFrameRot);
 }
 
-// Shortest swing that brings the shoulder into reach, about a real spine or
-// clavicle joint. The stock pose supplies twist and both arm segment lengths.
-M3 ReachSwing(V3 pivot, V3 shoulder, V3 goal, float reach, float limit) {
-    const V3 delta = goal - shoulder;
-    if (Len(delta) <= reach) return M3::Identity();
-    const V3 from = Norm(shoulder - pivot), to = Norm(goal - Norm(delta) * reach - pivot);
-    const V3 normal = Cross(from, to);
-    const float half = .5f * std::min(limit, std::atan2(Len(normal), Dot(from, to)));
-    const V3 v = Norm(normal) * std::sin(half);
-    float m[16];
-    QuatMatrix({std::cos(half), v.x, v.y, v.z}, m);
-    return M3::Raw(m);
-}
-
 void PosePullArms(const Ragdoll *driver) {
     if (!game::Player() || g_pullArms.model) return;
     V3 contact[2];
-    const float weight = jolt_ragdoll::ChestContacts(driver, contact);
+    const float weight = jolt_ragdoll::PullContacts(driver, contact);
     Ragdoll::PoseSnap pose{};
     if (weight <= 0 || !SafeSnapshot(game::Player(), &pose)) return;
     g_pullArms.model = ModelOf(game::Player());
-    V3 goal[2];
-    float reach[2], excess[2];
+    const PullReach plan(pose.pts, contact, weight);
+    const auto &goal = plan.goal;
+    const auto &lean = plan.lean;
+    M3 parentWorld[2];
     for (int i = 0; i < 2; ++i) {
-        const int arm = i == 0 ? 15 : 11;
-        goal[i] = pose.org[arm+2] + (contact[i] - pose.org[arm+2]) * weight;
-        reach[i] = Len(pose.org[arm+2] - pose.org[arm+1]) + Len(pose.org[arm+1] - pose.org[arm]) - .004f;
-        excess[i] = Len(goal[i] - pose.org[arm]) - reach[i];
+        void *parent = game::at<void *>(pose.frames[i ? 10 : 14], game::kFrameParent);
+        parentWorld[i] = M3::FromWorld(game::WorldMatrix(parent));
     }
-    const int longerReach = excess[0] > excess[1] ? 0 : 1;
-    const V3 pivot = pose.org[6]; // back1
-    const M3 lean = ReachSwing(pivot, pose.org[longerReach == 0 ? 15 : 11], goal[longerReach], reach[longerReach], .60f);
     void *spineParent = game::at<void *>(pose.frames[6], game::kFrameParent);
     SetPullRotation(4, pose.frames[6], pose.rot[6] * lean * M3::FromWorld(game::WorldMatrix(spineParent)).T());
     for (int i = 0; i < 2; ++i) {
         const int arm = i == 0 ? 15 : 11; // upper arm, elbow and wrist in PoseSnap
-        const V3 clav = pivot + lean.Apply(pose.org[arm-1] - pivot);
-        const V3 upperOrigin = pivot + lean.Apply(pose.org[arm] - pivot);
-        const M3 swing = ReachSwing(clav, upperOrigin, goal[i], reach[i], .65f);
-        void *parent = game::at<void *>(pose.frames[arm-1], game::kFrameParent);
-        const M3 parentWorld = M3::FromWorld(game::WorldMatrix(parent));
+        const V3 clav = plan.clav[i], pivot = plan.pivot;
+        const M3 swing = plan.swing[i];
         const M3 clavWorld = pose.rot[arm-1] * lean * swing;
-        // Recover the animated parent from the snapshot (the two shoulder
-        // chains normally share back3), independent of lazy frame updates.
-        M3 originalParent = parentWorld;
-        for (int k = 6; k <= 9; ++k)
-            if (pose.frames[k] == parent) originalParent = pose.rot[k];
-        SetPullRotation(5+i, pose.frames[arm-1], clavWorld * (originalParent * lean).T());
+        SetPullRotation(5+i, pose.frames[arm-1], clavWorld * (parentWorld[i] * lean).T());
         pose.rot[arm-1] = clavWorld;
         for (int k = arm; k <= arm+2; ++k) {
             pose.org[k] = clav + swing.Apply(pivot + lean.Apply(pose.org[k] - pivot) - clav);
@@ -2258,7 +2235,7 @@ void PosePullArms(const Ragdoll *driver) {
         const M3 oldFore = BasisFrom(elbow, wrist, shoulder), newFore = BasisFrom(solved, end, shoulder);
         const M3 upperWorld = pose.rot[arm] * oldUpper.T() * newUpper;
         const M3 foreWorld = pose.rot[arm+1] * oldFore.T() * newFore;
-        SetPullRotation(2*i, pose.frames[arm], upperWorld * clavWorld.T());
+        SetPullRotation(2*i, pose.frames[arm], upperWorld * pose.rot[arm-1].T());
         SetPullRotation(2*i+1, pose.frames[arm+1], foreWorld * upperWorld.T());
     }
 }
@@ -2329,7 +2306,7 @@ void Rendered() {
                 row.drawnHead = pose.pts[Ragdoll::HEAD];
                 row.drawnNose = pose.pts[Ragdoll::NOSE];
                 if (g_pullArms.model && SafeSnapshot(game::Player(), &pose)) {
-                    row.ikWeight = jolt_ragdoll::ChestContacts(g_pull.body, row.contact);
+                    row.ikWeight = jolt_ragdoll::PullContacts(g_pull.body, row.contact, &row.gripPart);
                     row.drawnWrist[0] = pose.pts[Ragdoll::LHAND];
                     row.drawnWrist[1] = pose.pts[Ragdoll::RHAND];
                 }

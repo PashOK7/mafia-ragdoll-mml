@@ -1,6 +1,7 @@
 // Ragdolls on Jolt Physics (see jolt_ragdoll.h).
 #include "fmt.h"
 #include "jolt_ragdoll.h"
+#include "pull_reach.h"
 #include "anatomy.h"
 #include "joint_resistance.h"
 #include "vehicles.h"
@@ -142,6 +143,8 @@ struct Entry {
     bool reached = false;
     V3 lastHands{}, reachOffset{}, anchorTarget{}, outward{}, gripAxis{}, localGripAxis{};
     V3 localContact[2]{};
+    int gripPart = -1;
+    bool atContact = false;
     V3 pullVelocity{};
     float reachBlend = 0;
     float duck = 0;
@@ -638,14 +641,66 @@ void FinishPull(Ragdoll *r) {
     jolt_world::ReleaseHolder(r);
 }
 
-float ChestContacts(const Ragdoll *r, V3 (&contacts)[2]) {
+float PullContacts(const Ragdoll *r, V3 (&contacts)[2], const char **part) {
     const auto it = g_entries.find(r);
-    if (it == g_entries.end() || it->second.reachBlend <= 0) return 0;
+    if (it == g_entries.end() || it->second.reachBlend <= 0 || it->second.gripPart < 0) return 0;
     const Entry &e = it->second;
-    const auto transform = jolt_world::Bodies().GetCenterOfMassTransform(e.ragdoll->GetBodyID(CHEST));
+    if (part) *part = kName[e.gripPart];
+    const auto transform = jolt_world::Bodies().GetCenterOfMassTransform(e.ragdoll->GetBodyID(e.gripPart));
     for (int i = 0; i < 2; ++i)
         contacts[i] = jolt_world::ToWorld(F(transform * J(e.localContact[i])));
     return e.reachBlend * e.reachBlend * (3.f - 2.f * e.reachBlend);
+}
+
+struct GraspSite {
+    int part = -1;
+    V3 local[2]{};
+    float cost = 1e9f;
+};
+
+static GraspSite FindGrasp(const Entry &e, const V3 *pose, V3 hands) {
+    auto &bi = jolt_world::Bodies();
+    const V3 shoulders[] = {pose[Ragdoll::LARM], pose[Ragdoll::RARM]};
+    const V3 across = Norm(shoulders[1] - shoulders[0]);
+    const V3 pelvis = jolt_world::ToWorld(F(bi.GetCenterOfMassPosition(e.ragdoll->GetBodyID(PELVIS))));
+    GraspSite best;
+    // Load-bearing surfaces only: the ribcage, waist, hips and proximal thighs.
+    // Head, neck, hands and other narrow distal joints are never candidates.
+    for (int part : {CHEST, CHESTLOW, ABDOMEN, PELVIS, LTHIGH, RTHIGH}) {
+        const auto body = e.ragdoll->GetBodyID(part);
+        const auto shape = bi.GetTransformedShape(body);
+        const auto transform = bi.GetCenterOfMassTransform(body);
+        const V3 centre = jolt_world::ToWorld(F(transform.GetTranslation()));
+        if (Len(hands - centre) >= .95f || Dot(hands - pose[Ragdoll::PELVIS], centre - pose[Ragdoll::PELVIS]) <= 0) continue;
+        GraspSite site;
+        V3 contact[2];
+        const bool thigh = part == LTHIGH || part == RTHIGH;
+        const V3 aimCentre = thigh ? centre + (pelvis - centre) * .45f : centre;
+        for (int i = 0; i < 2; ++i) {
+            const auto start = J(jolt_world::ToJolt(shoulders[i]));
+            const auto end = J(jolt_world::ToJolt(aimCentre + across * (i ? .075f : -.075f)));
+            JPH::RRayCast ray{start, JPH::Vec3(end - start)};
+            JPH::RayCastResult hit;
+            if (!shape.CastRay(ray, hit)) break;
+            const auto point = ray.GetPointOnRay(hit.mFraction);
+            contact[i] = jolt_world::ToWorld(F(point));
+            site.local[i] = F(transform.InversedRotationTranslation() * point);
+            if (i == 1) site.part = part;
+        }
+        if (site.part < 0) continue;
+        if (Len(contact[1] - contact[0]) < .065f) continue; // room for both hands
+        if (thigh && Dot((contact[0]+contact[1])*.5f - centre, pelvis-centre) < 0) continue;
+        const auto mid = (contact[0] + contact[1]) * .5f;
+        const PullReach reach(pose, contact, 1);
+        // Prefer an exposed, elevated grasp. A trunk lying across the seat
+        // presents its hips first; a seated upright driver presents the ribs.
+        site.cost = 2 * reach.gap + .25f * Len(mid - hands) - Dot(mid - pelvis, e.outward)
+                  - .60f * (mid.y - pelvis.y);
+        if (thigh) site.cost += .10f; // prefer support nearer the centre of mass at equal reach
+        if (part == e.gripPart) site.cost -= .07f; // keep a purchase while the differences are small
+        if (site.cost < best.cost) best = site;
+    }
+    return best;
 }
 
 void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
@@ -678,34 +733,39 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     const float outwardSpeed = (depth - e.lastDepth) / dt;
     e.lastDepth = depth;
     if (!e.grip) {
-        const V3 chest = r->BodyPos(Ragdoll::B_CHEST);
         if (!e.reached || depth > e.reachStart) {
             e.reached = true;
             e.reachStart = e.deepestReach = depth;
         }
         e.deepestReach = std::min(e.deepestReach, depth);
         e.lastHands = hands;
-        if (Len(hands - chest) >= .95f || Dot(hands - player, chest - player) <= 0) return;
-        const auto grabbed = e.ragdoll->GetBodyID(CHEST);
+        const GraspSite site = FindGrasp(e, pose, hands);
+        if (site.part < 0) { e.atContact = false; return; }
+        const auto grabbed = e.ragdoll->GetBodyID(site.part);
         const auto transform = bi.GetCenterOfMassTransform(grabbed);
-        const V3 shoulders[] = {pose[Ragdoll::LARM], pose[Ragdoll::RARM]};
-        const V3 across = Norm(shoulders[1] - shoulders[0]);
-        JPH::RVec3 points[2];
+        const bool switching = e.gripPart != site.part;
+        V3 points[2]{};
+        const bool previousTarget = PullContacts(r, points) > 0;
+        bool onSurface = true;
         for (int i = 0; i < 2; ++i) {
-            const auto start = J(jolt_world::ToJolt(shoulders[i]));
-            const auto inside = transform.GetTranslation() + J(across * (i ? .075f : -.075f));
-            JPH::RRayCast ray{start, JPH::Vec3(inside - start)};
-            JPH::RayCastResult hit;
-            if (!bi.GetTransformedShape(grabbed).CastRay(ray, hit)) return;
-            points[i] = ray.GetPointOnRay(hit.mFraction);
-            e.localContact[i] = F(transform.InversedRotationTranslation() * points[i]);
+            if (!previousTarget) e.localContact[i] = site.local[i];
+            else if (switching) e.localContact[i] = F(transform.InversedRotationTranslation() * J(jolt_world::ToJolt(points[i])));
+            const V3 delta = site.local[i] - e.localContact[i];
+            const float step = dt * 1.4f;
+            onSurface &= Len(delta) <= step;
+            e.localContact[i] += delta * (step / std::max(step, Len(delta)));
+            points[i] = jolt_world::ToWorld(F(transform * J(e.localContact[i])));
         }
+        e.gripPart = site.part;
         const float progress = std::clamp((e.reachStart - e.deepestReach) / .12f, 0.f, 1.f);
         // The chest can first become reachable halfway into the native stroke.
         // Bring both arms off their animation continuously from that instant.
         e.reachBlend = std::min(progress, e.reachBlend + dt / .46f);
-        if (e.reachBlend < 1 || depth - e.deepestReach < .015f || outwardSpeed <= 0) return;
-        const auto contact = (points[0] + points[1]) * .5f;
+        const bool touched = onSurface && e.reachBlend >= 1 && PullReach(pose, points, 1).gap <= .012f;
+        const bool established = touched && e.atContact && !switching;
+        e.atContact = touched;
+        if (!established || depth - e.deepestReach < .015f || outwardSpeed <= 0) return;
+        const auto contact = J(jolt_world::ToJolt((points[0] + points[1]) * .5f));
         JPH::PointConstraintSettings settings;
         settings.mSpace = JPH::EConstraintSpace::WorldSpace;
         settings.mPoint1 = settings.mPoint2 = contact;
@@ -728,6 +788,7 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
         e.gripStart = e.farthestPull = depth;
         e.gripAxis = Norm(shoulderLine);
         e.localGripAxis = F(bi.GetRotation(grabbed).Conjugated() * J(e.gripAxis));
+        return; // the first held tick keeps the anchor exactly on the original surface
     } else if (Len(hands - e.lastHands) > 1.5f) {
         ReleaseGrip(e, r); // the player was teleported across the scene
         return;
@@ -739,8 +800,11 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     const V3 hipVelocity = F(bi.GetLinearVelocity(e.ragdoll->GetBodyID(PELVIS)));
     const V3 handVelocity = (hands - e.lastHands) * (1.f / dt);
     const float hipSpeed = outwardSpeed + Dot(hipVelocity - handVelocity, e.outward);
+    V3 contacts[2];
+    PullContacts(r, contacts);
     if (e.farthestPull - e.gripStart > .45f &&
-        ((outwardSpeed <= 0 && hipSpeed <= 0) || e.farthestPull - depth >= .025f)) {
+        ((outwardSpeed <= 0 && hipSpeed <= 0) || e.farthestPull - depth >= .025f ||
+         PullReach(pose, contacts, 1).gap > .016f)) {
         ReleaseGrip(e, r, false); // ignore contact with Tommy until his native action actually finishes
         return;
     }
@@ -753,8 +817,6 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     const float lower = turn * turn * (3.f - 2.f * turn);
     V3 target = hands + e.reachOffset;
     target.y -= e.reachOffset.y * lower;
-    V3 contacts[2];
-    ChestContacts(r, contacts);
     const V3 midpoint = (contacts[0] + contacts[1]) * .5f;
     // Read the underside of the cabin ahead of the head. A high grip must
     // lower through a low header before the physical head hits its edge.
@@ -810,9 +872,14 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     const V3 c = e.pullVelocity + error * response;
     const float decay = std::exp(-response * dt);
     target = target + (error + c * dt) * decay;
-    const V3 filteredVelocity = (e.pullVelocity - c * (response * dt)) * decay;
-    const V3 unconstrained = target;
-    target = withinReach(target); // the shoulders can move during the filtered response
+    // Limit the actual anchor after reach projection. Projecting it again
+    // after filtering used to drag a distant torso 42 cm in a single frame.
+    V3 desiredVelocity = (target - e.anchorTarget) * (1.f / dt);
+    desiredVelocity = desiredVelocity * (2.7f / std::max(2.7f, Len(desiredVelocity)));
+    const V3 change = desiredVelocity - e.pullVelocity;
+    const float step = 14.f * dt;
+    const V3 velocity = e.pullVelocity + change * (step / std::max(step, Len(change)));
+    target = e.anchorTarget + velocity * dt;
     // Slide the grip along the seat back or door header when either the ribs
     // or the head is obstructed. The solver can still rotate the body around
     // that contact; the anchor no longer drives straight through the panel.
@@ -820,7 +887,7 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
         const auto cabin = bi.GetTransformedShape(cabinId);
         JPH::ShapeCastSettings settings;
         settings.SetBackFaceMode(JPH::EBackFaceMode::CollideWithBackFaces);
-        for (int part : {CHEST, HEAD}) {
+        for (int part : {e.gripPart, static_cast<int>(HEAD)}) {
             const auto id = e.ragdoll->GetBodyID(part);
             const V3 motion = target - midpoint;
             if (Len(motion) < .001f) break;
@@ -834,7 +901,7 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
             }
         }
     }
-    e.pullVelocity = filteredVelocity + (target - unconstrained) * (1.f / dt);
+    e.pullVelocity = (target - e.anchorTarget) * (1.f / dt);
     e.anchorTarget = target;
     bi.MoveKinematic(e.handAnchor, J(jolt_world::ToJolt(target)), JPH::Quat::sIdentity(), dt);
     const auto held = e.grip->GetBody2()->GetID();

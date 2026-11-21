@@ -689,3 +689,15 @@ The traffic traces distinguish model replacement from a later lurch at grasp. Th
 A second Action run with `foraro13` on both builds preserved both drivers across promotion. The 1.2 driver was extracted (3 mm physical shift and 9 mm drawn head shift at promotion). On 1.0 the driver had settled across the cabin before the pull. At 1.2 seconds into the animation the chest was 1.05 m on the opposite side of the car's centreline and the native wrist midpoint was 0.30 m on Tommy's side. No grip formed. This is a separate failure from recreating the body. The two repeat traces are in `build/driver-audit/chest-ik-traffic/*-action-repeat.json`.
 
 Installed this local test build in `W:/Mafia10Fixes`. The installed and both lab DLLs have SHA-256 `ba979b52a85c163ab5171232a95d872279f3b723b7ded7e27b00488307886062`. The previous owner files are in `build/driver-audit/owner-before-chest-ik-0111/`.
+
+## 2026-11-21 — Two-handed driver grips (0.1.12)
+
+In the owner's `pontfor11` capture the chest jumped 0.416 m at engagement. The pelvis was 0.49 m closer to the driver door. In `chemafor12` both hands had already arrived when the pull began, but chest travel later reached 0.067 m in 16 ms. The two captures are `build/driver-audit/owner-pull-2186.json` and `owner-pull-5586.json`.
+
+Use the same spine, clavicle and arm reach calculation for drawing and for physical contact. Corrected the rotation direction for LS3D row vectors. Only ribcage, waist, hips and the upper half of each thigh supply paired contact points. The load starts on the existing surface after both hands reach it, stays on those material points and follows the pull with limited acceleration. The trace records each wrist, its own contact point and the selected part.
+
+On 1.0 and 1.2, the cross-seat regression reproduced the owner's pose with the chest 0.49 m farther into the cabin. Both runs selected the pelvis. Chest displacement was under 0.4 mm in the first held frame, and the chest, pelvis and both feet cleared the driver's wheel line. Eight more runs covered the Falconer, `chemafor12`, ambulance and Bolt V8 Touring. All 24 gameplay checks passed. The ten captures also passed the wrist, grip spacing and grip travel checks. See `build/driver-audit/adaptive-grip-a/c-cross-*.json` and `adaptive-grip-c/`.
+
+Traffic still has two distinct limits. On 1.0 the best simultaneous wrist contact in the `forade11` trace was 9 cm short, so no grip formed. On 1.2 the `fordtru10` driver retained the original body and was held at the pelvis for 0.62 s, but the final chest, pelvis and feet were inside the wheel line. A successful two-hand grip alone does not prove extraction. Keep these traces for work on Tommy's approach and the loaded portion of the pull.
+
+Installed DLL SHA-256 `6372f34295b9894261df930c34daf8bf4a8b9e7f77e70e8a26f702dee9a42945` in `W:/Mafia10Fixes`. The previous files are in `build/driver-audit/owner-before-adaptive-grip-0112/`.

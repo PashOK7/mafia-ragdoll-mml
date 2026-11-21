@@ -28,7 +28,7 @@ void Init(LogFn log);
 bool Add(Ragdoll *r, std::string *err, const void *seatedIn = nullptr, const void *struckBy = nullptr);
 // Move a seated corpse with the player's grip during the native extraction track.
 void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt);
-float ChestContacts(const Ragdoll *r, V3 (&contacts)[2]); // left, right in world space; IK blend weight
+float PullContacts(const Ragdoll *r, V3 (&contacts)[2], const char **part = nullptr);
 void FinishPull(Ragdoll *r);
 const void *SeatedCar(const Ragdoll *r);
 float GripDistance(const Ragdoll *r, V3 *contact = nullptr); // physical grip error in metres, or -1 when released
