@@ -6,6 +6,42 @@ from check_transport_occupants import Game
 from check_scalp_meshes import check as check_scalps
 
 
+def check_truck_carry(game):
+    # The truck hits the physical body during its first fall. Measure the actual
+    # prop along the truck's path, including travel after it becomes independent.
+    previous = game.player()['vehicle']['actor']
+    ground = game.call('world.ground', at=[-1981, 0, 75])['height']
+    truck = game.call('world.spawn', car=61, at=[-1981, ground+.12, 75], dir=[0,0,1])['actor']
+    game.made.append(truck)
+    try:
+        game.call('world.seat', actor='player', car=truck, seat=0)
+        game.later('world.seat', actor='player', car=previous, seat=0)
+        game.sleep(250)
+        start = game.call('vehicle.body', car=truck)['pos'][2]+5.8
+        actor = game.spawn_human('civil15', [-1981, ground+.04, start])
+        game.call('human.anim', actor=actor, play='stand')
+        game.sleep(160)
+        def hats():
+            return {p['prop']: p['pos'][2] for p in game.call('props.list')['props']
+                    if p['model'].lower() == 'rdhat_civil15_lined.i3d'}
+        before = set(hats())
+        game.call('vehicle.move', car=truck, velocity=[0,0,18], ms=1050)
+        game.call('human.hit', actor=actor, type=0, damage=1000, dir=[0,0,0])
+        flight = []
+        for _ in range(45):
+            positions = hats()
+            for prop in positions.keys()-before:
+                flight.append(positions[prop]-start)
+            if len(flight) >= 12:
+                break
+            game.sleep(24)
+        assert flight and flight[0] > 1 and max(flight)-flight[0] > .6, flight
+        print(game.build, 'truck impact: hat first seen', round(flight[0],2),
+              'm forward, then travelled another', round(max(flight)-flight[0],2), 'm')
+    finally:
+        game.cleanup()
+
+
 def check(game):
     check_scalps(game)
     start = game.pos('player')
@@ -59,6 +95,8 @@ def check(game):
     game.sleep(1500)
     assert set(hats()) == before
     print(game.build, 'bareheaded Tommy spawned no hat')
+    game.cleanup()
+    check_truck_carry(game)
 
 
 if __name__ == '__main__':

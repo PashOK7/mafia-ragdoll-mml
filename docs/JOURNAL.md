@@ -753,3 +753,11 @@ The detached prop has an inward-facing shell with reversed normals and stitched 
 In both windowed labs all 114 registered props passed the interior triangle test and all 212 wearer detail levels passed the crown tests. Civil19, freegang01, TommyHAT, pauliecoathat and czena08 kept their hats on activation and released during the fall after 0.544–0.624 s across ten trials. Matching bystanders kept their hats and bareheaded Tommy produced no prop. From below, civil19, freegang01 and TommyHAT covered the sky through the opening in each build. The archived civil19 screenshot shows the brim, inner wall and crown. The fit regression passed at 20, 30, 60 and 144 Hz for upright travel, a steady 30-degree lean, free fall, inversion and a lateral jolt.
 
 The owner's 1.0 game hot-loaded generation 2 of 0.1.17 at 11:01:16, prepared 114 wearers and logged a civil17 hat releasing after 0.197 s. The installed and live DLL hash is `39c3d80d57749c9ad8bf59390c28dd36f9fafe8cc897bbbaf4fd5c7cc721fbc1`.
+
+## 2026-11-21 — Carry the hat through the impact (0.1.18)
+
+The owner's 0.1.17 log included a release at 0.096 s. A truck moving at 18 m/s reproduced the complaint in the 1.0 lab: the hat released at 0.160 s with forward velocity −0.529 m/s. The previous free-slip velocity could cancel the motion of the attached visual. The band now resists lateral acceleration and must lift over the crown. The fit compares movement of the mount with movement of the torso and waits for clearance from vehicle contacts and the native vehicle collision shapes.
+
+The launch velocity is measured at the actual mounting point over recent physics ticks. This includes rotational travel and position corrections from the solver. Intermediate tests with instantaneous velocities or a release inside vehicle collision could still leave a prop behind. The regression now tracks the independent prop through the game world.
+
+In the final 18 m/s truck runs the hat was first observed detached 27.31 m forward in 1.0 and 24.35 m in 1.2, then travelled another 5.99 m and 9.19 m respectively during observation. Both labs also passed the five ordinary fall cases, bystander independence, bareheaded control, and mesh tests. The fit tests passed at 20, 30, 60 and 144 Hz. Owner installation SHA-256: `df5a38c4095376df90a251578f4a593ad58ebf4dd5130bc033ee029802423cac`.

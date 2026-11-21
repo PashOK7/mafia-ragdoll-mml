@@ -9,6 +9,7 @@
 #include "game.h"
 #include "mod.h"
 #include "ragdoll.h"
+#include "jolt_world.h"
 
 namespace headwear {
 namespace {
@@ -123,7 +124,38 @@ void Drop(Ragdoll &body, float dt) {
     float radius;
     body.BodyCapsule(Ragdoll::B_HEAD,&base,&tip,&radius);
     V3 up=Norm(tip-base);
-    if (!body.hatFit.slips(up,body.PointVelocity(Ragdoll::B_HEAD,tip),dt)) return;
+    const V3 torso=(body.BodyPos(Ragdoll::B_CHEST)+body.BodyPos(Ragdoll::B_PELVIS))*.5f;
+    auto &fit=body.hatFit;
+    if (fit.tracking) {
+        if (!(dt>0)) return;
+        fit.track(body.HeadWorldPoint(fit.mount),torso,dt);
+        if (!fit.slips(up,fit.hatMotion,dt,fit.torsoMotion)) return;
+        // A vehicle still supporting or striking the wearer can intercept the
+        // newly created prop in the same step. Release once the wearer is clear.
+        for (const auto &hit:jolt_world::CarContacts())
+            if (!hit.sensor && hit.owner==reinterpret_cast<uintptr_t>(&body)) return;
+        // Test the native collision volume too: native props and the Jolt
+        // ragdoll can see different vehicle geometry in the same place.
+        constexpr float brim=.18f;
+        V3 extent{brim,brim,brim}, lo=fit.lastHat-extent, hi=fit.lastHat+extent;
+        MmlShape shapes[32];
+        int count=H->world_shapes(M,&lo.x,&hi.x,MML_WORLD_MOVING|MML_WORLD_NO_PEOPLE,shapes,32);
+        for (int i=0;i<std::min(count,32);++i) {
+            const auto &s=shapes[i];
+            if (!(s.classes&0x200)) continue;
+            V3 d=fit.lastHat-V3{s.center[0],s.center[1],s.center[2]};
+            if (s.kind==MML_SHAPE_SPHERE && Len(d)<=brim+s.half[0]) return;
+            if (s.kind==MML_SHAPE_BOX) {
+                float squared=0;
+                for (int k=0;k<3;++k) {
+                    const float *a=s.axes+k*3;
+                    float gap=std::max(0.f,std::abs(Dot(d,{a[0],a[1],a[2]}))-s.half[k]);
+                    squared+=gap*gap;
+                }
+                if (squared<=brim*brim) return;
+            }
+        }
+    }
     body.headwearChecked = true;
     void *neck = game::FindChild(body.model,"neck");
     if (!neck) return;
@@ -156,11 +188,17 @@ void Drop(Ragdoll &body, float dt) {
         if (f==body.Frames()+19) return;
         auto idx=f-body.Frames();
         const V3 position=origins[idx]+bones[idx].Apply(local);
+        if (!fit.tracking) {
+            fit.mount=body.HeadLocalPoint(position);
+            fit.track(position,torso,dt);
+            body.headwearChecked=false;
+            return;
+        }
         const Q rotation=QuatOf(M3::FromWorld(world)*nativeNeck.T()*bones[idx]);
         const float scale = Len(M3::Raw(world).r[0]);
         void *prop = H->prop_create(M,(name+"_lined").c_str(),nullptr,&position.x,&rotation.w,scale);
         if (!prop) return;
-        V3 velocity = body.PointVelocity(Ragdoll::B_HEAD,position)+body.hatFit.velocity;
+        V3 velocity=fit.hatMotion;
         // Mafia puts a prop created at zero velocity to sleep in mid-air.
         // Start a stationary, newly unsupported hat with its first gravity step.
         const float gravityStep=9.81f*std::clamp(dt,.001f,.05f);
@@ -172,9 +210,9 @@ void Drop(Ragdoll &body, float dt) {
         }
         fallen.emplace(frame,prop);
         show(frame,false);
-        Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f slip %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f",
-            name.c_str(),body.serial,body.age,up.y,Len(body.hatFit.offset),position.x,position.y,position.z,
-            velocity.x,velocity.y,velocity.z);
+        Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
+            name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
+            velocity.x,velocity.y,velocity.z,fit.torsoMotion.x,fit.torsoMotion.y,fit.torsoMotion.z);
         return;
     }
 }
