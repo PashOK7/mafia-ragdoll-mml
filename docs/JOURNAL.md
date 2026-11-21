@@ -701,3 +701,7 @@ On 1.0 and 1.2, the cross-seat regression reproduced the owner's pose with the c
 Traffic still has two distinct limits. On 1.0 the best simultaneous wrist contact in the `forade11` trace was 9 cm short, so no grip formed. On 1.2 the `fordtru10` driver retained the original body and was held at the pelvis for 0.62 s, but the final chest, pelvis and feet were inside the wheel line. A successful two-hand grip alone does not prove extraction. Keep these traces for work on Tommy's approach and the loaded portion of the pull.
 
 Installed DLL SHA-256 `6372f34295b9894261df930c34daf8bf4a8b9e7f77e70e8a26f702dee9a42945` in `W:/Mafia10Fixes`. The previous files are in `build/driver-audit/owner-before-adaptive-grip-0112/`.
+
+## 2026-11-21 — Bullet impact (0.1.13)
+
+The default impulse per damage point rose from 1 to 2 N s. The per-shot cap rose from 120 to 240 N s and the local speed allowance from 8 to 16 m/s. The native hit handler distinguishes bullets from other blows, including when carrying recent hits into a new ragdoll. Traffic and railway occupants use the same shot settings. A native projectile to each palm in both windowed labs gave a measured local forearm velocity change of 8.0 m/s on 0.1.12 and 16.0 m/s on 0.1.13. All four shots hit the matching forearm on each build pair. The owner game loaded 0.1.13 as generation 4 in the running process.

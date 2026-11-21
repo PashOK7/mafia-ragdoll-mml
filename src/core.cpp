@@ -54,17 +54,21 @@ namespace {
 #define LOG(...) mod::Log(__VA_ARGS__)
 
 // ---- settings (config.json; the game's Options > Mods)
+struct HitStrength {
+    float perDamage; // N s per point of native damage
+    float maxImpulse; // N s per impact
+    float maxPart; // m/s added locally in a tick
+};
+constexpr HitStrength kOtherHit{1.f, 120.f, 8.f};
 struct Config {
     bool enabled = true;          // a ragdoll on death
     bool carKnockdown = true;     // a car knocks living people over as ragdolls (the player too)
     bool carFeel = true;          // cars feel the bodies they push
     float trackRadius = 60.0f;    // m: people this close to the player have their pose remembered
     bool bullets = true;          // bullets strike the bodies on the ground
-    float kick = 1.0f;            // N s a point of the game's damage: a bullet's momentum
+    HitStrength shot{2.f, 240.f, 16.f};
     float whole = 0.6f;           // the share of a blow that moves the whole body
     float radius = 0.3f;          // m: the parts this close to a blow share the rest
-    float maxPart = 8.0f;         // m/s: the most one blow speeds up a single part
-    float most = 120.0f;          // N s: the most one hit gives (1.5 m/s to the whole of an 80 kg body)
     float remember = 0.3f;        // s: bullets in someone alive given to his body if he dies within this
     bool draw = false;            // the bodies drawn (debug)
     bool blastKnockdown = true;   // use physics for Tommy's native heavy blast fall
@@ -762,7 +766,7 @@ void SafeWatchTramGetUps() {
 }
 
 // ---- bullets in bodies (mafia-ragdoll's hits.cpp, its blows; the loader gives the bodies' bullets)
-struct Kept { void *actor; V3 J, at; bool hasAt; DWORD tick; };
+struct Kept { void *actor; V3 J, at; bool hasAt; DWORD tick; float maxPart; };
 std::vector<Kept> g_kept;
 unsigned g_corpseHits, g_shapesGiven;
 struct BulletContact { void *actor; V3 at; int shape, part; float localDv; };
@@ -770,22 +774,22 @@ BulletContact g_lastBullet{};
 
 // A hit's momentum (N s): the game's damage times the kick, held to the strongest one shot gives (a script's or a
 // test's damage of 1000 threw a body 12 m; a shotgun's pellets are each a hit of their own)
-float Momentum(float damage) { return std::min(damage * g_cfg.kick, g_cfg.most); }
-float Kick(Ragdoll *rd, const V3 &dir, const V3 &at, float damage, int part = -1) {
+float Momentum(float damage, const HitStrength &strength) { return std::min(damage * strength.perDamage, strength.maxImpulse); }
+float Kick(Ragdoll *rd, const V3 &dir, const V3 &at, float damage, int part, const HitStrength &strength) {
     if (!rd || damage <= 0 || Len(dir) < 1e-4f) return 0;
-    return rd->Kick(Norm(dir) * Momentum(damage), at, g_cfg.whole, g_cfg.radius, g_cfg.maxPart, part);
+    return rd->Kick(Norm(dir) * Momentum(damage, strength), at, g_cfg.whole, g_cfg.radius, strength.maxPart, part);
 }
-void Remember(void *actor, const V3 &dir, const V3 *at, float damage) {
+void Remember(void *actor, const V3 &dir, const V3 *at, float damage, const HitStrength &strength) {
     if (!actor || damage <= 0 || Len(dir) < 1e-4f || g_cfg.remember <= 0) return;
     if (g_kept.size() >= 256) g_kept.erase(g_kept.begin());
-    g_kept.push_back({actor, Norm(dir) * Momentum(damage), at ? *at : V3{0, 0, 0}, at != nullptr, GetTickCount()});
+    g_kept.push_back({actor, Norm(dir) * Momentum(damage, strength), at ? *at : V3{0, 0, 0}, at != nullptr, GetTickCount(), strength.maxPart});
 }
 void TakeRemembered(void *actor, Ragdoll *rd) {
     DWORD now = GetTickCount(), keep = (DWORD)(g_cfg.remember * 1000.0f);
     for (size_t i = 0; i < g_kept.size();) {
         const Kept &k = g_kept[i];
         if (k.actor != actor) { i++; continue; }
-        if (rd && now - k.tick <= keep) rd->Kick(k.J, k.hasAt ? k.at : rd->Center(), g_cfg.whole, g_cfg.radius, g_cfg.maxPart);
+        if (rd && now - k.tick <= keep) rd->Kick(k.J, k.hasAt ? k.at : rd->Center(), g_cfg.whole, g_cfg.radius, k.maxPart);
         g_kept.erase(g_kept.begin() + i);
     }
 }
@@ -1124,7 +1128,7 @@ void ApplyTransportShot(const TransportShot &shot, const V3 &from, const V3 &dir
         closest = distance;
     }
     if (!target) return;
-    const float dv = Kick(target, dir, point, damage, part);
+    const float dv = Kick(target, dir, point, damage, part, g_cfg.shot);
     g_lastBullet = {target->Model(), point, part, part, dv};
     ++g_corpseHits;
 }
@@ -1177,7 +1181,7 @@ void RailBulletStretch(MmlMidContext *ctx, void *) {
         target->lastShooter = shooter;
         target->hasShotSegment = true;
         if (continuing) return;
-        const float dv = Kick(target->body.get(), axis, point, damage, part);
+        const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
         g_lastBullet = {target->model, point, part, part, dv};
         ++g_corpseHits;
     };
@@ -2107,7 +2111,7 @@ int HitFilter(void *person, int, MmlHumanHit *hit, void *) {
         V3 d{hit->dir.x, hit->dir.y, hit->dir.z}, at{hit->pos.x, hit->pos.y, hit->pos.z};
         if (Len(at) < 1e-3f) at = rd->Center();
         int part = Ragdoll::BulletBody(hit->shape - 1);
-        float dv = Kick(rd, d, at, hit->damage, part);
+        float dv = Kick(rd, d, at, hit->damage, part, g_cfg.shot);
         g_lastBullet = {person, at, hit->shape - 1, part, dv};
         g_corpseHits++;
         return MML_HIT_TAKEN;
@@ -2380,6 +2384,7 @@ void OnHit(const MmlEvent &ev) {
     ListPeople();   // (a hit between ticks: the pedestrians as they are)
     bool hasPos = Len(pos) > 1e-3f;
     bool bullet = type == 0 && !car;
+    const HitStrength &strength = bullet ? g_cfg.shot : kOtherHit;
     Ragdoll *rd = Find(human);
     if (!rd) {
         bool died = wasAlive && !alive;
@@ -2398,7 +2403,7 @@ void OnHit(const MmlEvent &ev) {
         bool knocked = alive && ((hardCarHit && g_cfg.carKnockdown) || body || playerBlast) &&
                        (IsPed(human) || !SeatCarOf(human));
         if (!died && !knocked) {
-            if (!blast && !car && (!bullet || g_cfg.bullets)) Remember(human, dir, hasPos ? &pos : nullptr, dmg);   // (a shotgun's pellets)
+            if (!blast && !car && (!bullet || g_cfg.bullets)) Remember(human, dir, hasPos ? &pos : nullptr, dmg, strength);
             return;
         }
         std::string err;
@@ -2423,7 +2428,7 @@ void OnHit(const MmlEvent &ev) {
     }
     if (blast) return;   // an explosion: its blast throws every body near it (OnExplosion, the event after the hits)
     if (bullet && !g_cfg.bullets) return;
-    if (bullet || dmg > 0) Kick(rd, dir, at, dmg);
+    if (bullet || dmg > 0) Kick(rd, dir, at, dmg, -1, strength);
 }
 
 // An explosion (the game's NewExplosion, after its damage: those it killed or knocked over are ragdolls already):
@@ -2551,11 +2556,11 @@ void Settings() {
         g_kept.clear();
         for (auto &r : g_ragdolls) { Unshape(r->actor); r->shapeAtRest = false; }
     }
-    g_cfg.kick = num("bullet_kick", d.kick);
+    g_cfg.shot.perDamage = num("bullet_kick", d.shot.perDamage);
     g_cfg.whole = num("bullet_whole", d.whole);
     g_cfg.radius = num("bullet_radius", d.radius);
-    g_cfg.maxPart = num("bullet_max_part", d.maxPart);
-    g_cfg.most = num("bullet_most", d.most);
+    g_cfg.shot.maxPart = num("bullet_max_part", d.shot.maxPart);
+    g_cfg.shot.maxImpulse = num("bullet_most", d.shot.maxImpulse);
     g_cfg.remember = num("bullet_remember", d.remember);
     g_cfg.draw = flag("debug_draw", d.draw);
     g_cfg.blastKnockdown = flag("blast_knockdown", d.blastKnockdown);
