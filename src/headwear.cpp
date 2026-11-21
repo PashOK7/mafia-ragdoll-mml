@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include "headwear.h"
@@ -222,6 +223,23 @@ void show(void *frame, bool on) {
     using SetOn = void (__stdcall *)(void *, bool);
     reinterpret_cast<SetOn>((*reinterpret_cast<void ***>(frame))[0x24/4])(frame,on);
 }
+
+// C_player::SetAlpha fades the current skin and its cached object list. After a
+// player model change that list can omit the generated hat under the neck.
+constexpr int kPlayerSkin = 0xab4;
+constexpr int kObjectOpacity = 0x214;
+constexpr int kVisualType = 0x1d4;
+constexpr uint32_t kObjectVisual = 0x5f4a424f;
+struct PlayerHatFade {
+    void *frame = nullptr;
+    float original = 1.f;
+} playerHatFade;
+
+void SetOpacity(void *frame, float opacity) {
+    using SetTransparency = void (__stdcall *)(void *, float);
+    reinterpret_cast<SetTransparency>((*reinterpret_cast<void ***>(frame))[0x84/4])(frame,opacity);
+}
+
 void gone(void *frame, void *) {
     mounted.erase(frame);
     auto it = fallen.find(frame);
@@ -229,6 +247,44 @@ void gone(void *frame, void *) {
     retired.push_back(it->second);
     fallen.erase(it);
 }
+}
+
+void ApplyPlayerFade() {
+    void *player=game::Player();
+    if (!player) return;
+    void *skin=game::at<void *>(player,kPlayerSkin);
+    if (!skin) return;
+    const float opacity=game::at<float>(skin,kObjectOpacity);
+    if (!(opacity>=0.f && opacity<1.f)) return;
+
+    void *model=game::at<void *>(player,game::kActorFrame);
+    void *neck=model ? game::FindChild(model,"neck") : nullptr;
+    if (!neck) return;
+    std::vector<void *> children;
+    game::EnumFrames(neck,&children);
+    for (void *frame:children) {
+        if (game::at<uint32_t>(frame,game::kFrameType)!=1 ||
+            game::at<uint32_t>(frame,kVisualType)!=kObjectVisual ||
+            !(game::at<uint32_t>(frame,game::kFrameFlags)&1)) continue;
+        const char *full=game::at<const char *>(frame,game::kFrameName);
+        if (!full) continue;
+        const char *dot=strrchr(full,'.');
+        std::string_view name=dot ? dot+1 : full;
+        if (!name.starts_with("rdhat_") || !name.ends_with("_scalp")) continue;
+
+        const float original=game::at<float>(frame,kObjectOpacity);
+        if (opacity<original) {
+            playerHatFade={frame,original};
+            SetOpacity(frame,opacity);
+        }
+        return;
+    }
+}
+
+void RestorePlayerFade() {
+    if (!playerHatFade.frame) return;
+    SetOpacity(playerHatFade.frame,playerHatFade.original);
+    playerHatFade={};
 }
 
 void Prepare() {
