@@ -789,3 +789,9 @@ Loose hats now keep the existing animated contact capsules active for walkers ne
 Quadratic drag dissipates speed during travel, with an effective coefficient of 0.32 per metre. Each bullet now imparts 0.002 Ns per damage point, capped at 0.12 Ns. In the final windowed labs Tommy's walk moved the hat 0.089 m on 1.0 and 0.139 m on 1.2. A standard test shot transferred 0.056 Ns. The observed shot displacement was 0.197 m on 1.0 and 0.018 m on 1.2. A truck that keeps driving can push the hat again. When the truck was stopped after release, the hat travelled another 2.0 m on both builds.
 
 The owner's game hot-loaded 0.1.22 at 11:58:57.912, generation 6. DLL SHA-256 `66959fa962d8c3fabbad441b70a52e5449d87dda30654a70d6b4afcd80a0d8bf`.
+
+## 2026-11-21 — Native ground support for loose hats (0.1.23)
+
+Loose hats now contribute their own local scenery focus while moving. A native static collision query also checks the descending path and uses the rotated core's extent along the support normal. If the Jolt pose penetrates that support, the hat is moved out along the normal and its inward velocity is removed. Water faces and steep sides do not count as floor support. Normal hat-body contacts stay in Jolt.
+
+The windowed labs logged native support corrections up to 0.052 m. Five wearer tests on each build checked the final hat height against the native ground. The shot and walking checks passed, and the truck hats moved a further 2.93 m on 1.0 and 2.91 m on 1.2 after release. The owner's specific through-ground occurrence had no trajectory capture. Installed DLL SHA-256 `d0aabae638cc1fb7fbbc03e5daeab2d1230cd717822922bc43c4ececa936dc51`.

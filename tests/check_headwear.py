@@ -59,6 +59,11 @@ def check(game):
     def hats():
         return {p['prop']: p for p in game.call('props.list')['props'] if p['model'].startswith('rdhat_')}
 
+    def above_ground(prop, start):
+        pos=hats()[prop]['pos']
+        height=game.call('world.ground',at=[pos[0],max(start[1],pos[1])+.3,pos[2]])['height']
+        assert -.045<pos[1]-height<.35, (pos,height)
+
     def spawn(name, offset):
         marker = '.rdhat_' + name.lower()
         def frames():
@@ -145,6 +150,9 @@ def check(game):
         if model == 'civil19':
             shoot_hat(prop)
             walk_into_hat(prop)
+        else:
+            game.sleep(1600)
+        above_ground(prop,after[prop]['pos'])
         game.cleanup()
     bare, markers = spawn('Tommy', 9)
     assert not markers

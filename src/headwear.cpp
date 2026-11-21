@@ -39,7 +39,14 @@ const char *candidates =
     "tommytaxidriverhigh;tony;vrabec;vratny1;vypravci2;willg2;willman01;willman02;zenarad01";
 std::unordered_map<std::string,V3> ready;
 bool prepared = false;
-struct FallenHat { void *prop, *pedestrian, *model; bool wasDead; JPH::BodyID body; bool touchedRagdoll=false; };
+struct FallenHat {
+    void *prop, *pedestrian, *model;
+    bool wasDead;
+    JPH::BodyID body;
+    V3 previous, half;
+    bool touchedRagdoll=false;
+    bool reportedGround=false;
+};
 std::unordered_map<void *, FallenHat> fallen;
 std::vector<FallenHat> retired;
 constexpr float hatMass=.22f;
@@ -160,11 +167,43 @@ void Tick(std::span<const MmlPedestrian> pedestrians) {
 void Sync() {
     if (fallen.empty() || !jolt_world::Running()) return;
     auto &bi=jolt_world::Bodies();
-    for (const auto &[_,hat]:fallen) {
+    for (auto &[_,hat]:fallen) {
         JPH::RVec3 p;
         JPH::Quat q;
         bi.GetPositionAndRotation(hat.body,p,q);
         V3 pos=jolt_world::ToWorld(F(p));
+        if (pos.y<hat.previous.y) {
+            // The nearby visual-mesh cache does not contain every native floor.
+            // Check the path before the render transform is committed.
+            const V3 up=F(q.Conjugated()*JPH::Vec3::sAxisY());
+            const float reach=std::abs(up.x)*hat.half.x+std::abs(up.y)*hat.half.y+std::abs(up.z)*hat.half.z;
+            const V3 from=hat.previous+V3{0,.025f,0};
+            const V3 to=pos-V3{0,reach,0};
+            MmlHit ground{};
+            if (H->world_ray(M,&from.x,&to.x,MML_WORLD_STATIC,nullptr,&ground) &&
+                ground.normal[1]>.5f && (ground.flags>>24)!=31 && (ground.flags>>24)!=44) {
+                V3 n{ground.normal[0],ground.normal[1],ground.normal[2]};
+                const V3 local=F(q.Conjugated()*J(n));
+                const float support=std::abs(local.x)*hat.half.x+std::abs(local.y)*hat.half.y+
+                                    std::abs(local.z)*hat.half.z;
+                const V3 surface{ground.pos[0],ground.pos[1],ground.pos[2]};
+                const float penetration=support-Dot(pos-surface,n);
+                if (penetration>.008f) {
+                    pos+=n*penetration;
+                    auto velocity=bi.GetLinearVelocity(hat.body);
+                    const auto normal=J(n);
+                    velocity-=normal*std::min(0.f,velocity.Dot(normal));
+                    bi.SetPosition(hat.body,J(jolt_world::ToJolt(pos)),JPH::EActivation::DontActivate);
+                    bi.SetLinearVelocity(hat.body,velocity);
+                    if (!hat.reportedGround) {
+                        hat.reportedGround=true;
+                        Log("headwear native ground support at %.3f %.3f %.3f, correction %.3f m",
+                            surface.x,surface.y,surface.z,penetration);
+                    }
+                }
+            }
+        }
+        hat.previous=pos;
         const Q rotation{q.GetW(),-q.GetX(),-q.GetY(),-q.GetZ()};
         H->prop_place(M,hat.prop,&pos.x,&rotation.w,0);
     }
@@ -192,6 +231,8 @@ void ApplyAirDrag(float dt) {
     for (const auto &[_,hat]:fallen) {
         if (!bi.IsActive(hat.body)) continue;
         const auto velocity=bi.GetLinearVelocity(hat.body);
+        const V3 p=jolt_world::ToWorld(F(bi.GetPosition(hat.body)));
+        jolt_world::AddFocus(p-V3{3,3,3},p+V3{3,2,3});
         // Integrate quadratic drag analytically so a fast hat sheds speed
         // rapidly while a foot can still slide it along the ground.
         constexpr float dragPerMetre=.32f;
@@ -317,11 +358,11 @@ void Drop(Ragdoll &body, float dt) {
             H->prop_remove(M,prop);
             return;
         }
-        V3 half=ready.at(name)*(.5f*scale);
+        V3 bounds=ready.at(name)*(.5f*scale);
+        V3 half{std::max(.025f,bounds.x*.70f),std::max(.018f,bounds.y*.65f),std::max(.025f,bounds.z*.70f)};
         // The central volume carries mass. Leave the soft brim out of the
         // solid shape so a release from the scalp starts with little overlap.
-        auto shape=new JPH::BoxShape(J({std::max(.025f,half.x*.70f),std::max(.018f,half.y*.65f),
-                                      std::max(.025f,half.z*.70f)}),.008f);
+        auto shape=new JPH::BoxShape(J(half),.008f);
         JPH::Quat q(-rotation.x,-rotation.y,-rotation.z,rotation.w);
         JPH::BodyCreationSettings settings(shape,J(jolt_world::ToJolt(position)),q,
                                            JPH::EMotionType::Dynamic,jolt_world::kDynamic);
@@ -340,7 +381,7 @@ void Drop(Ragdoll &body, float dt) {
             return;
         }
         fallen.emplace(frame,FallenHat{prop,body.pedestrian ? body.actor : nullptr,body.model,
-                                       body.pedestrian && !body.puppet,id});
+                                       body.pedestrian && !body.puppet,id,position,half});
         show(frame,false);
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
