@@ -91,7 +91,7 @@ void Prepare() {
         hats::Bytes source(static_cast<size_t>(size)), person, prop;
         if (H->file_read(M,gameName.c_str(),source.data(),source.size(),MML_FILE_GAME)!=size) continue;
         std::string marker = "rdhat_"+name;
-        if (!hats::split(source,marker,person,prop)) continue;
+        if (!hats::split(source,marker+"_scalp",person,prop)) continue;
         const std::string propPath = dir+marker+".4ds";
         const std::string propName = "models\\"+marker+".4ds";
         if (otherProvider(propName,propPath) || !save(propPath,prop) || !save(personPath,person)) continue;
@@ -123,7 +123,10 @@ void Drop(Ragdoll &body, float dt) {
         const char *full = game::at<const char *>(frame,game::kFrameName);
         if (!full) continue;
         const char *dot = strrchr(full,'.');
-        const std::string name = hats::lower(dot ? dot+1 : full);
+        std::string name = hats::lower(dot ? dot+1 : full);
+        // A wearer still in Mafia's cache from 0.1.15 has an open crown.
+        if (!name.ends_with("_scalp")) continue;
+        name.resize(name.size()-6);
         if (!ready.contains(name) || fallen.contains(frame)) continue;
         for (void *f=frame; f; f=game::at<void *>(f,game::kFrameParent)) {
             if (!(game::at<unsigned>(f,game::kFrameFlags)&1)) return;
@@ -138,7 +141,8 @@ void Drop(Ragdoll &body, float dt) {
         V3 velocity = body.PointVelocity(Ragdoll::B_HEAD,{world[12],world[13],world[14]});
         // Mafia puts a prop created at zero velocity to sleep in mid-air.
         // Start a stationary, newly unsupported hat with its first gravity step.
-        if (Len(velocity)<.001f) velocity.y -= 9.81f*std::clamp(dt,.001f,.05f);
+        const float gravityStep=9.81f*std::clamp(dt,.001f,.05f);
+        if (Len(velocity)<gravityStep) velocity.y=std::min(velocity.y,-gravityStep);
         MmlPropPhysics physics{1,{velocity.x,velocity.y,velocity.z}};
         if (!H->prop_physics(M,prop,&physics) || !H->frame_watch(M,frame,gone,nullptr)) {
             H->prop_remove(M,prop);

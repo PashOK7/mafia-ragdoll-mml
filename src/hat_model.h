@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,38 +40,43 @@ inline bool hatTexture(const std::string &name) {
     return t.ends_with(".bmp") && (t.find("klb")!=t.npos || t.find("cpc")!=t.npos ||
         t.starts_with("hoolcep") || t.starts_with("tomdcep") || t.starts_with("luccepc"));
 }
-struct Group { uint16_t material; std::vector<uint16_t> index; };
+struct Group { uint16_t material; std::vector<uint16_t> index; size_t countAt{}; };
 struct Vertex { V3 pos, normal; float uv[2]; };
 struct Lod {
     float distance;
     std::vector<Vertex> vertices;
     std::vector<Group> groups;
+    std::vector<Group> retained;
+    std::set<uint16_t> morphVertices;
+    size_t vertexStart{}, groupCountAt{};
     struct Bone { uint32_t first, rigid; std::array<float,16> bind; };
     std::vector<Bone> bones;
 };
-struct Edit { size_t start,end; uint8_t groups; bool count; };
-inline void readMesh(Reader &r, const std::vector<bool> &hat, std::vector<Lod> &lods,
-                     std::vector<Edit> &edits, bool skinned) {
+struct Edit { size_t start,end; Bytes replacement; };
+inline void readMesh(Reader &r, const std::vector<bool> &hat, std::vector<Lod> &lods, bool skinned) {
     if (r.get<uint16_t>()) return; // instanced visual, mesh stored on its source
     lods.resize(r.get<uint8_t>());
     for (auto &lod:lods) {
         lod.distance=r.get<float>();
         lod.vertices.resize(r.get<uint16_t>());
+        lod.vertexStart=r.pos;
         for (auto &v:lod.vertices) v=r.get<Vertex>();
-        size_t count=r.pos;
+        lod.groupCountAt=r.pos;
         const int groups=r.get<uint8_t>();
         for (int i=0;i<groups;++i) {
             size_t start=r.pos;
             Group group{};
+            group.countAt=start;
             group.index.resize(size_t(r.get<uint16_t>())*3);
-            for (auto &index:group.index) index=r.get<uint16_t>();
+            for (auto &index:group.index) {
+                index=r.get<uint16_t>();
+                if (index>=lod.vertices.size()) throw Reader::Invalid{};
+            }
             group.material=r.get<uint16_t>();
             if (skinned && group.material<hat.size() && hat[group.material] && !group.index.empty()) {
-                edits.push_back({start,r.pos,0,false});
                 lod.groups.push_back(std::move(group));
-            }
+            } else if (skinned) lod.retained.push_back(std::move(group));
         }
-        if (!lod.groups.empty()) edits.push_back({count,count+1,uint8_t(groups-lod.groups.size()),true});
     }
     if (!skinned) return;
     for (auto &lod:lods) {
@@ -87,32 +94,41 @@ inline void readMesh(Reader &r, const std::vector<bool> &hat, std::vector<Lod> &
         }
     }
 }
-inline void skipMorph(Reader &r) {
+inline void readMorph(Reader &r, std::vector<Lod> &meshes) {
     int targets=r.get<uint8_t>();
     if (!targets) return;
     int channels=r.get<uint8_t>(), lods=r.get<uint8_t>();
-    for (int i=0;i<channels*lods;++i) {
+    for (int l=0;l<lods;++l) for (int c=0;c<channels;++c) {
         auto n=r.get<uint16_t>();
         if (!n) continue;
         r.skip(size_t(n)*targets*24);
-        if (r.get<uint8_t>()) r.skip(size_t(n)*2);
+        bool indexed=r.get<uint8_t>()!=0;
+        for (unsigned j=0;j<n;++j) {
+            auto index=indexed ? r.get<uint16_t>() : uint16_t(j);
+            if (l<int(meshes.size())) meshes[l].morphVertices.insert(index);
+        }
     }
     r.skip(40);
 }
-inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre) {
+} // namespace hats
+#include "scalp.h"
+namespace hats {
+inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre, bool worn) {
     Bytes mesh;
     put(mesh,uint16_t(0));
-    put(mesh,uint8_t(lods.size()));
-    for (const auto &lod:lods) {
-        if (joint<0 || size_t(joint)>=lod.bones.size()) throw Reader::Invalid{};
-        const auto &bone=lod.bones[joint];
+    const size_t count=worn ? lods.size() : 1;
+    put(mesh,uint8_t(count));
+    if (joint<0 || size_t(joint)>=lods.front().bones.size()) throw Reader::Invalid{};
+    const auto &bone=lods.front().bones[joint];
+    for (size_t level=0;level<count;++level) {
+        const auto &lod=lods[level];
         M3 basis=M3::Raw(bone.bind.data());
         V3 translation{bone.bind[12],bone.bind[13],bone.bind[14]};
         std::vector<Vertex> vertices;
         auto groups=lod.groups;
         std::vector<int> remap(lod.vertices.size(),-1);
         for (auto &group:groups) for (auto &index:group.index) {
-            if (index>=remap.size() || index<bone.first || index-bone.first>=bone.rigid) throw Reader::Invalid{};
+            if (index>=remap.size() || (!level && (index<bone.first || index-bone.first>=bone.rigid))) throw Reader::Invalid{};
             if (remap[index]<0) {
                 remap[index]=int(vertices.size());
                 auto v=lod.vertices[index];
@@ -132,7 +148,13 @@ inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre) {
             centre=(lo+hi)*.5f;
             if (!(Len(hi-lo)<1.2f && Len(hi-lo)>.08f)) throw Reader::Invalid{};
         }
-        put(mesh,lod.distance); put(mesh,uint16_t(vertices.size()));
+        if (vertices.empty()) {
+            // Native objects keep a valid draw range even at a distance where
+            // the original skin omits the hat. This LOD has zero surface area.
+            vertices.push_back({centre,{0,1,0},{0,0}});
+            groups.push_back({lods.front().groups.front().material,{0,0,0}});
+        }
+        put(mesh,worn ? lod.distance : 0.f); put(mesh,uint16_t(vertices.size()));
         for (auto &v:vertices) { v.pos=v.pos-centre; put(mesh,v); }
         put(mesh,uint8_t(groups.size()));
         for (const auto &g:groups) {
@@ -176,7 +198,8 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
             if (name.starts_with("rdhat_")) return false;
             if (type==1 && ((visual>=0 && visual<=3) || visual==5)) {
                 std::vector<Lod> lods;
-                readMesh(r,hats,lods,edits,visual==2 || visual==3);
+                readMesh(r,hats,lods,visual==2 || visual==3);
+                if (visual==3 || visual==5) readMorph(r,lods);
                 if (std::any_of(lods.begin(),lods.end(),[](auto &l){return !l.groups.empty();})) {
                     if (!hatLods.empty()) return false;
                     const auto &first=lods.front().groups;
@@ -185,11 +208,8 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
                     // Replace those same materials with the neck-rigid original.
                     for (auto &lod:lods) for (auto &g:lod.groups)
                         if (std::none_of(first.begin(),first.end(),[&](auto &f){return f.material==g.material;})) return false;
-                    lods.resize(1);
-                    lods.front().distance=0;
                     hatLods=std::move(lods);
                 }
-                if (visual==3 || visual==5) skipMorph(r);
             } else if (type==10) {
                 r.skip(64); auto id=r.get<uint32_t>();
                 if (name=="neck") { neck=i; joint=int(id); }
@@ -198,8 +218,10 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
             else return false;
         }
         if (neck<0 || hatLods.empty()) return false;
+        removeHatFaces(hatLods,edits);
+        repairCrowns(hatLods,edits);
         V3 centre{};
-        Bytes mesh=object(hatLods,joint,centre);
+        Bytes mesh=object(hatLods,joint,centre,false);
         prop.assign(source.begin(),source.begin()+countAt);
         person=prop; put(prop,uint16_t(1)); put(person,uint16_t(count+1));
         node(prop,mesh,"hat",0,{});
@@ -207,12 +229,14 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
         std::sort(edits.begin(),edits.end(),[](auto &a,auto &b){return a.start<b.start;});
         size_t cursor=countAt+2;
         for (const auto &edit:edits) {
+            if (edit.start<cursor || edit.end<edit.start || edit.end>r.pos) return false;
             person.insert(person.end(),source.begin()+cursor,source.begin()+edit.start);
-            if (edit.count) put(person,edit.groups);
+            person.insert(person.end(),edit.replacement.begin(),edit.replacement.end());
             cursor=edit.end;
         }
         person.insert(person.end(),source.begin()+cursor,source.begin()+r.pos);
-        node(person,mesh,marker,uint16_t(neck+1),centre);
+        auto worn=object(hatLods,joint,centre,true);
+        node(person,worn,marker,uint16_t(neck+1),centre);
         person.insert(person.end(),source.begin()+r.pos,source.end());
         return true;
     } catch (Reader::Invalid &) { return false; }

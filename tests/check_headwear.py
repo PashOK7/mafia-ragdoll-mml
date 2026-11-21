@@ -3,9 +3,11 @@ import math
 import sys
 
 from check_transport_occupants import Game
+from check_scalp_meshes import check as check_scalps
 
 
 def check(game):
+    check_scalps(game)
     start = game.pos('player')
 
     def hats():
@@ -27,7 +29,7 @@ def check(game):
         game.call('human.hit', actor=actor, type=0, damage=1000, dir=[0, 0, 0])
         game.sleep(80)
 
-    for model in ('civil15', 'TommyHAT'):
+    for model in ('civil19', 'freegang01', 'TommyHAT', 'pauliecoathat', 'czena08'):
         owner, a = spawn(model, 3)
         _, b = spawn(model, 6)
         assert len(a) == len(b) == 1, (model, a, b)
@@ -45,6 +47,7 @@ def check(game):
         distance = math.dist(after[prop]['pos'], hats()[prop]['pos'])
         assert distance > .1, (model, distance)
         print(game.build, model, 'independent hat, travelled', round(distance, 3), 'm')
+        game.cleanup()
     bare, markers = spawn('Tommy', 9)
     assert not markers
     before = set(hats())
