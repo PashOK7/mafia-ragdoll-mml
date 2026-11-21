@@ -8,6 +8,21 @@ from check_transport_occupants import Game
 from check_scalp_meshes import check as check_scalps, skin_lods
 
 
+def check_handover(logs):
+    release=next(line.split('headwear release lift ')[1].split() for line in logs
+                 if 'headwear release lift' in line)
+    assert 0<=float(release[0])<=float(release[3])+.001,release
+    handover=next(line.split('headwear handover: ')[1].split() for line in logs
+                  if 'headwear handover: ' in line)
+    assert int(handover[0])>=2,handover
+    assert 0<=float(handover[5])<=.001 and float(handover[9])<=.002,handover
+    assert 0<=float(handover[13])<=.005,handover
+    slide=next(line.split('headwear visible slide ')[1].split() for line in logs
+               if 'headwear visible slide ' in line)
+    assert abs(float(slide[0])-float(release[0]))<=.001,slide
+    assert 0<float(slide[4])<=.068,slide
+
+
 def check_truck_carry(game):
     # The truck hits the physical body during its first fall. Measure the actual
     # prop along the truck's path, including travel after it becomes independent.
@@ -27,6 +42,7 @@ def check_truck_carry(game):
             return {p['prop']: p['pos'][2] for p in game.call('props.list')['props']
                     if p['model'].lower() == 'rdhat_civil15_lined.i3d'}
         before = set(hats())
+        prior_log=set(game.tool('log_tail',lines=100).splitlines())
         seq=game.latest()
         game.call('vehicle.move', car=truck, velocity=[0,0,18], ms=1050)
         # Drive a real hull into the ragdoll. The scripted test vehicle uses
@@ -49,14 +65,21 @@ def check_truck_carry(game):
             if len(flight) >= 12:
                 break
             game.sleep(24)
-        # The stopped truck or the wearer can still catch the hat at low
-        # clearance. Initial carry is required even when that arrests flight.
+        # A roadside slab or a second body contact can reverse the released
+        # hat. Measure its first four physics steps before judging carry.
         hits=game.call('events.since',seq=seq,types='HUMAN_HIT')['events']
         assert any(e['data']['actor']==actor and e['data']['hit_type']==8 and
                    e['data'].get('attacker')==truck for e in hits),hits
-        assert flight and flight[0] > .20 and .25<max(flight)-flight[0] < 12, flight
+        assert flight and .20<flight[0]<12,flight
+        logs=[line for line in game.tool('log_tail',lines=100).splitlines() if line not in prior_log]
+        check_handover(logs)
+        release=next(line for line in logs if 'headwear detached: rdhat_civil15 ' in line)
+        forward=float(release.split(' velocity ')[1].split()[2])
+        first_steps=next(float(line.split(' forward ')[1].split()[0]) for line in logs
+                         if 'headwear flight remaining 28 ' in line)
+        assert 5<forward<24 and .30<first_steps<2,logs[-20:]
         print(game.build, 'truck impact: hat first seen', round(flight[0],2),
-              'm forward, then travelled another', round(max(flight)-flight[0],2), 'm')
+              'm forward and travelled',first_steps,'m in four physics steps')
     finally:
         game.cleanup()
 
@@ -116,9 +139,7 @@ def check_shotgun_carry(game, axis=(0,0,1), model='civil17', moving=False, locat
         assert len(flight)>=4 and (moving or max(flight)>.60),(
             flight,game.call('events.since',seq=seq,types='HUMAN_HIT,BULLET_HIT')['events'])
         logs=[line for line in game.tool('log_tail',lines=100).splitlines() if line not in previous]
-        release=next(line.split('headwear release lift ')[1].split() for line in logs
-                     if 'headwear release lift' in line)
-        assert 0<=float(release[0])<=float(release[3])+.001,release
+        check_handover(logs)
         assert any('headwear separation' in line for line in logs),logs[-15:]
         early_flight=next((float(line.split(' forward ')[1].split()[0]) for line in logs
                            if 'headwear flight remaining 24 ' in line),0)
@@ -296,6 +317,7 @@ def check(game):
         assert visible(first) and visible(second)
         before = hats()
         if model == 'TommyHAT':
+            prior_log=set(game.tool('log_tail',lines=100).splitlines())
             game.call('ragdoll.start', actor=owner)
         else:
             hit(owner)
@@ -310,6 +332,8 @@ def check(game):
         prop = new.pop()
         assert after[prop]['model'].lower() == 'rdhat_' + model.lower() + '_lined.i3d'
         assert after[prop]['parent'] == 'world'
+        if model == 'TommyHAT':
+            check_handover([line for line in game.tool('log_tail',lines=100).splitlines() if line not in prior_log])
         game.sleep(850)
         distance = math.dist(after[prop]['pos'], hats()[prop]['pos'])
         assert math.isfinite(distance) and distance < 20, (model, distance)

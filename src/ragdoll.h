@@ -39,6 +39,7 @@ public:
     void *actor = nullptr;     // identity: a C_human, or a traffic pedestrian element (not an actor)
     void *model = nullptr;     // the model frame whose skeleton is driven
     bool headwearChecked = false;
+    void *headwearFrame = nullptr;
     HatFit hatFit;
     bool pedestrian = false;   // `actor` is a pedestrian manager element
     bool carExtraction = false; // follow the puller's track, which outlasts the victim's track
@@ -124,7 +125,6 @@ public:
     void Probe(V3 *physPelvis, V3 *drawnPelvis, V3 *root) const;
     V3 BodyPos(int b) const { return origin + body[b].x; }   // world centre of a body part
     V3 BodyVel(int b) const { return body[b].v; }            // its velocity (m/s) as the solver last left it
-    V3 BodySpin(int b) const { return body[b].w; }
     V3 HeadLocalPoint(V3 world) const { return InvRotate(body[B_HEAD].q,world-BodyPos(B_HEAD)); }
     V3 HeadWorldPoint(V3 local) const { return BodyPos(B_HEAD)+Rotate(body[B_HEAD].q,local); }
     // Collision capsule of a body part in world space (segment ends and radius), for other simulations.

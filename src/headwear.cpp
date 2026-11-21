@@ -49,13 +49,25 @@ struct HatModel {
 };
 std::unordered_map<std::string,HatModel> ready;
 bool prepared = false;
+struct MountedHat {
+    unsigned serial;
+    void *neck;
+    const std::string *name;
+    HatModel *model;
+    V3 restLocal, previousPosition;
+    JPH::Quat previousRotation;
+    float scale, visibleLift=0;
+    float maxSlideStep=0;
+    unsigned slideFrames=0;
+    bool seen=true;
+    JPH::RefConst<JPH::Shape> shape;
+};
+std::unordered_map<void *,MountedHat> mounted;
 struct FallenHat {
     void *prop, *pedestrian, *model;
     bool wasDead;
     JPH::BodyID body;
     V3 previous, drawn;
-    V3 releaseOffset{};
-    float releaseTime=0;
     const hats::PropMesh *mesh;
     float scale;
     bool touchedRagdoll=false;
@@ -72,18 +84,19 @@ std::unordered_map<void *, FallenHat> fallen;
 std::vector<FallenHat> retired;
 std::unordered_set<void *> physicsVisuals;
 constexpr float hatMass=.22f;
-constexpr float transitionTime=.05f;
 JPH::Vec3 J(V3 v) { return {v.x,v.y,v.z}; }
 V3 F(JPH::RVec3Arg v) { return {float(v.GetX()),float(v.GetY()),float(v.GetZ())}; }
 
 class WearerFilter final:public JPH::BodyFilter {
 public:
-    explicit WearerFilter(uint32_t group):group_(group) {}
+    explicit WearerFilter(uint32_t group,bool onlyWearer=true):group_(group),onlyWearer_(onlyWearer) {}
     bool ShouldCollideLocked(const JPH::Body &body) const override {
-        return body.GetUserData() && body.GetCollisionGroup().GetGroupID()==group_;
+        const bool wearer=body.GetUserData() && body.GetCollisionGroup().GetGroupID()==group_;
+        return wearer==onlyWearer_;
     }
 private:
     uint32_t group_;
+    bool onlyWearer_;
 };
 
 void UpdateRelease(FallenHat &hat,bool asleep) {
@@ -144,31 +157,30 @@ float DrawClearance(const FallenHat &hat,V3 pos,JPH::QuatArg q) {
     return std::clamp(lift,0.f,.05f);
 }
 
-// The convex hat includes the empty space inside its crown. Test its seated
-// pose first and lift it only as far as needed to clear its owner's hull.
-// An obstruction belonging to anything else keeps the hat on the wearer.
-bool ClearRelease(const JPH::Shape *shape,JPH::QuatArg rotation,V3 up,float radius,
-                  uint32_t ownerGroup,V3 &position) {
-    const auto &query=jolt_world::System()->GetNarrowPhaseQueryNoLock();
+bool ShapeClear(const JPH::Shape *shape,JPH::QuatArg rotation,V3 position,
+                const JPH::BodyFilter &filter={}) {
+    const auto transform=JPH::RMat44::sRotationTranslation(rotation,J(jolt_world::ToJolt(position)))
+                             .PreTranslated(shape->GetCenterOfMass());
     JPH::CollideShapeSettings settings;
     settings.mMaxSeparationDistance=.002f;
-    for (int i=0;i<=24;++i) {
-        const V3 candidate=position+up*(radius*i/24.f);
-        const auto transform=JPH::RMat44::sRotationTranslation(rotation,J(jolt_world::ToJolt(candidate)))
-                                 .PreTranslated(shape->GetCenterOfMass());
-        JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> hits;
-        query.CollideShape(shape,JPH::Vec3::sOne(),transform,settings,JPH::RVec3::sZero(),hits);
-        if (!hits.HadHit()) {
-            position=candidate;
-            return true;
-        }
-        for (const auto &hit:hits.mHits) {
-            const auto &bi=jolt_world::Bodies();
-            if (!bi.GetUserData(hit.mBodyID2) || bi.GetCollisionGroup(hit.mBodyID2).GetGroupID()!=ownerGroup)
-                return false;
-        }
+    JPH::AnyHitCollisionCollector<JPH::CollideShapeCollector> hits;
+    jolt_world::System()->GetNarrowPhaseQueryNoLock().CollideShape(
+        shape,JPH::Vec3::sOne(),transform,settings,JPH::RVec3::sZero(),hits,{},{},filter);
+    return !hits.HadHit();
+}
+
+JPH::RefConst<JPH::Shape> Hull(HatModel &model,float scale) {
+    if (!model.hull) {
+        JPH::Array<JPH::Vec3> points;
+        points.reserve(model.mesh.vertices.size());
+        for (V3 vertex:model.mesh.vertices) points.push_back(J(vertex));
+        auto cooked=JPH::ConvexHullShapeSettings(points,.002f).Create();
+        if (!cooked.IsValid()) return {};
+        model.hull=cooked.Get();
     }
-    return false;
+    if (scale==1.f) return model.hull;
+    auto scaled=model.hull->ScaleShape(JPH::Vec3::sReplicate(scale));
+    return scaled.IsValid() ? scaled.Get() : JPH::RefConst<JPH::Shape>{};
 }
 
 void Remove(const FallenHat &hat) {
@@ -211,6 +223,7 @@ void show(void *frame, bool on) {
     reinterpret_cast<SetOn>((*reinterpret_cast<void ***>(frame))[0x24/4])(frame,on);
 }
 void gone(void *frame, void *) {
+    mounted.erase(frame);
     auto it = fallen.find(frame);
     if (it == fallen.end()) return;
     retired.push_back(it->second);
@@ -283,13 +296,13 @@ void Tick(std::span<const MmlPedestrian> pedestrians) {
     retired.clear();
 }
 
-void Sync(float dt) {
+void Sync() {
     if (fallen.empty() || !jolt_world::Running()) return;
     auto &bi=jolt_world::Bodies();
     for (auto &[_,hat]:fallen) {
         const bool asleep=!bi.IsActive(hat.body);
         UpdateRelease(hat,asleep);
-        if (asleep && hat.sleeping && hat.releaseTime<=0) continue;
+        if (asleep && hat.sleeping) continue;
         hat.sleeping=asleep;
         JPH::RVec3 p;
         JPH::Quat q;
@@ -331,12 +344,7 @@ void Sync(float dt) {
         hat.previous=pos;
         // Leave the sleeping body and its contact manifold in Jolt. Move
         // only the rendered surface clear of the asphalt's depth plane.
-        // Ease the owner-clearance correction out of the visual so the
-        // independent hat starts at the last attached pose.
-        hat.releaseTime=std::max(0.f,hat.releaseTime-dt);
-        const float blend=std::clamp(hat.releaseTime/transitionTime,0.f,1.f);
-        hat.drawn=pos+hat.releaseOffset*(blend*blend*(3.f-2.f*blend));
-        hat.drawn.y+=DrawClearance(hat,hat.drawn,q);
+        hat.drawn=pos+V3{0,DrawClearance(hat,pos,q),0};
         const Q rotation{q.GetW(),-q.GetX(),-q.GetY(),-q.GetZ()};
         H->prop_place(M,hat.prop,&hat.drawn.x,&rotation.w,0);
     }
@@ -506,135 +514,227 @@ void FlightContact(uint32_t id,const JPH::BodyID &other,unsigned layer,V3 point,
     }
 }
 
-void Drop(Ragdoll &body, float dt) {
-    if (body.headwearChecked || !body.model || ready.empty()) return;
-    auto &fit=body.hatFit;
-    if (jolt_ragdoll::WaitingForGround(&body)) return;
-    V3 base,tip;
-    float radius;
-    body.BodyCapsule(Ragdoll::B_HEAD,&base,&tip,&radius);
-    V3 up=Norm(tip-base);
-    const V3 torso=(body.BodyPos(Ragdoll::B_CHEST)+body.BodyPos(Ragdoll::B_PELVIS))*.5f;
-    if (fit.tracking) {
-        if (!(dt>0)) return;
-        fit.track(body.HeadWorldPoint(fit.mount),torso,dt);
-        if (!fit.slips(up,fit.hatMotion,dt)) return;
-    }
-    body.headwearChecked = true;
-    void *neck = game::FindChild(body.model,"neck");
+namespace {
+
+void RestoreMount(void *frame,const MountedHat &hat) {
+    if (hat.visibleLift>0) H->bone_set(M,frame,nullptr,&hat.restLocal.x);
+}
+
+V3 Translation(const float *matrix) {
+    return {matrix[12],matrix[13],matrix[14]};
+}
+
+JPH::Quat JoltRotation(Q rotation) {
+    return {-rotation.x,-rotation.y,-rotation.z,rotation.w};
+}
+
+void FindMount(Ragdoll &body,V3 torso,float dt) {
+    body.headwearChecked=true;
+    void *neck=game::FindChild(body.model,"neck");
     if (!neck) return;
     std::vector<void *> children;
     game::EnumFrames(neck,&children);
-    for (void *frame : children) {
-        const char *full = game::at<const char *>(frame,game::kFrameName);
+    for (void *frame:children) {
+        if (game::at<void *>(frame,game::kFrameParent)!=neck || fallen.contains(frame)) continue;
+        const char *full=game::at<const char *>(frame,game::kFrameName);
         if (!full) continue;
-        if (game::at<void *>(frame,game::kFrameParent)!=neck) continue;
-        const char *dot = strrchr(full,'.');
-        std::string name = hats::lower(dot ? dot+1 : full);
-        // A wearer still in Mafia's cache from 0.1.15 has an open crown.
+        const char *dot=strrchr(full,'.');
+        std::string name=hats::lower(dot ? dot+1 : full);
+        // An older cached wearer can have an open crown under the hat.
         if (!name.ends_with("_scalp")) continue;
         name.resize(name.size()-6);
-        if (!ready.contains(name) || fallen.contains(frame)) continue;
+        auto model=ready.find(name);
+        if (model==ready.end()) continue;
         for (void *f=frame; f; f=game::at<void *>(f,game::kFrameParent)) {
             if (!(game::at<unsigned>(f,game::kFrameFlags)&1)) return;
             if (f==body.model) break;
         }
+        if (const auto old=mounted.find(frame); old!=mounted.end()) {
+            RestoreMount(frame,old->second);
+            mounted.erase(old);
+        }
         float world[16];
-        if (!H->frame_world(M,frame,world)) return;
-        // The mesh still carries the previous render pose during a physics tick.
-        // Transfer its neck-local placement to the current simulated neck.
-        const float *nw=game::WorldMatrix(neck);
-        M3 nativeNeck=M3::FromWorld(nw);
-        V3 local=nativeNeck.T().Apply(V3{world[12]-nw[12],world[13]-nw[13],world[14]-nw[14]});
-        M3 bones[19]; V3 origins[19];
-        body.PhysicalPose(bones,origins);
-        auto f=std::find(body.Frames(),body.Frames()+19,neck);
-        if (f==body.Frames()+19) return;
-        auto idx=f-body.Frames();
-        V3 position=origins[idx]+bones[idx].Apply(local);
-        if (!fit.tracking) {
-            const V3 size=ready.at(name).dimensions;
-            const float scale=Len(M3::Raw(world).r[0]);
-            fit.depth=.60f*size.y*scale;
-            fit.leverage=size.y/std::max(.001f,std::min(size.x,size.z));
-            fit.mount=body.HeadLocalPoint(position);
-            fit.track(position,torso,dt);
-            body.headwearChecked=false;
-            return;
-        }
-        const Q wornRotation=QuatOf(M3::FromWorld(world)*nativeNeck.T()*bones[idx]);
-        const float scale = Len(M3::Raw(world).r[0]);
-        auto &model=ready.at(name);
-        if (!model.hull) {
-            JPH::Array<JPH::Vec3> points;
-            points.reserve(model.mesh.vertices.size());
-            for (V3 vertex:model.mesh.vertices) points.push_back(J(vertex));
-            auto cooked=JPH::ConvexHullShapeSettings(points,.002f).Create();
-            if (cooked.IsValid()) model.hull=cooked.Get();
-        }
-        if (!model.hull) return;
-        JPH::RefConst<JPH::Shape> shape=model.hull;
-        if (scale!=1.f) {
-            auto scaled=shape->ScaleShape(JPH::Vec3::sReplicate(scale));
-            if (!scaled.IsValid()) return;
-            shape=scaled.Get();
-        }
-        JPH::Quat q(-wornRotation.x,-wornRotation.y,-wornRotation.z,wornRotation.w);
-        const V3 seated=position;
-        const uint32_t ownerGroup=jolt_ragdoll::CollisionGroupOf(&body);
-        const float radius=model.mesh.radius*scale;
-        if (!ClearRelease(shape,q,up,radius,ownerGroup,position)) {
-            body.headwearChecked=false;
-            return;
-        }
-        const Q rotation{q.GetW(),-q.GetX(),-q.GetY(),-q.GetZ()};
-        void *prop=H->prop_create(M,(name+"_lined").c_str(),nullptr,&seated.x,&rotation.w,scale);
-        if (!prop) return;
-        if (!H->frame_watch(M,frame,gone,nullptr)) {
-            H->prop_remove(M,prop);
-            return;
-        }
-        const V3 spin=body.BodySpin(Ragdoll::B_HEAD);
-        const V3 velocity=fit.releaseVelocity(up);
-        JPH::BodyCreationSettings settings(shape,J(jolt_world::ToJolt(position)),q,
-                                           JPH::EMotionType::Dynamic,jolt_world::kDynamic);
-        settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
-        settings.mMassPropertiesOverride.mMass=hatMass;
-        // BodyCreationSettings expects the velocity at the convex hull's centre of mass.
-        settings.mLinearVelocity=J(velocity)+J(spin).Cross(q*shape->GetCenterOfMass());
-        settings.mAngularVelocity=J(spin);
-        settings.mMotionQuality=JPH::EMotionQuality::LinearCast;
-        settings.mFriction=.78f;
-        settings.mRestitution=.05f;
-        settings.mAngularDamping=1.5f;
-        settings.mLinearDamping=.55f;
-        auto id=jolt_world::Bodies().CreateAndAddBody(settings,JPH::EActivation::Activate);
-        if (id.IsInvalid()) {
-            H->frame_watch(M,frame,nullptr,nullptr);
-            H->prop_remove(M,prop);
-            return;
-        }
-        FallenHat hat{prop,body.pedestrian ? body.actor : nullptr,body.model,
-                      body.pedestrian && !body.puppet,id,position,seated,seated-position,transitionTime,&model.mesh,scale};
-        hat.releaseGroup=ownerGroup;
-        hat.flightStart=position;
-        hat.flightAxis=fit.carryAxis();
-        hat.flightSamples=32;
-        hat.visuals.push_back(prop);
-        game::EnumFramesDeep(prop,&hat.visuals);
-        physicsVisuals.insert(hat.visuals.begin(),hat.visuals.end());
-        show(frame,false);
-        Log("headwear release lift %.3f m radius %.3f m spin %.3f rad/s",Dot(position-seated,up),radius,Len(spin));
-        Log("headwear worn travel %.3f m",Dot(fit.lastTorso-fit.firstTorso,hat.flightAxis));
-        Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
-            name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
-            velocity.x,velocity.y,velocity.z,fit.torsoMotion.x,fit.torsoMotion.y,fit.torsoMotion.z);
-        fallen.emplace(frame,std::move(hat));
+        if (!H->frame_world(M,frame,world) || !H->frame_watch(M,frame,gone,nullptr)) return;
+        const V3 pos=Translation(world);
+        const V3 local=Translation(&game::at<float>(frame,game::kFrameLocal));
+        const float scale=Len(M3::Raw(world).r[0]);
+        const auto orientation=JoltRotation(QuatOf(M3::FromWorld(world)));
+        mounted.emplace(frame,MountedHat{body.serial,neck,&model->first,&model->second,local,pos,orientation,scale});
+        body.headwearFrame=frame;
+        auto &fit=body.hatFit;
+        const V3 size=model->second.dimensions;
+        fit.depth=.60f*size.y*scale;
+        fit.travel=model->second.mesh.radius*scale;
+        fit.leverage=size.y/std::max(.001f,std::min(size.x,size.z));
+        fit.mount=body.HeadLocalPoint(pos);
+        fit.track(pos,torso,dt);
+        fit.slips({0,1,0},{},dt);
         return;
     }
 }
 
+bool Release(Ragdoll &body,void *frame,const MountedHat &mount,V3 position,Q rotation,
+             JPH::QuatArg q,V3 velocity,V3 spin,V3 up,uint32_t ownerGroup) {
+    const std::string &name=*mount.name;
+    void *prop=H->prop_create(M,(name+"_lined").c_str(),nullptr,&position.x,&rotation.w,mount.scale);
+    if (!prop) return false;
+    JPH::BodyCreationSettings settings(mount.shape,J(jolt_world::ToJolt(position)),q,
+                                       JPH::EMotionType::Dynamic,jolt_world::kDynamic);
+    settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
+    settings.mMassPropertiesOverride.mMass=hatMass;
+    // The same velocity at the visible origin, expressed at the hull's centre of mass.
+    settings.mLinearVelocity=J(velocity)+J(spin).Cross(q*mount.shape->GetCenterOfMass());
+    settings.mAngularVelocity=J(spin);
+    settings.mMotionQuality=JPH::EMotionQuality::LinearCast;
+    settings.mFriction=.78f;
+    settings.mRestitution=.05f;
+    settings.mAngularDamping=1.5f;
+    settings.mLinearDamping=.55f;
+    auto &bi=jolt_world::Bodies();
+    auto id=bi.CreateAndAddBody(settings,JPH::EActivation::Activate);
+    if (id.IsInvalid()) {
+        H->prop_remove(M,prop);
+        return false;
+    }
+    FallenHat hat{prop,body.pedestrian ? body.actor : nullptr,body.model,
+                  body.pedestrian && !body.puppet,id,position,position,&mount.model->mesh,mount.scale};
+    hat.releaseGroup=ownerGroup;
+    hat.flightStart=position;
+    const auto &fit=body.hatFit;
+    hat.flightAxis=Norm({velocity.x,0,velocity.z},fit.carryAxis());
+    hat.flightSamples=32;
+    hat.visuals.push_back(prop);
+    game::EnumFramesDeep(prop,&hat.visuals);
+    physicsVisuals.insert(hat.visuals.begin(),hat.visuals.end());
+    float visual[16];
+    const bool hasPose=H->frame_world(M,prop,visual);
+    const float poseGap=hasPose ? Len(Translation(visual)-position) : -1.f;
+    float angleGap=-1.f;
+    if (hasPose) {
+        const auto drawnRotation=JoltRotation(QuatOf(M3::FromWorld(visual)));
+        JPH::Vec3 axis;
+        (drawnRotation*q.Conjugated()).Normalized().GetAxisAngle(axis,angleGap);
+    }
+    const float velocityGap=Len(F(bi.GetPointVelocity(id,J(jolt_world::ToJolt(position))))-velocity);
+    const auto *neckWorld=game::WorldMatrix(mount.neck);
+    const V3 seated=Translation(neckWorld)+M3::Raw(neckWorld).Apply(mount.restLocal);
+    const float actualLift=Len(position-seated);
+    show(frame,false);
+    RestoreMount(frame,mount);
+    Log("headwear handover: %u slide frames, pose gap %.4f m, speed gap %.4f m/s, angle gap %.4f rad",
+        mount.slideFrames,poseGap,velocityGap,angleGap);
+    Log("headwear visible slide %.4f m, largest step %.4f m",actualLift,mount.maxSlideStep);
+    Log("headwear release lift %.3f m radius %.3f m spin %.3f rad/s",mount.visibleLift,fit.travel,Len(spin));
+    Log("headwear worn travel %.3f m",Dot(fit.lastTorso-fit.firstTorso,hat.flightAxis));
+    Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
+        name.c_str(),body.serial,body.age,up.y,mount.visibleLift,position.x,position.y,position.z,
+        velocity.x,velocity.y,velocity.z,fit.torsoMotion.x,fit.torsoMotion.y,fit.torsoMotion.z);
+    fallen.emplace(frame,std::move(hat));
+    return true;
+}
+
+} // namespace
+
+void Advance(Ragdoll &body,float dt) {
+    if (!body.model || ready.empty() || jolt_ragdoll::WaitingForGround(&body)) return;
+    if (body.headwearChecked && !body.headwearFrame) return;
+    const V3 torso=(body.BodyPos(Ragdoll::B_CHEST)+body.BodyPos(Ragdoll::B_PELVIS))*.5f;
+    if (!body.headwearChecked) {
+        FindMount(body,torso,dt);
+        return;
+    }
+    void *frame=body.headwearFrame;
+    auto it=mounted.find(frame);
+    if (it==mounted.end() || it->second.serial!=body.serial) {
+        body.headwearFrame=nullptr;
+        return;
+    }
+    auto &hat=it->second;
+    hat.seen=true;
+    if (!(dt>0)) return;
+    V3 base,tip;
+    float radius;
+    body.BodyCapsule(Ragdoll::B_HEAD,&base,&tip,&radius);
+    const V3 up=Norm(tip-base);
+    auto &fit=body.hatFit;
+    fit.track(body.HeadWorldPoint(fit.mount),torso,dt);
+    fit.slips(up,fit.hatMotion,dt);
+
+    float world[16];
+    if (!H->frame_world(M,frame,world)) return;
+    V3 position=Translation(world);
+    const Q rotation=QuatOf(M3::FromWorld(world));
+    const auto q=JoltRotation(rotation);
+    if (hat.visibleLift==0 && fit.lift==0) {
+        hat.previousPosition=position;
+        hat.previousRotation=q;
+        return;
+    }
+    if (!hat.shape) {
+        hat.shape=Hull(*hat.model,hat.scale);
+        if (!hat.shape) return;
+    }
+    const uint32_t ownerGroup=jolt_ragdoll::CollisionGroupOf(&body);
+    const V3 offset=up*(fit.lift-hat.visibleLift);
+    if (Len(offset)>.00001f) {
+        WearerFilter others(ownerGroup,false);
+        const auto *neckWorld=game::WorldMatrix(hat.neck);
+        const auto neckBasis=M3::Raw(neckWorld);
+        const V3 local=hat.restLocal+neckBasis.Inverse().Apply(up*fit.lift);
+        const V3 target=Translation(neckWorld)+neckBasis.Apply(local);
+        // Move the mounted mesh first. An obstacle clamps opening at the last
+        // accepted displacement. The hull and the visual will use this pose.
+        if (fit.lift>hat.visibleLift && !ShapeClear(hat.shape,q,target,others)) {
+            fit.lift=hat.visibleLift;
+            fit.liftRate=0;
+        } else if (H->bone_set(M,frame,nullptr,&local.x)) {
+            hat.visibleLift=fit.lift;
+            if (!H->frame_world(M,frame,world)) return;
+            const V3 updatedPosition=Translation(world);
+            if (hat.visibleLift>0) {
+                ++hat.slideFrames;
+                hat.maxSlideStep=std::max(hat.maxSlideStep,Len(updatedPosition-position));
+            } else {
+                hat.slideFrames=0;
+                hat.maxSlideStep=0;
+            }
+            position=updatedPosition;
+        }
+    }
+    const V3 velocity=(position-hat.previousPosition)*(1.f/dt);
+    const auto rotationDelta=(q*hat.previousRotation.Conjugated()).Normalized();
+    hat.previousPosition=position;
+    hat.previousRotation=q;
+    // A pose reset must not become a launch impulse.
+    if (dt>.15f || Len(velocity)>80.f || hat.slideFrames<2 || hat.visibleLift<fit.depth) return;
+    if (!ShapeClear(hat.shape,q,position)) return;
+    const V3 spin=F(rotationDelta.GetAngularVelocity(dt));
+    if (Release(body,frame,hat,position,rotation,q,velocity,spin,up,ownerGroup)) {
+        mounted.erase(it);
+        body.headwearFrame=nullptr;
+    }
+}
+
+void FinishStep() {
+    for (auto it=mounted.begin();it!=mounted.end();) {
+        auto &[frame,hat]=*it;
+        if (hat.seen) {
+            hat.seen=false;
+            ++it;
+            continue;
+        }
+        RestoreMount(frame,hat);
+        H->frame_watch(M,frame,nullptr,nullptr);
+        it=mounted.erase(it);
+    }
+}
+
 void Reset() {
+    for (const auto &[frame,hat]:mounted) {
+        RestoreMount(frame,hat);
+        H->frame_watch(M,frame,nullptr,nullptr);
+    }
+    mounted.clear();
     auto entries = std::move(fallen);
     fallen.clear();
     for (auto [frame,hat] : entries) {

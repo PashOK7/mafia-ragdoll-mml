@@ -17,11 +17,11 @@ into the folder containing Game.exe. [Download the latest release](https://githu
 
 - **Headwear.** An abrupt sideways acceleration tips a hat about its rim, and a sustained inversion
   can also work the band over the crown. The fit uses the installed hat's dimensions. As it comes
-  free, the hat carries the measured motion of the crown and torso and the head's spin.
-  Gunfire, vehicle impacts and ordinary falls all use this fit. The hat starts drawing from its
-  mounted pose as its hull clears the wearer. It collides with the scene, vehicles and ragdolls
-  in Jolt. A bullet can strike the
-  visible surface and tip a hat resting on the ground.
+  free, the band slides over the crown. The original hat moves with the band. Its loose body
+  starts at that visible pose and inherits its measured velocity and rotation.
+  Gunfire, vehicle impacts and ordinary falls all use this fit. The hat collides with the scene,
+  vehicles and ragdolls in Jolt. A bullet can strike the visible surface and tip a hat resting
+  on the ground.
   The detached hat has a cloth lining and a sweatband inside its original shell. The mod uses the installed
   model's exterior mesh and textures. Where the original head ends at the brim, the mod builds a rounded
   crown from that character's head outline and face texture at each level of detail. After a hot

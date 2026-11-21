@@ -1892,8 +1892,7 @@ void TickBody(float dt) {
         }
     }
     if (joltOk) {
-        headwear::Sync(dt);
-        for (Ragdoll *body : jolt) headwear::Drop(*body,dt);
+        headwear::Sync();
         SamplePull(dt);
         TracePedestrians(TrajectoryStage::Physics);
         for (auto &entry : g_handovers) {
@@ -1935,8 +1934,14 @@ void TickBody(float dt) {
     if (joltOk) KnockByBodies(dt);
     for (size_t i = 0; i < g_ragdolls.size();) {
         Ragdoll *rd = g_ragdolls[i].get();
-        if (AtRest(rd, SafeOverwritten(rd))) { i++; continue; }
+        const bool headwearActive = joltOk && jolt_ragdoll::Has(rd);
+        if (AtRest(rd, SafeOverwritten(rd))) {
+            if (headwearActive) headwear::Advance(*rd,dt);
+            i++;
+            continue;
+        }
         if (SafeApply(rd)) {
+            if (headwearActive) headwear::Advance(*rd,dt);
             // the game's idea of where the body is: the actor's position or the element's, in the model's parent's space
             game::at<V3>(rd->actor, rd->pedestrian ? kPedPos : game::kActorPos) = game::ToParentPoint(rd->Model(), rd->rootPos);
             i++;
@@ -1947,8 +1952,9 @@ void TickBody(float dt) {
     }
     for (auto &o : g_occupants) {
         auto write = [&] { o.body->Apply(); };
-        Guarded(write);
+        if (Guarded(write) && joltOk) headwear::Advance(*o.body,dt);
     }
+    headwear::FinishStep();
     TracePedestrians(TrajectoryStage::TickEnd);
     GiveShapes();
     TrackPoses(dt);

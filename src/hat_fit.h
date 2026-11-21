@@ -3,24 +3,19 @@
 #include "mathx.h"
 
 // The band bears lateral loads while seated. To release, it must clear the
-// crown along the head axis. The fit state describes engagement, not a second
-// moving body: the worn visual travels rigidly with the physical head.
+// crown along the head axis. Its integrated lift drives the mounted visual
+// until the same pose can be handed to the free rigid body.
 struct HatFit {
     V3 mount{},lastHat{},lastTorso{},firstTorso{},hatMotion{},torsoMotion{};
     bool tracking=false;
     V3 previousVelocity{};
     float lift=0, liftRate=0;
-    float depth=.09f, leverage=.45f;
+    float depth=.09f, travel=.16f, leverage=.45f;
+    static constexpr float slideSpeed=1.65f;
     bool sampled=false;
 
     V3 carryAxis() const {
         return Norm({torsoMotion.x,0,torsoMotion.z},{});
-    }
-
-    V3 releaseVelocity(V3 up) const {
-        const V3 axis=carryAxis();
-        const float carry=std::max(0.f,Dot(torsoMotion-hatMotion,axis));
-        return hatMotion+axis*carry+up*std::clamp(liftRate,0.f,1.1f);
     }
 
     // Follow the actual mounted point. A contact solver can move a body by
@@ -60,17 +55,17 @@ struct HatFit {
         constexpr float damping=10.f;
         const float peel=leverage*std::max(0.f,shear-friction*std::max(0.f,-axial));
         const float pull=axial+peel-initialGrip;
-        int steps=int(std::ceil(dt*120.f));
-        float step=dt/steps;
+        // Keep the band travel bounded even when a delayed frame batches time.
+        const float slideTime=std::min(dt,.04f);
+        const int steps=int(std::ceil(slideTime*120.f));
+        const float step=slideTime/steps;
         for (int i=0;i<steps;++i) {
-            liftRate+=(pull-stiffness*lift-damping*liftRate)*step;
-            lift+=liftRate*step;
-            if (lift<0) {
-                lift=0;
-                liftRate=0;
-            }
-            if (lift>=depth) { lift=depth; return true; }
+            liftRate=std::clamp(liftRate+(pull-stiffness*lift-damping*liftRate)*step,
+                                -slideSpeed,slideSpeed);
+            const float next=lift+liftRate*step;
+            lift=std::clamp(next,0.f,travel);
+            if (lift!=next) liftRate=0;
         }
-        return false;
+        return lift>=depth;
     }
 };
