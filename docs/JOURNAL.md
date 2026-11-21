@@ -803,3 +803,11 @@ The converter retains the same model-space triangles it writes into the detached
 At release a narrow-phase overlap query resolves penetrations against adjacent geometry and the wearer. The correction must fit within the radius of the hat. If the new pose is still obstructed, the visual stays attached until it can transfer cleanly. This removes forced solver ejection at spawn. It does not prove all angular movement beside an already detached body has been eliminated.
 
 The two final lab runs confirmed bullet impulses on outer visible triangles in the log. Both verified five low points per resting hat against the native floor, along with the walking and truck checks. The tested allowance for resting mesh penetration was 25 mm. Owner installation SHA-256 `7466815908e2f95a225aab3693a8034be3a881296cc00e89d46933fe1e206ab7`.
+
+## 2026-11-21 — Resolve bullet hits at the hat (0.1.25)
+
+The owner saw the asphalt effect behind the target even though the 0.1.24 log showed dozens of hat impulses. The hat hit previously left the projectile and precomputed static impact intact. The nearest hat contact now ends the projectile through the same native path used for a rail occupant. A floor-supported hat redirects the compressive component into a bounded tip and rebound so a shot from above has a visible effect.
+
+Both windowed builds resolved six of six shots at triangle centres toward the rim, with a single impulse per shot. A control shot beside the hat exercised the native static-impact branch at 5E5975 (1.0) and 5AA025 (1.2). Confirmed hat hits never entered that branch. The host's BULLET_HIT event can still report the precomputed asphalt impact before the game's ray call returns to the mod hook. The test observes the later native effects branch directly. Over the first 200 ms the hat moved 0.8–2.6 cm on 1.0 and 1.8–8.8 cm on 1.2. Owner installation SHA-256 `08e9ee7e7c41b40ac7bc3ca5f042afe1721ce6d09e30dd56692cf8757eb45bc6`.
+
+The repeated run also resolved all six shots on each build. The walking check uses its own wearer so repeated bullet impacts cannot move its fixture out of reach. The full rerun passed both builds. The owner process hot-loaded generation 9 at 13:10:57.723, and the live DLL matched the installed hash.

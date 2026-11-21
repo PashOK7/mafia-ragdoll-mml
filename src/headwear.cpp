@@ -315,11 +315,40 @@ bool Shot(V3 from,V3 axis,float range,V3 *point,uint32_t *body) {
 }
 
 void BulletImpulse(uint32_t body,V3 direction,V3 point,float damage) {
-    // A bullet passes through cloth and transfers only a small fraction of
-    // its momentum. A stronger shot can still spin the hat off-centre.
-    float impulse=std::min(.12f,damage*.002f);
-    jolt_world::Bodies().AddImpulse(JPH::BodyID(body),J(direction*impulse),J(jolt_world::ToJolt(point)));
-    Log("headwear bullet impulse %.3f Ns",impulse);
+    auto hat=std::find_if(fallen.begin(),fallen.end(),[body](const auto &entry){
+        return entry.second.body.GetIndexAndSequenceNumber()==body;
+    });
+    if (hat==fallen.end()) return;
+    auto &bi=jolt_world::Bodies();
+    auto id=hat->second.body;
+    JPH::RVec3 p;
+    JPH::Quat q;
+    bi.GetPositionAndRotation(id,p,q);
+    const V3 centre=jolt_world::ToWorld(F(p));
+    const float strength=std::min(.12f,damage*.002f);
+    V3 impulse=direction*strength;
+    const float below=Support(hat->second,q,{0,1,0});
+    const V3 end=centre-V3{0,below+.035f,0};
+    MmlHit ground{};
+    bool supported=H->world_ray(M,&centre.x,&end.x,MML_WORLD_STATIC,nullptr,&ground) &&
+                   ground.normal[1]>.5f && (ground.flags>>24)!=31 && (ground.flags>>24)!=44;
+    if (supported) {
+        const V3 n{ground.normal[0],ground.normal[1],ground.normal[2]};
+        const float compression=std::max(0.f,-Dot(direction,n));
+        const V3 offset=point-centre;
+        const V3 radial=offset-n*Dot(offset,n);
+        // The floor absorbs the inward component. The flexible shell tips
+        // away from the struck edge and springs back within the same budget.
+        V3 response=direction+n*(1.15f*compression)+Norm(-radial,{})*(.85f*compression);
+        const float len=Len(response);
+        impulse=response*(strength/std::max(1.f,len));
+        // Apply at the real contact, plus a bounded rebound at the centre.
+        // For a hard downward hit a 220 g hat rises a few centimetres at most.
+        const float rebound=std::min(.13f,damage*.004f)*compression;
+        bi.AddImpulse(id,J(n*rebound));
+    }
+    bi.AddImpulse(id,J(impulse),J(jolt_world::ToJolt(point)));
+    Log("headwear bullet impulse %.3f Ns at %.3f %.3f %.3f support %d",Len(impulse),point.x,point.y,point.z,supported);
 }
 
 void BodyContact(uint32_t propBody) {

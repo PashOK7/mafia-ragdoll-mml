@@ -103,6 +103,16 @@ def check(game):
         game.call('human.hit', actor=actor, type=0, damage=1000, dir=[0, 0, 0])
 
     def shoot_hat(prop):
+        # First instruction of the native static-impact branch, after
+        # TickShoot has checked both the dynamic result and shot.hasImpact.
+        tap_at='5AA025' if game.build=='1.2' else '5E5975'
+        tap=game.tool('tap',cmd=tap_at+' n=0').split()[1].rstrip(':')
+        try:
+            check_hat_shots(prop,tap)
+        finally:
+            game.tool('tap',cmd='off '+tap)
+
+    def check_hat_shots(prop,tap):
         game.sleep(1600)
         pos=hats()[prop]['pos']
         mission=int(game.call('game')['mission'],16)
@@ -110,33 +120,50 @@ def check(game):
         shooter=int(game.call('game')['player'],16)
         def bits(value):
             return struct.unpack('<I',struct.pack('<f',value))[0]
-        _,points,faces=mesh_world(prop)
-        targets=[]
-        for i,j,k in faces:
-            a,b,c=points[i],points[j],points[k]
-            area=(b[0]-a[0])*(c[2]-a[2])-(c[0]-a[0])*(b[2]-a[2])
-            if abs(area)<.00004:
-                continue
-            centre=[(a[d]+b[d]+c[d])/3 for d in range(3)]
-            targets.append(centre)
-        targets.sort(key=lambda v:math.hypot(v[0]-pos[0],v[2]-pos[2]),reverse=True)
-        def latest_hit():
-            return next((v for v in reversed(game.tool('log_tail',lines=150).splitlines())
-                         if 'headwear bullet impulse' in v),None)
-        before=latest_hit()
-        for x,y,z in targets[:12]:
-            origin=[x,y+.20,z]
+        def fire_down(origin):
             game.call('native.call',at='0x5A84A0' if game.build=='1.2' else '0x5E3DF0',
                       conv='thiscall',this=engine,ret='uint',
                       args=[shooter,*map(bits,origin),*map(bits,[0,-160,0]),bits(28),0,0,1])
             game.sleep(200)
-            travelled=math.dist(pos,hats()[prop]['pos'])
-            assert travelled<1.4, travelled
-            if latest_hit()!=before:
+        def ground_impacts():
+            return int(game.tool('tap',cmd='show '+tap).split(': ',1)[1].split()[0])
+        control=[pos[0]+1.5,pos[1]+1,pos[2]]
+        fire_down(control)
+        assert ground_impacts()==1
+        def hit_lines():
+            return [v for v in game.tool('log_tail',lines=200).splitlines() if 'headwear bullet impulse' in v]
+        displacements=[]
+        attempts=0
+        for _ in range(6):
+            pos=hats()[prop]['pos']
+            _,points,faces=mesh_world(prop)
+            targets=[]
+            for i,j,k in faces:
+                a,b,c=points[i],points[j],points[k]
+                area=(b[0]-a[0])*(c[2]-a[2])-(c[0]-a[0])*(b[2]-a[2])
+                if abs(area)<.00004:
+                    continue
+                centre=[(a[d]+b[d]+c[d])/3 for d in range(3)]
+                targets.append(centre)
+            targets.sort(key=lambda v:math.hypot(v[0]-pos[0],v[2]-pos[2]),reverse=True)
+            for x,y,z in targets[:12]:
+                attempts+=1
+                before=hit_lines()
+                ground_before=ground_impacts()
+                origin=[x,y+.20,z]
+                fire_down(origin)
+                hits=[line for line in hit_lines() if line not in before]
+                if not hits:
+                    continue
+                assert len(hits)==1,hits
+                assert ground_impacts()==ground_before, 'hat hit also produced a native floor impact'
+                travelled=math.dist(pos,hats()[prop]['pos'])
+                assert travelled<.70,travelled
+                displacements.append(round(travelled,3))
                 break
-        else:
-            raise AssertionError(('no hit on visible hat triangles',pos))
-        print(game.build,'shot confirmed on outer hat mesh, displacement',round(travelled,3),'m')
+            else:
+                raise AssertionError(('no hit on visible hat triangles',pos))
+        print(game.build,'six resolved shots in',attempts,'attempts, displacement in m',displacements)
 
     def walk_into_hat(prop):
         car=game.player()['vehicle']['actor']
@@ -184,6 +211,7 @@ def check(game):
         print(game.build, model, 'independent hat, travelled', round(distance, 3), 'm')
         if model == 'civil19':
             shoot_hat(prop)
+        elif model == 'freegang01':
             walk_into_hat(prop)
         else:
             game.sleep(1600)

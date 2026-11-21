@@ -1218,14 +1218,16 @@ void RailBulletStretch(MmlMidContext *ctx, void *) {
             }
         }
         if (hatHit) {
-            // Let the original shot continue through the cloth.
             headwear::BulletImpulse(hatBody,axis,hatPoint,damage);
+            point=hatPoint;
+        } else if (target) {
+            const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
+            g_lastBullet = {target->model, point, part, part, dv};
+            ++g_corpseHits;
+        } else {
+            return;
         }
-        if (!target) return;
-        const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
-        g_lastBullet = {target->model, point, part, part, dv};
-        ++g_corpseHits;
-        // Finish this shot at the body using TickShoot's ordinary end-of-range
+        // Finish this shot at the resolved contact using TickShoot's ordinary end-of-range
         // path. Both builds cache the endpoint and squared range on the stack.
         // A wall or another person farther down the ray must not receive it too.
         const V3 way = point - origin;
