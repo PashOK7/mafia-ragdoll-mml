@@ -9,9 +9,32 @@ struct HatFit {
     V3 mount{},lastHat{},lastTorso{},hatMotion{},torsoMotion{};
     bool tracking=false;
     V3 previousVelocity{};
+    V3 shotMotion{};
+    V3 pendingShot{};
+    float shotAge=0;
     float lift=0, liftRate=0;
     float depth=.09f, leverage=.45f;
     bool sampled=false;
+
+    void shot(V3 delta,float age) {
+        shotMotion=shotMotion*std::exp(-std::max(0.f,age-shotAge)/.18f)+delta;
+        pendingShot+=delta;
+        shotAge=age;
+    }
+
+    V3 releaseVelocity(V3 headVelocity,float age) const {
+        float speed=Len(shotMotion);
+        if (speed<1e-4f) return hatMotion;
+        V3 axis=shotMotion*(1.f/speed);
+        float residue=std::exp(-std::max(0.f,age-shotAge)/.18f);
+        float inherited=Dot(hatMotion,axis);
+        // A shot changes the head velocity before the position-tracking filter
+        // catches up. Keep the actual forward speed and give the loosened
+        // band a small departure speed so it clears the following skull.
+        float forward=std::max(inherited,Dot(headVelocity,axis))+
+                      std::min(1.8f,.40f*speed)*residue;
+        return hatMotion+axis*((forward-inherited)*residue);
+    }
 
     // Follow the actual mounted point. A contact solver can move a body by
     // positional correction while reporting almost zero end-of-step velocity.
@@ -46,6 +69,11 @@ struct HatFit {
         // Lateral force applied above the band tips it about the rim.
         float peel=leverage*shear;
         float pull=axial+peel-2.8f;
+        // The shot drives the head before the finite-difference tracker sees
+        // that motion. Apply its sideways impulse to the band once.
+        const V3 crosswise=pendingShot-up*Dot(pendingShot,up);
+        liftRate+=std::min(2.5f,Len(crosswise)*leverage*2.6f);
+        pendingShot={};
         int steps=int(std::ceil(dt*120.f));
         float step=dt/steps;
         for (int i=0;i<steps;++i) {

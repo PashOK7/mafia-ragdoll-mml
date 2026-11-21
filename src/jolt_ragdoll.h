@@ -37,6 +37,7 @@ int ShotPart(const Ragdoll *r, const V3 &from, const V3 &delta, V3 *point);
 bool CabinBlocksShot(const void *key, const V3 &from, const V3 &point, bool requireCabin = true);
 void Remove(Ragdoll *r);
 bool Has(const Ragdoll *r);
+bool WaitingForGround(const Ragdoll *r);
 bool OwnsBody(uint32_t body);   // a Jolt body (its index and sequence number) is a part of a ragdoll
 void Clear();   // every ragdoll's bodies (before the world stops)
 

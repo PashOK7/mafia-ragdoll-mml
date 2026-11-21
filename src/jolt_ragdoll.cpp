@@ -599,6 +599,11 @@ bool Has(const Ragdoll *r) {
     return it != g_entries.end() && it->second.serial == r->serial;
 }
 
+bool WaitingForGround(const Ragdoll *r) {
+    auto it=g_entries.find(r);
+    return it!=g_entries.end() && it->second.serial==r->serial && it->second.holding;
+}
+
 bool OwnsBody(uint32_t body) {
     for (const auto &kv : g_entries) {
         const JPH::Ragdoll *rag = kv.second.ragdoll;

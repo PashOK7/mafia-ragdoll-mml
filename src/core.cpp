@@ -809,7 +809,15 @@ BulletContact g_lastBullet{};
 float Momentum(float damage, const HitStrength &strength) { return std::min(damage * strength.perDamage, strength.maxImpulse); }
 float Kick(Ragdoll *rd, const V3 &dir, const V3 &at, float damage, int part, const HitStrength &strength) {
     if (!rd || damage <= 0 || Len(dir) < 1e-4f) return 0;
-    return rd->Kick(Norm(dir) * Momentum(damage, strength), at, g_cfg.whole, g_cfg.radius, strength.maxPart, part);
+    const V3 axis=Norm(dir);
+    const bool bullet=&strength==&g_cfg.shot && !rd->headwearChecked;
+    const V3 before=rd->BodyVel(Ragdoll::B_HEAD);
+    float result=rd->Kick(axis * Momentum(damage, strength), at, g_cfg.whole, g_cfg.radius, strength.maxPart, part);
+    if (bullet) {
+        const float drive=Dot(rd->BodyVel(Ragdoll::B_HEAD)-before,axis);
+        if (drive>0) rd->hatFit.shot(axis*drive,rd->age);
+    }
+    return result;
 }
 void Remember(void *actor, const V3 &dir, const V3 *at, float damage, const HitStrength &strength) {
     if (!actor || damage <= 0 || Len(dir) < 1e-4f || g_cfg.remember <= 0) return;
@@ -2534,7 +2542,15 @@ void OnHit(const MmlEvent &ev) {
         rd->knockdown = knocked;
         LOG("hit %p type %d damage %.1f alive %d->%d%s: a ragdoll", human, type, dmg, wasAlive, alive,
             car ? Fmt(", a car at %.1f m/s", Len(carVel)).c_str() : body ? ", a body's blow" : "");
-        if (died) TakeRemembered(human, rd);
+        if (died) {
+            const V3 previous=rd->BodyVel(Ragdoll::B_HEAD);
+            TakeRemembered(human,rd);
+            if (bullet && Len(dir)>1e-4f) {
+                const V3 axis=Norm(dir);
+                const float drive=Dot(rd->BodyVel(Ragdoll::B_HEAD)-previous,axis);
+                if (drive>0) rd->hatFit.shot(axis*drive,rd->age);
+            }
+        }
     }
     if (car) {
         rd->vehicleImpact = true;

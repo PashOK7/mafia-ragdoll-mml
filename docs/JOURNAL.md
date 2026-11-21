@@ -823,3 +823,11 @@ The lab checks alternate damage 28 and 50 and sample the position during the ris
 The rendered hat keeps a 4 mm gap along the native floor normal. The central plane and the lowest mesh vertices in each footprint quadrant supply the correction on uneven pavement. Bullet triangles use the corrected visible placement. The separation only adjusts rendering and its shot query. It leaves the sleeping Jolt body where it settled.
 
 Bullet impulse, target rebound speed and target lateral speed have doubled. The ground query also checks for solid Jolt support beneath the hat if the native surface is out of range. In both windowed labs six of six aimed shots registered. On open ground the two fixture strengths produce up to 2.52 and 3.00 m/s of normal rebound, with observed peaks up to 0.342 m. Contact with another body can arrest the rise. Five resting models in each lab passed the positive-clearance check at five low mesh points. The owner's exact screenshot pose was not captured. Installed DLL SHA-256 `e7f444afae23af33f0b9129b4ced1a075c110091339e84075ceb2c3ec0e42618`.
+
+## 2026-11-21 — Carry the hat through a close-range shot (0.1.28)
+
+The owner's civil17 cap released at 0.144 s and contacted the falling ragdoll the next frame. The release sampled filtered travel, which could lag the immediate head impulse. Gunfire now feeds the measured forward velocity change into the fitted band's initial lift. Release blends the tracked motion with the current head point velocity along the shot and adds a small decaying separation component. Any pending bullet load waits alongside a ragdoll held for static scenery. The detached hat's collision and bullet hit paths are unchanged.
+
+Both windowed labs used the game's native shot queue with eight pellets fired from 0.85 m. At 25 damage per pellet the hat released at 0.065 s on 1.0 and 0.064 s on 1.2, with 7.82 and 7.80 m/s along the shot. Measured forward travel was 2.04 and 3.36 m. The standalone fit regression passed. Owner installation SHA-256 `9ab7a566b8088310cd8b76437cdf68c659c26023202034cc5e3c9816a8c14fee`.
+
+The full suite passed both labs, including the earlier ground, foot contact, truck and detached-hat shooting checks. The repeated close-range fixture measured 2.44 m and 2.93 m forward.

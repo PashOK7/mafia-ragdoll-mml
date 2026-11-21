@@ -10,6 +10,7 @@
 #include "mod.h"
 #include "ragdoll.h"
 #include "jolt_world.h"
+#include "jolt_ragdoll.h"
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
@@ -429,12 +430,18 @@ void BodyContact(uint32_t propBody) {
 
 void Drop(Ragdoll &body, float dt) {
     if (body.headwearChecked || !body.model || ready.empty()) return;
+    auto &fit=body.hatFit;
+    if (Dot(fit.pendingShot,fit.pendingShot)>0 && jolt_ragdoll::WaitingForGround(&body)) {
+        // Start the transfer when the ragdoll starts moving, including on a
+        // street whose collision is still being streamed in.
+        fit.shotAge=body.age;
+        return;
+    }
     V3 base,tip;
     float radius;
     body.BodyCapsule(Ragdoll::B_HEAD,&base,&tip,&radius);
     V3 up=Norm(tip-base);
     const V3 torso=(body.BodyPos(Ragdoll::B_CHEST)+body.BodyPos(Ragdoll::B_PELVIS))*.5f;
-    auto &fit=body.hatFit;
     if (fit.tracking) {
         if (!(dt>0)) return;
         fit.track(body.HeadWorldPoint(fit.mount),torso,dt);
@@ -533,7 +540,7 @@ void Drop(Ragdoll &body, float dt) {
             H->prop_remove(M,prop);
             return;
         }
-        const V3 velocity=fit.hatMotion;
+        const V3 velocity=fit.releaseVelocity(body.PointVelocity(Ragdoll::B_HEAD,position),body.age);
         JPH::BodyCreationSettings settings(shape,J(jolt_world::ToJolt(position)),q,
                                            JPH::EMotionType::Dynamic,jolt_world::kDynamic);
         settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
@@ -553,6 +560,8 @@ void Drop(Ragdoll &body, float dt) {
         fallen.emplace(frame,FallenHat{prop,body.pedestrian ? body.actor : nullptr,body.model,
                                        body.pedestrian && !body.puppet,id,position,position,&model.mesh,scale});
         show(frame,false);
+        if (Len(velocity-fit.hatMotion)>.05f)
+            Log("headwear shot carry %.3f m/s tracked %.3f m/s",Len(velocity),Len(fit.hatMotion));
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
             velocity.x,velocity.y,velocity.z,fit.torsoMotion.x,fit.torsoMotion.y,fit.torsoMotion.z);

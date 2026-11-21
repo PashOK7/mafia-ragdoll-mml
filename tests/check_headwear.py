@@ -53,6 +53,42 @@ def check_truck_carry(game):
         game.cleanup()
 
 
+def check_shotgun_carry(game):
+    ground=game.call('world.ground',at=[-1984,0,75])['height']
+    player_start=game.pos('player')
+    game.tool('teleport',to=[-1988,ground+.10,72],dir=[0,0,1])
+    actor=game.spawn_human('civil17',[-1984,ground+.03,75])
+    try:
+        game.call('human.anim',actor=actor,play='stand')
+        game.sleep(2400)
+        bones=game.call('human.skeleton',actor=actor)['bones']
+        x,y,z=next(b['world_pos'] for b in bones if b['name'].lower()=='neck')
+        mission=int(game.call('game')['mission'],16)
+        engine=struct.unpack('<I',bytes.fromhex(game.call('mem.read',addr=hex(mission+0x24),size=4)['hex']))[0]
+        shooter=int(game.call('game')['player'],16)
+        def bits(v):
+            return struct.unpack('<I',struct.pack('<f',v))[0]
+        seq=game.latest()
+        game.call('native.call',at='0x5A84A0' if game.build=='1.2' else '0x5E3DF0',
+                  conv='thiscall',this=engine,ret='uint',
+                  args=[shooter,*map(bits,[x,y-.20,z-.85]),*map(bits,[0,0,160]),bits(200),0,0,8])
+        shot=game.call('events.since',seq=seq,types='SHOT')['events']
+        assert any(e['data']['shots']==8 for e in shot),shot
+        flight=[]
+        for _ in range(20):
+            game.sleep(20)
+            props=game.call('props.list')['props']
+            for prop in props:
+                if prop['model'].lower()=='rdhat_civil17_lined.i3d':
+                    flight.append(prop['pos'][2]-z)
+        assert len(flight)>=4 and max(flight)>.60,(flight,game.call('events.since',seq=seq,types='HUMAN_HIT,BULLET_HIT')['events'])
+        assert 'headwear shot carry' in game.tool('log_tail',lines=100)
+        print(game.build,'eight-pellet shot: hat forward travel',round(max(flight),3),'m')
+    finally:
+        game.cleanup()
+        game.tool('teleport',to=player_start)
+
+
 def check(game):
     check_scalps(game)
     start = game.pos('player')
@@ -243,6 +279,7 @@ def check(game):
     print(game.build, 'bareheaded Tommy spawned no hat')
     game.cleanup()
     check_truck_carry(game)
+    check_shotgun_carry(game)
 
 
 if __name__ == '__main__':
