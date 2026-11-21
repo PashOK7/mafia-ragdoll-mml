@@ -170,6 +170,35 @@ void Sync() {
     }
 }
 
+bool Near(V3 point) {
+    if (fallen.empty() || !jolt_world::Running()) return false;
+    auto &bi=jolt_world::Bodies();
+    for (const auto &[_,hat]:fallen) {
+        const V3 delta=jolt_world::ToWorld(F(bi.GetPosition(hat.body)))-point;
+        if (Dot(delta,delta)<9.f) return true;
+    }
+    return false;
+}
+
+bool OwnsBody(uint32_t body) {
+    return std::any_of(fallen.begin(),fallen.end(),[body](const auto &entry){
+        return entry.second.body.GetIndexAndSequenceNumber()==body;
+    });
+}
+
+void ApplyAirDrag(float dt) {
+    if (fallen.empty() || !jolt_world::Running() || !(dt>0)) return;
+    auto &bi=jolt_world::Bodies();
+    for (const auto &[_,hat]:fallen) {
+        if (!bi.IsActive(hat.body)) continue;
+        const auto velocity=bi.GetLinearVelocity(hat.body);
+        // Integrate quadratic drag analytically so a fast hat sheds speed
+        // rapidly while a foot can still slide it along the ground.
+        constexpr float dragPerMetre=.32f;
+        bi.SetLinearVelocity(hat.body,velocity/(1.f+dragPerMetre*velocity.Length()*dt));
+    }
+}
+
 bool Shot(V3 from,V3 axis,float range,V3 *point,uint32_t *body) {
     if (fallen.empty() || !jolt_world::Running()) return false;
     JPH::RRayCast ray{J(jolt_world::ToJolt(from)),J(axis*range)};
@@ -189,7 +218,7 @@ bool Shot(V3 from,V3 axis,float range,V3 *point,uint32_t *body) {
 void BulletImpulse(uint32_t body,V3 direction,V3 point,float damage) {
     // A bullet passes through cloth and transfers only a small fraction of
     // its momentum. A stronger shot can still spin the hat off-centre.
-    float impulse=std::min(.30f,damage*.003f);
+    float impulse=std::min(.12f,damage*.002f);
     jolt_world::Bodies().AddImpulse(JPH::BodyID(body),J(direction*impulse),J(jolt_world::ToJolt(point)));
     Log("headwear bullet impulse %.3f Ns",impulse);
 }

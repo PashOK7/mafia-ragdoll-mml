@@ -1512,6 +1512,7 @@ void JoltMovers(std::vector<smoke::Mover> &out) {
         V3 p = kv.second.snap.pts[Ragdoll::PELVIS];
         bool close = false;
         for (const V3 &c : bodies) close = close || Len(c - p) < 6.0f;
+        if (!close) close=headwear::Near(p);
         // Also give living bodies near a moving car as sensors. Native car/pedestrian contact can miss a waving
         // animation until it is already inside the car. These use the actual car hull and anatomical capsules.
         if (!close && IsPed(kv.first)) {
@@ -1553,6 +1554,7 @@ void JoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
     static std::vector<smoke::Mover> movers;
     JoltMovers(movers);
     OccupantMovers(movers);
+    headwear::ApplyAirDrag(dt);
     V3 pp = pl ? game::ActorWorldPos(pl) : V3{};
     jolt_ragdoll::Step(jolt, dt, movers, pl ? &pp : nullptr);
 }

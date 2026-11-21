@@ -781,3 +781,11 @@ In two windowed 1.0 trials a 400 m departure and return led to the same traffic 
 Loose hats now use a 220 g Jolt body with continuous collision detection and a rounded core approximating the crown. The brim beyond that core is visual. The same body meets ragdolls, scenery and vehicles. The native prop is used for rendering, and removing a pooled pedestrian's old hat retires both the prop and the physics body.
 
 The existing bullet stretch checks the hat against the native hit limit and nearer ragdoll geometry. A bullet through a hat transfers 0.003 Ns per damage point up to 0.30 Ns, applied at the hit point. The bullet continues onwards. Both windowed labs logged actual hat/ragdoll contacts and 0.084 Ns per test shot. The successful horizontal shots moved the resting hat by 5.7 cm on 1.0 and 2.6 cm on 1.2. The five-wearer, bareheaded, mesh and truck regressions also passed. Owner installation SHA-256 `f29e2bc6bbfd5dfa8647898454c27310f4ba07b444d8f534398ec33376b4d710`.
+
+## 2026-11-21 — Hat drag and foot contact (0.1.22)
+
+Loose hats now keep the existing animated contact capsules active for walkers nearby. Shoes can push the light body through Jolt's ordinary contact. The separate corpse contact solver is bypassed for hats.
+
+Quadratic drag dissipates speed during travel, with an effective coefficient of 0.32 per metre. Each bullet now imparts 0.002 Ns per damage point, capped at 0.12 Ns. In the final windowed labs Tommy's walk moved the hat 0.089 m on 1.0 and 0.139 m on 1.2. A standard test shot transferred 0.056 Ns. The observed shot displacement was 0.197 m on 1.0 and 0.018 m on 1.2. A truck that keeps driving can push the hat again. When the truck was stopped after release, the hat travelled another 2.0 m on both builds.
+
+The owner's game hot-loaded 0.1.22 at 11:58:57.912, generation 6. DLL SHA-256 `66959fa962d8c3fabbad441b70a52e5449d87dda30654a70d6b4afcd80a0d8bf`.

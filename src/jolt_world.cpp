@@ -236,6 +236,9 @@ private:
         if (pa != g_personOfBody.end() && b.IsDynamic()) { person = &a; body = &b; who = pa->second.who; }
         else if (pb != g_personOfBody.end() && a.IsDynamic()) { person = &b; body = &a; who = pb->second.who; n = -n; }
         else return;
+        // A soft hat uses ordinary solid foot contact. The special corpse
+        // push solver can classify its small moving mass as a blow to the walker.
+        if (!body->GetUserData() && headwear::OwnsBody(body->GetID().GetIndexAndSequenceNumber())) return;
         JPH::RVec3 p = m.mRelativeContactPointsOn2.empty() ? m.mBaseOffset
                        : body == &b ? m.GetWorldSpaceContactPointOn2(0) : m.GetWorldSpaceContactPointOn1(0);
         auto car = g_carOfBody.find(body->GetID().GetIndexAndSequenceNumber());
