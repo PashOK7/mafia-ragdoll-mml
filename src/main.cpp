@@ -11,6 +11,7 @@
 #include <string>
 #include "core.h"
 #include "headwear.h"
+#include "dogs.h"
 #include "ragcam.h"
 #include "game_build.h"
 #include "mml/mml.h"
@@ -48,10 +49,17 @@ void OnEvent(const MmlEvent *ev, void *) {
     switch (ev->type) {
     case MML_EVENT_MISSION_OPEN: headwear::Prepare(); break;
     case MML_EVENT_MISSION_TICK: if (!loading) core::Tick(ev->dt); break;
-    case MML_EVENT_RENDER_BEGIN: if (ev->world && !loading) core::Render(); break;
+    case MML_EVENT_RENDER_BEGIN:
+        if (ev->world && !loading) {
+            core::Render();
+            dogs::DrawPose();
+        }
+        break;
+    case MML_EVENT_RENDER_END: dogs::RestorePose(); break;
     case MML_EVENT_RENDER_WORLD: if (ev->world && !loading) core::Rendered(); break;
     case MML_EVENT_HUMAN_HIT:
     case MML_EVENT_PEDESTRIAN_HIT: if (!loading) core::OnHit(*ev); break;
+    case MML_EVENT_BULLET_HIT: if (!loading && ev->bullet) dogs::Bullet(*ev->bullet); break;
     case MML_EVENT_ACTOR_DESTROYED: core::OnActorDestroyed(ev->actor); break;
     case MML_EVENT_EXPLOSION: if (ev->explosion && !loading) core::OnExplosion(*ev->explosion); break;
     case MML_EVENT_MISSION_CLOSE: core::OnWorldReset("mission close"); break;
@@ -73,6 +81,7 @@ std::string Address(const char *args) {
 int Command(const char *args, MmlReply *r, void *user) {
     const char *name = static_cast<const char *>(user);
     if (!strcmp(name, "state")) { Reply(r, core::State()); return 0; }
+    if (!strcmp(name, "dogs")) { Reply(r, dogs::State()); return 0; }
     if (!strcmp(name, "camera")) { Reply(r, ragcam::State()); return 0; }
     bool ok = false;
     const bool address = !strcmp(name, "start") || !strcmp(name, "drop") || !strcmp(name, "inspect") ||
@@ -100,12 +109,14 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
         H->log(M, MML_LOG_ERROR, "not a Mafia build the ragdolls know (Game.exe %s, LS3DF.dll %s)", game::ExeName(), game::Ls3dName());
         return 1;
     }
-    for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_RENDER_WORLD, MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT,
+    for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_RENDER_WORLD, MML_EVENT_RENDER_END,
+                           MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT, MML_EVENT_BULLET_HIT,
                            MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_OPEN, MML_EVENT_MISSION_CLOSE, MML_EVENT_GAME_LOADED,
                            MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION})
         H->subscribe(M, t, OnEvent, nullptr);
     static const char *const kCommands[][2] = {
         {"state", "the ragdolls: each one's actor, kind, age, pelvis; the people tracked, the world, the counts"},
+        {"dogs", "tracked dogs and the current centre and age of each simulated quadruped"},
         {"start", "a ragdoll on someone alive (a puppet), by his address: {\"actor\": \"0x...\"} or {\"pedestrian\": \"0x...\"}"},
         {"drop", "the ragdoll taken off someone (a living one gets up): {\"actor\": \"0x...\"}"},
         {"jolt", "the rigid-body world and the ragdolls' bodies, described"},

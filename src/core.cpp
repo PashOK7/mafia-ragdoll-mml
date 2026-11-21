@@ -19,6 +19,7 @@
 #include "fmt.h"
 #include "core.h"
 #include "headwear.h"
+#include "dogs.h"
 #include <windows.h>
 #include <intrin.h>
 #include <algorithm>
@@ -1514,7 +1515,7 @@ void JoltMovers(std::vector<smoke::Mover> &out) {
         V3 p = kv.second.snap.pts[Ragdoll::PELVIS];
         bool close = false;
         for (const V3 &c : bodies) close = close || Len(c - p) < 6.0f;
-        if (!close) close=headwear::Near(p);
+        if (!close) close=headwear::Near(p) || dogs::Near(p);
         // Also give living bodies near a moving car as sensors. Native car/pedestrian contact can miss a waving
         // animation until it is already inside the car. These use the actual car hull and anatomical capsules.
         if (!close && IsPed(kv.first)) {
@@ -1553,11 +1554,12 @@ void JoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
             return;
         }
     }
+    V3 pp = pl ? game::ActorWorldPos(pl) : V3{};
+    if (pl) dogs::PrepareStep(dt,pp);
     static std::vector<smoke::Mover> movers;
     JoltMovers(movers);
     OccupantMovers(movers);
     headwear::ApplyAirDrag(dt);
-    V3 pp = pl ? game::ActorWorldPos(pl) : V3{};
     jolt_ragdoll::Step(jolt, dt, movers, pl ? &pp : nullptr);
 }
 bool SafeJoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
@@ -1883,6 +1885,7 @@ void TickBody(float dt) {
     if (!joltOk) {
         g_occupants.clear();
         headwear::Reset();
+        dogs::Clear();
         LOG("jolt world faulted: its ragdolls dropped, the world made anew on the next tick");
         jolt_ragdoll::Clear();
         jolt_world::Stop();
@@ -2574,6 +2577,7 @@ void OnExplosion(const MmlExplosion &x) {
 }
 
 void OnActorDestroyed(void *actor) {
+    dogs::Forget(actor);
     std::erase_if(g_occupants, [actor](const auto &o) { return o.carrier == actor; });
     if (g_pull.car == actor) g_pull.car = nullptr;
     for (auto &body : g_ragdolls) if (body->impactVehicle == actor) body->impactVehicle = nullptr;
@@ -2624,6 +2628,7 @@ bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
 
 void OnWorldReset(const char *reason) {
     headwear::Reset();
+    dogs::Clear();
     g_lastAttached = {};
     g_pullArms = {};
     g_occupants.clear();
@@ -2743,6 +2748,7 @@ void Start() {
 
 void Stop() {
     headwear::Reset();
+    dogs::Clear();
     auto restore = [] { RestorePullArms(); };
     Guarded(restore);
     g_occupants.clear();

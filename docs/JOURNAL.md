@@ -909,3 +909,13 @@ Mounted hat faces now share the skinned body's native opacity, culling and model
 Both builds passed the new render comparison at opaque, quarter opacity and invisible, repeated after native save loading and outfit selection. A world prop was still visible while Tommy was fully invisible. Both full suites passed against 114 prepared characters and 212 LODs, including the physical fall, truck impact, pellet shots and foot contact. The labs are closed with their previous startup flags.
 
 The tested SHA-256 is `29a2dedd545f688cfddeb43394fbec38252993e4e9553b7459b516c06d10f86f`. The owner process needed a restart to clear the old model cache. The new process loaded the tested DLL, restored `headwear_before_0137_9332` and exposed the mounted cap as a joint. The owner confirmed the result. Lab captures, test output and pre-install files are in `../MafiaModLoader/build/hat-skin-0137/`.
+
+## 2026-11-21 — Stock dog ragdolls (0.1.38)
+
+The Motel Clark dog is a native `C_dog` (kind 0x15). Its `pes.a` skinned trunk closes over independently jointed front and hind legs, a neck and a tail. The port validates this exact hierarchy and creates 17 constrained capsules in the existing Jolt world. The last living pose and its smoothed pelvis movement seed the physics. The corpse is drawn from the current physics pose while the engine's original pose is restored after each world render. This leaves native scripts, nonlethal reactions, collision removal and save handling with the dog actor.
+
+Both builds enter death state 0x0f when health at +0xd0 reaches zero. Verified the native hit and car-collision paths in both executables. A resolved loader bullet event supplies the direction for a bounded impulse, applied only when the dog enters physics. Near the dog the existing scenery and vehicle bodies provide collision. Actor destruction, mod unload and mission load remove the physics. Already dead dogs without a sampled living pose use their current native pose.
+
+`tests/check_dogs.py` passes in both labs from the stock Motel Clark save. It checks that a nonlethal hit does not activate Jolt, a real game bullet and the native vehicle collision callback each produce one 17-part ragdoll, and loading a living save clears the old physics. The vehicle test calls the game's real collision response directly. Native 1.0 and 1.2 owner/lab skeleton evidence and screenshots are in `../MafiaModLoader/build/dog-ragdoll-0138/`.
+
+Both lab DLLs and the loaded owner DLL match SHA-256 `f773461e43c952522e1bfb92c1afb8dc104da9e6dd81c410c7f5c27a03c6b9d6`. The owner copy hot-reloaded 0.1.38 as generation 2 in PID 5976. It remained in the paused Motel Clark mission with the live dog.
