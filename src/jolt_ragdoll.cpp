@@ -19,6 +19,7 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
@@ -139,10 +140,13 @@ struct Entry {
     JPH::Ref<JPH::PointConstraint> grip;   // point on the driver's trunk reached by Tommy's hands
     JPH::BodyID handAnchor;
     bool reached = false;
-    V3 lastHands{}, initialSlack{}, outward{}, gripAxis{}, localGripAxis{};
+    V3 lastHands{}, reachOffset{}, anchorTarget{}, outward{}, gripAxis{}, localGripAxis{};
+    V3 localContact[2]{};
+    V3 pullVelocity{};
+    float reachBlend = 0;
+    float duck = 0;
     float reachStart = 0, deepestReach = 0, gripStart = 0, lastDepth = 0;
     float farthestPull = 0;
-    float gripAge = 0;
 
     // Held still until the static world around it is there (after a core reload, in a part of the city just
     // reached): its parts asleep, the velocities they had kept for when it goes.
@@ -634,16 +638,30 @@ void FinishPull(Ragdoll *r) {
     jolt_world::ReleaseHolder(r);
 }
 
-void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &right, const V3 &player, float dt) {
+float ChestContacts(const Ragdoll *r, V3 (&contacts)[2]) {
+    const auto it = g_entries.find(r);
+    if (it == g_entries.end() || it->second.reachBlend <= 0) return 0;
+    const Entry &e = it->second;
+    const auto transform = jolt_world::Bodies().GetCenterOfMassTransform(e.ragdoll->GetBodyID(CHEST));
+    for (int i = 0; i < 2; ++i)
+        contacts[i] = jolt_world::ToWorld(F(transform * J(e.localContact[i])));
+    return e.reachBlend * e.reachBlend * (3.f - 2.f * e.reachBlend);
+}
+
+void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     auto it = g_entries.find(r);
     if (it == g_entries.end() || dt <= 0) return;
     Entry &e = it->second;
-    if (!e.car && !e.grip) return;
+    if (!e.car && !e.grip) {
+        e.reachBlend = std::max(0.f, e.reachBlend - dt / .18f);
+        return;
+    }
+    const V3 left = pose[Ragdoll::LHAND], right = pose[Ragdoll::RHAND], player = pose[Ragdoll::PELVIS];
 
     JPH::BodyInterface &bi = jolt_world::Bodies();
 
     const V3 hands = (left + right) * .5f;
-    const float span = Len(right - left);
+    const V3 shoulderLine = pose[Ragdoll::RARM] - pose[Ragdoll::LARM];
     // Measure the actual reach and return across the door in the car's frame.
     // Vertical and fore-aft movement of the hands also occurs while reaching in.
     const void *car = e.car ? e.car : e.passCar;
@@ -667,26 +685,27 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
         }
         e.deepestReach = std::min(e.deepestReach, depth);
         e.lastHands = hands;
-        if (e.reachStart - e.deepestReach < .12f || depth - e.deepestReach < .015f || outwardSpeed <= 0 ||
-            Len(hands - chest) >= .95f || Dot(hands - player, chest - player) <= 0) return;
-
-        // The same animation reaches the jacket at different heights in each car.
-        // Bind once to the closest trunk surface along a ray towards each segment.
-        // Pulling the upper chest down to a hand at belt height jerks the neck.
-        const auto start = J(jolt_world::ToJolt(hands));
-        JPH::BodyID grabbed;
-        JPH::RVec3 contact = start;
-        float best = FLT_MAX;
-        for (int part : {CHEST, CHESTLOW, ABDOMEN, PELVIS}) {
-            auto id = e.ragdoll->GetBodyID(part);
-            JPH::RRayCast ray{start, JPH::Vec3(bi.GetCenterOfMassPosition(id) - start)};
+        if (Len(hands - chest) >= .95f || Dot(hands - player, chest - player) <= 0) return;
+        const auto grabbed = e.ragdoll->GetBodyID(CHEST);
+        const auto transform = bi.GetCenterOfMassTransform(grabbed);
+        const V3 shoulders[] = {pose[Ragdoll::LARM], pose[Ragdoll::RARM]};
+        const V3 across = Norm(shoulders[1] - shoulders[0]);
+        JPH::RVec3 points[2];
+        for (int i = 0; i < 2; ++i) {
+            const auto start = J(jolt_world::ToJolt(shoulders[i]));
+            const auto inside = transform.GetTranslation() + J(across * (i ? .075f : -.075f));
+            JPH::RRayCast ray{start, JPH::Vec3(inside - start)};
             JPH::RayCastResult hit;
-            if (!bi.GetTransformedShape(id).CastRay(ray, hit)) continue;
-            auto point = ray.GetPointOnRay(hit.mFraction);
-            float distanceSq = (point - start).LengthSq();
-            if (distanceSq < best) { best = distanceSq; grabbed = id; contact = point; }
+            if (!bi.GetTransformedShape(grabbed).CastRay(ray, hit)) return;
+            points[i] = ray.GetPointOnRay(hit.mFraction);
+            e.localContact[i] = F(transform.InversedRotationTranslation() * points[i]);
         }
-        if (grabbed.IsInvalid()) return;
+        const float progress = std::clamp((e.reachStart - e.deepestReach) / .12f, 0.f, 1.f);
+        // The chest can first become reachable halfway into the native stroke.
+        // Bring both arms off their animation continuously from that instant.
+        e.reachBlend = std::min(progress, e.reachBlend + dt / .46f);
+        if (e.reachBlend < 1 || depth - e.deepestReach < .015f || outwardSpeed <= 0) return;
+        const auto contact = (points[0] + points[1]) * .5f;
         JPH::PointConstraintSettings settings;
         settings.mSpace = JPH::EConstraintSpace::WorldSpace;
         settings.mPoint1 = settings.mPoint2 = contact;
@@ -703,10 +722,11 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
         e.grip = static_cast<JPH::PointConstraint *>(joint);
         jolt_world::System()->AddConstraint(e.grip);
         jolt_world::SetHolder(r, holder);
-        e.initialSlack = F(JPH::Vec3(contact - start));
-        e.gripAge = 0;
+        e.reachOffset = jolt_world::ToWorld(F(contact)) - hands;
+        e.anchorTarget = hands + e.reachOffset;
+        e.pullVelocity = F(bi.GetLinearVelocity(grabbed));
         e.gripStart = e.farthestPull = depth;
-        e.gripAxis = Norm(right - left, {0, 0, 0});
+        e.gripAxis = Norm(shoulderLine);
         e.localGripAxis = F(bi.GetRotation(grabbed).Conjugated() * J(e.gripAxis));
     } else if (Len(hands - e.lastHands) > 1.5f) {
         ReleaseGrip(e, r); // the player was teleported across the scene
@@ -725,14 +745,103 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &righ
         return;
     }
     e.lastHands = hands;
-    e.gripAge += dt;
-    const float slack = std::max(0.f, 1.f - e.gripAge / .18f);
-    const V3 target = hands + e.initialSlack * (slack * slack * (3.f - 2.f * slack));
+    // Once Tommy turns away and the hands swing past his shoulders, blend back
+    // to the native release height. Preserve the lift while still in the cabin.
+    const V3 shoulders = (pose[Ragdoll::LARM] + pose[Ragdoll::RARM]) * .5f;
+    const float shoulderWidth = std::max(.1f, Len(shoulderLine));
+    const float turn = std::clamp(.5f + Dot(hands - shoulders, e.outward) / (2 * shoulderWidth), 0.f, 1.f);
+    const float lower = turn * turn * (3.f - 2.f * turn);
+    V3 target = hands + e.reachOffset;
+    target.y -= e.reachOffset.y * lower;
+    V3 contacts[2];
+    ChestContacts(r, contacts);
+    const V3 midpoint = (contacts[0] + contacts[1]) * .5f;
+    // Read the underside of the cabin ahead of the head. A high grip must
+    // lower through a low header before the physical head hits its edge.
+    const auto cabinId = jolt_world::CabinBody(car);
+    float required = 0;
+    if (!cabinId.IsInvalid()) {
+        const auto cabin = bi.GetTransformedShape(cabinId);
+        const auto head = bi.GetCenterOfMassPosition(e.ragdoll->GetBodyID(HEAD));
+        JPH::RayCastSettings settings;
+        settings.SetBackFaceMode(JPH::EBackFaceMode::CollideWithBackFaces);
+        for (float lead : {.04f, .18f, .32f}) {
+            const auto from = head + J(e.outward * lead) - JPH::Vec3(0, .08f, 0);
+            JPH::RRayCast ray{from, JPH::Vec3(0, .38f, 0)};
+            JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> hit;
+            cabin.CastRay(ray, settings, hit);
+            if (!hit.HadHit()) continue;
+            const auto point = ray.GetPointOnRay(hit.mHit.mFraction);
+            const float slope = std::abs(cabin.GetWorldSpaceSurfaceNormal(hit.mHit.mSubShapeID2, point).GetY());
+            if (slope < .6f) continue;
+            const float headroom = point.GetY() - head.GetY();
+            required = std::max(required, target.y - midpoint.y + .14f / slope - headroom);
+        }
+    }
+    e.duck += std::clamp(required - e.duck, -dt * .45f, dt * 1.2f);
+    target.y -= e.duck;
+    const int arms[] = {Ragdoll::LARM, Ragdoll::RARM};
+    const int elbows[] = {Ragdoll::LELB, Ragdoll::RELB};
+    const int wrists[] = {Ragdoll::LHAND, Ragdoll::RHAND};
+    // Each material contact has its own reachable sphere. Limit the physics
+    // goal too, otherwise the chest can leave one drawn hand at full extension.
+    V3 centre[2];
+    float radius[2];
+    for (int i = 0; i < 2; ++i) {
+        centre[i] = pose[arms[i]] - (contacts[i] - midpoint);
+        radius[i] = .94f * (Len(pose[elbows[i]] - pose[arms[i]]) + Len(pose[wrists[i]] - pose[elbows[i]]));
+    }
+    auto withinReach = [&](V3 point) {
+        for (int pass = 0; pass < 3; ++pass) {
+            for (int i = 0; i < 2; ++i) {
+                const V3 delta = point - centre[i];
+                if (Len(delta) > radius[i]) point = centre[i] + Norm(delta) * radius[i];
+            }
+        }
+        return point;
+    };
+    target = withinReach(target);
+    // The material grip stays rigid. Give the pulling arms finite acceleration
+    // when the stock motion or the required cabin clearance changes abruptly.
+    // As Tommy turns out of the doorway, follow his braking motion closely
+    // again so that the torso does not continue accelerating at release.
+    const float response = 24.f + 60.f * lower;
+    const V3 error = e.anchorTarget - target;
+    const V3 c = e.pullVelocity + error * response;
+    const float decay = std::exp(-response * dt);
+    target = target + (error + c * dt) * decay;
+    const V3 filteredVelocity = (e.pullVelocity - c * (response * dt)) * decay;
+    const V3 unconstrained = target;
+    target = withinReach(target); // the shoulders can move during the filtered response
+    // Slide the grip along the seat back or door header when either the ribs
+    // or the head is obstructed. The solver can still rotate the body around
+    // that contact; the anchor no longer drives straight through the panel.
+    if (!cabinId.IsInvalid()) {
+        const auto cabin = bi.GetTransformedShape(cabinId);
+        JPH::ShapeCastSettings settings;
+        settings.SetBackFaceMode(JPH::EBackFaceMode::CollideWithBackFaces);
+        for (int part : {CHEST, HEAD}) {
+            const auto id = e.ragdoll->GetBodyID(part);
+            const V3 motion = target - midpoint;
+            if (Len(motion) < .001f) break;
+            JPH::RShapeCast cast(bi.GetShape(id), JPH::Vec3::sOne(), bi.GetCenterOfMassTransform(id), J(motion));
+            JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> hit;
+            cabin.CastShape(cast, settings, JPH::RVec3::sZero(), hit);
+            if (hit.HadHit()) {
+                const V3 into = Norm(F(hit.mHit.mPenetrationAxis));
+                const float blocked = std::max(0.f, Dot(motion, into)) * (1.f - hit.mHit.mFraction);
+                target = target - into * blocked;
+            }
+        }
+    }
+    e.pullVelocity = filteredVelocity + (target - unconstrained) * (1.f / dt);
+    e.anchorTarget = target;
     bi.MoveKinematic(e.handAnchor, J(jolt_world::ToJolt(target)), JPH::Quat::sIdentity(), dt);
     const auto held = e.grip->GetBody2()->GetID();
     // Two hands can turn the trunk as a pair. Resist angular slip perpendicular
     // to the line between them, leaving rotation about that line free.
-    const V3 axis = Norm(right - left, e.gripAxis);
+    const V3 axis = Norm(shoulderLine, e.gripAxis);
+    const float span = Len(contacts[1] - contacts[0]);
     if (span > .02f) {
         const V3 handSpin = Cross(e.gripAxis, axis) * (1.f / dt);
         const V3 slip = handSpin - F(bi.GetAngularVelocity(held));
@@ -762,7 +871,7 @@ float GripDistance(const Ragdoll *r, V3 *contact) {
     const auto transform = jolt_world::Bodies().GetCenterOfMassTransform(e.grip->GetBody2()->GetID());
     const V3 point = jolt_world::ToWorld(F(transform * e.grip->GetLocalSpacePoint2()));
     if (contact) *contact = point;
-    return Len(point - e.lastHands);
+    return Len(point - e.anchorTarget);
 }
 
 int ShotPart(const Ragdoll *r, const V3 &from, const V3 &delta, V3 *point) {

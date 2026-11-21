@@ -274,6 +274,28 @@ void Ragdoll::PointsFromPose(const M3 *rot, const V3 *org, V3 *pts) {
     leg(LHIP, LKNEE, LANKLE, LTOE, LTH, LSH, LFT);
 }
 
+bool Ragdoll::BindClonedModel(void *clone) {
+    PoseSnap next{};
+    std::string error;
+    if (!Snapshot(clone, nullptr, &next, &error)) return false;
+    for (const auto &link : bones)
+        if (std::find(std::begin(frames), std::end(frames), link.frame) == std::end(frames)) return false;
+    for (auto &link : bones) {
+        const auto index = std::find(std::begin(frames), std::end(frames), link.frame) - std::begin(frames);
+        link.frame = next.frames[index];
+        link.wrote = false;
+    }
+    std::copy(std::begin(next.frames), std::end(next.frames), frames);
+    rootFrame = frames[19];
+    pelvisFrame = frames[18];
+    model = clone;
+    anim = {};
+    animSerial = 0;
+    restWrites = 0;
+    shapeAtRest = false;
+    return true;
+}
+
 bool Ragdoll::SnapshotNow(PoseSnap *out) const {
     if (!frames[18] || !frames[19]) return false;
     // The facing: the physical pelvis's forward, level (the helper points and the body frames' signs need it).

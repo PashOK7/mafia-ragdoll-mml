@@ -67,6 +67,7 @@ public:
     PoseSnap reference{};   // the model file's rest skeleton, independent of the animation at death
     // The pose the model's frames hold now (the 20 frames found at Init), facing the way the physical pelvis does.
     bool SnapshotNow(PoseSnap *out) const;
+    bool BindClonedModel(void *clone); // same skeleton duplicated by the game's traffic carjack
     // The pose the bodies hold now, as frames 0..18 of `frames` (PoseSnap's order; 18 the pelvis): each one's world
     // rotation (rows) and origin, from the bodies themselves (what Apply writes, without the game's matrices).
     void PhysicalPose(M3 *rot19, V3 *org19) const;

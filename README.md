@@ -34,7 +34,8 @@ into the folder containing Game.exe. [Download the latest release](https://githu
   carriage, including the rear train car. Bullets push the part of the body they strike, both on the fatal shot
   and after the body has settled.
 - **In cars.** A traffic driver becomes a ragdoll as soon as the game registers a fatal hit. Someone killed in his seat slumps there and stays in the cabin while the car drives, turns, brakes or
-  crashes or moves with a mission script. When Tommy pulls a dead driver out, his hands grip the torso and draw it through the door.
+  crashes or moves with a mission script. When Tommy pulls a dead driver out, he reaches for the chest with both hands.
+  His shoulders and elbows follow two points on the ribcage as he pulls the driver through the door.
   The legs follow under their own weight, and the body stays in the street when the car leaves.
 - **The ragdoll camera.** While the player himself is a ragdoll and while he gets up, the camera circles his body:
   the mouse turns it round him, the wheel brings it nearer or further, and it keeps out of walls and cars; it blends

@@ -283,11 +283,14 @@ struct PullSample {
     V3 head, drawnHead, drawnNose;
     Ragdoll::Quat neck;
     bool hands, carPose, drawn;
+    V3 contact[2]{}, drawnWrist[2]{};
+    float ikWeight = 0;
     std::string cabinContacts;
 };
 
 struct PullTrace {
     Ragdoll *body = nullptr;
+    unsigned bodySerial = 0;
     void *car = nullptr;
     V3 left{}, right{};
     float t = 0, settling = 0, wheelEdge = 0;
@@ -299,7 +302,7 @@ struct PullTrace {
 void EndPullTrace(const char *reason) {
     if (!g_pull.body) return;
     jolt_world::WatchDriver(nullptr, nullptr);
-    std::string out = Fmt("{\"end\":\"%s\",\"outer_tyre_x_m\":%.4f,", reason, g_pull.wheelEdge);
+    std::string out = Fmt("{\"end\":\"%s\",\"body_serial\":%u,\"outer_tyre_x_m\":%.4f,", reason, g_pull.bodySerial, g_pull.wheelEdge);
     out += "\"car_model\":" + TraceString(g_pull.carModel) + ",\"samples\":[";
     for (const auto &s : g_pull.rows) {
         if (out.back() != '[') out += ',';
@@ -312,6 +315,10 @@ void EndPullTrace(const char *reason) {
         out += Fmt(",\"neck_q\":[%.6f,%.6f,%.6f,%.6f]", s.neck.w, s.neck.x, s.neck.y, s.neck.z);
         out += ",\"drawn_head\":" + (s.drawn ? TracePoint(s.drawnHead) : "null");
         out += ",\"drawn_nose\":" + (s.drawn ? TracePoint(s.drawnNose) : "null");
+        if (s.ikWeight > 0)
+            out += Fmt(",\"ik_weight\":%.5f", s.ikWeight) +
+                ",\"chest_contacts\":[" + TracePoint(s.contact[0]) + "," + TracePoint(s.contact[1]) + "]" +
+                ",\"drawn_wrists\":[" + TracePoint(s.drawnWrist[0]) + "," + TracePoint(s.drawnWrist[1]) + "]";
         out += ",\"car\":" + (s.carPose ? TracePoint(s.origin) : "null") + ",\"side\":" + (s.carPose ? TracePoint(s.side) : "null") + "}";
     }
     if (!WriteTrace("driver-pull.json", out + "]}")) LOG("could not save driver-pull.json");
@@ -321,6 +328,7 @@ void EndPullTrace(const char *reason) {
 void BeginPullTrace(Ragdoll *body, const void *car) {
     EndPullTrace("next pull");
     g_pull.body = body;
+    g_pull.bodySerial = body->serial;
     g_pull.car = const_cast<void *>(car);
     g_pull.rows.reserve(400);
     jolt_world::WatchDriver(body, car);
@@ -912,6 +920,8 @@ bool BeingPulledFromCar(void *human) {
 // A traffic or railway occupant is a model owned by a native roster, without a human actor.
 struct Occupant {
     void *carrier{}, *record{}, *model{}, *frame{};
+    void *clone{};
+    unsigned cloneTick{};
     int slot{}, carriage{};
     bool rail{}, driver{}, sampleDraw{};
     float drawnNeckError = -1;
@@ -1076,8 +1086,8 @@ void StartOccupant(Occupant o) {
     }
     WatchRagdoll(o.body.get());
     if (g_transportShot && g_transportShot->model == o.model) g_transportShot->created = true;
-    LOG("occupant ragdoll at death: %s %s model %p carrier %p carriage %d", o.rail ? "rail" : "traffic",
-        o.driver ? "driver" : "passenger", o.model, o.carrier, o.carriage);
+    LOG("occupant ragdoll at death: %s %s model %p carrier %p carriage %d body %u", o.rail ? "rail" : "traffic",
+        o.driver ? "driver" : "passenger", o.model, o.carrier, o.carriage, o.body->serial);
     g_occupants.push_back(std::move(o));
 }
 
@@ -1254,6 +1264,37 @@ void OccupantMovers(std::vector<smoke::Mover> &out) {
         if (o.rail ? !RailMover(o, m) : !vehicles::MoverOf(o.carrier, &m)) continue;
         out.push_back(m);
     }
+}
+
+// In Do_ThrowCocotFromCar, immediately after the virtual frame duplicate:
+// ESI is Corovacka's driver model, EDI its clone and EBP the exact car.
+void TrafficDriverCloned(MmlMidContext *ctx, void *) {
+    for (auto &o : g_occupants) {
+        if (o.rail || !o.driver || o.model != reinterpret_cast<void *>(ctx->esi) ||
+            o.carrier != reinterpret_cast<void *>(ctx->ebp)) continue;
+        o.clone = reinterpret_cast<void *>(ctx->edi);
+        o.cloneTick = g_tick;
+        break;
+    }
+}
+
+bool TakeClonedDriver(void *human) {
+    void *model = ModelOf(human);
+    for (auto it = g_occupants.begin(); it != g_occupants.end(); ++it) {
+        if (!it->clone || it->clone != model || it->cloneTick != g_tick || it->carrier != SeatCarOf(human)) continue;
+        if (!it->body->BindClonedModel(model)) return false;
+        auto body = std::move(it->body);
+        LOG("traffic carjack: model %p cloned to %p, car %p, actor %p keeps body %u at age %.3f",
+            it->model, model, it->carrier, human, body->serial, body->age);
+        g_occupants.erase(it);
+        body->actor = human;
+        body->keyVtable = game::at<uint32_t>(human, 0);
+        WatchRagdoll(body.get());
+        body->Apply();
+        g_ragdolls.push_back(std::move(body));
+        return true;
+    }
+    return false;
 }
 
 // ---- making a ragdoll
@@ -1761,7 +1802,7 @@ void TickBody(float dt) {
                 }
                 const V3 hands = (pose[Ragdoll::RHAND] + pose[Ragdoll::LHAND]) * .5f;
                 if (FinitePoint(hands) && FinitePoint(pose[Ragdoll::PELVIS]))
-                    jolt_ragdoll::PullFromSeat(rd, player, pose[Ragdoll::LHAND], pose[Ragdoll::RHAND], pose[Ragdoll::PELVIS], dt);
+                    jolt_ragdoll::PullFromSeat(rd, player, pose, dt);
             }
         }
         if (AliveAgain(rd)) {
@@ -2117,10 +2158,117 @@ void Tick(float dt) {
     }
 }
 
+// The native wrists drive the pull on the next tick. Restore the animated
+// local rotations after world drawing so the corrected wrists never feed back.
+struct PullArmPose {
+    void *model{};
+    void *frame[7]{};
+    Q local[7]{};
+    Q applied[7]{};
+} g_pullArms;
+
+void RestorePullArms() {
+    const auto saved = g_pullArms;
+    g_pullArms = {};
+    if (!saved.model || g_freed.count(saved.model)) return;
+    void *player = game::Player();
+    if (!player || ModelOf(player) != saved.model) return;
+    for (int i = 0; i < 7; ++i) {
+        if (!saved.frame[i] || g_freed.count(saved.frame[i])) continue;
+        const Q current = game::at<Q>(saved.frame[i], game::kFrameRot);
+        // A skipped world-draw callback can leave a newer native animation here.
+        if (memcmp(&current, &saved.applied[i], sizeof current) == 0)
+            H->bone_set(M, saved.frame[i], &saved.local[i].w, nullptr);
+    }
+}
+
+void SetPullRotation(int slot, void *frame, const M3 &local) {
+    const Q q = QuatOf(local);
+    g_pullArms.frame[slot] = frame;
+    g_pullArms.local[slot] = game::at<Q>(frame, game::kFrameRot);
+    H->bone_set(M, frame, &q.w, nullptr);
+    g_pullArms.applied[slot] = game::at<Q>(frame, game::kFrameRot);
+}
+
+// Shortest swing that brings the shoulder into reach, about a real spine or
+// clavicle joint. The stock pose supplies twist and both arm segment lengths.
+M3 ReachSwing(V3 pivot, V3 shoulder, V3 goal, float reach, float limit) {
+    const V3 delta = goal - shoulder;
+    if (Len(delta) <= reach) return M3::Identity();
+    const V3 from = Norm(shoulder - pivot), to = Norm(goal - Norm(delta) * reach - pivot);
+    const V3 normal = Cross(from, to);
+    const float half = .5f * std::min(limit, std::atan2(Len(normal), Dot(from, to)));
+    const V3 v = Norm(normal) * std::sin(half);
+    float m[16];
+    QuatMatrix({std::cos(half), v.x, v.y, v.z}, m);
+    return M3::Raw(m);
+}
+
+void PosePullArms(const Ragdoll *driver) {
+    if (!game::Player() || g_pullArms.model) return;
+    V3 contact[2];
+    const float weight = jolt_ragdoll::ChestContacts(driver, contact);
+    Ragdoll::PoseSnap pose{};
+    if (weight <= 0 || !SafeSnapshot(game::Player(), &pose)) return;
+    g_pullArms.model = ModelOf(game::Player());
+    V3 goal[2];
+    float reach[2], excess[2];
+    for (int i = 0; i < 2; ++i) {
+        const int arm = i == 0 ? 15 : 11;
+        goal[i] = pose.org[arm+2] + (contact[i] - pose.org[arm+2]) * weight;
+        reach[i] = Len(pose.org[arm+2] - pose.org[arm+1]) + Len(pose.org[arm+1] - pose.org[arm]) - .004f;
+        excess[i] = Len(goal[i] - pose.org[arm]) - reach[i];
+    }
+    const int longerReach = excess[0] > excess[1] ? 0 : 1;
+    const V3 pivot = pose.org[6]; // back1
+    const M3 lean = ReachSwing(pivot, pose.org[longerReach == 0 ? 15 : 11], goal[longerReach], reach[longerReach], .60f);
+    void *spineParent = game::at<void *>(pose.frames[6], game::kFrameParent);
+    SetPullRotation(4, pose.frames[6], pose.rot[6] * lean * M3::FromWorld(game::WorldMatrix(spineParent)).T());
+    for (int i = 0; i < 2; ++i) {
+        const int arm = i == 0 ? 15 : 11; // upper arm, elbow and wrist in PoseSnap
+        const V3 clav = pivot + lean.Apply(pose.org[arm-1] - pivot);
+        const V3 upperOrigin = pivot + lean.Apply(pose.org[arm] - pivot);
+        const M3 swing = ReachSwing(clav, upperOrigin, goal[i], reach[i], .65f);
+        void *parent = game::at<void *>(pose.frames[arm-1], game::kFrameParent);
+        const M3 parentWorld = M3::FromWorld(game::WorldMatrix(parent));
+        const M3 clavWorld = pose.rot[arm-1] * lean * swing;
+        // Recover the animated parent from the snapshot (the two shoulder
+        // chains normally share back3), independent of lazy frame updates.
+        M3 originalParent = parentWorld;
+        for (int k = 6; k <= 9; ++k)
+            if (pose.frames[k] == parent) originalParent = pose.rot[k];
+        SetPullRotation(5+i, pose.frames[arm-1], clavWorld * (originalParent * lean).T());
+        pose.rot[arm-1] = clavWorld;
+        for (int k = arm; k <= arm+2; ++k) {
+            pose.org[k] = clav + swing.Apply(pivot + lean.Apply(pose.org[k] - pivot) - clav);
+            pose.rot[k] = pose.rot[k] * lean * swing;
+        }
+        const V3 shoulder = pose.org[arm], elbow = pose.org[arm+1], wrist = pose.org[arm+2];
+        const float upper = Len(elbow - shoulder), fore = Len(wrist - elbow);
+        if (std::min(upper, fore) < .01f) continue;
+        const V3 axis = Norm(goal[i] - shoulder, Norm(wrist - shoulder));
+        const float length = std::clamp(Len(goal[i] - shoulder), std::abs(upper - fore) + .001f, upper + fore - .001f);
+        const float along = (upper * upper - fore * fore + length * length) / (2.f * length);
+        const V3 pole = elbow - shoulder;
+        const V3 bend = Norm(pole - axis * Dot(pole, axis), BasisFrom(shoulder, goal[i], elbow).r[1]);
+        const V3 solved = shoulder + axis * along + bend * std::sqrt(std::max(0.f, upper * upper - along * along));
+        const V3 end = shoulder + axis * length;
+        // Keep the native twist of both links relative to the elbow bend plane.
+        const M3 oldUpper = BasisFrom(shoulder, elbow, wrist), newUpper = BasisFrom(shoulder, solved, end);
+        const M3 oldFore = BasisFrom(elbow, wrist, shoulder), newFore = BasisFrom(solved, end, shoulder);
+        const M3 upperWorld = pose.rot[arm] * oldUpper.T() * newUpper;
+        const M3 foreWorld = pose.rot[arm+1] * oldFore.T() * newFore;
+        SetPullRotation(2*i, pose.frames[arm], upperWorld * clavWorld.T());
+        SetPullRotation(2*i+1, pose.frames[arm+1], foreWorld * upperWorld.T());
+    }
+}
+
 void Render() {
     if (!g_cfg.enabled) return;
     Purge();
     PruneOccupants();
+    auto arms = [] { RestorePullArms(); };
+    Guarded(arms);
     for (auto &o : g_occupants) {
         auto write = [&] { o.body->Apply(); };
         Guarded(write);
@@ -2129,6 +2277,10 @@ void Render() {
     for (auto &r : g_ragdolls) {
         // the game brought him back since our tick: the game's (the tick drops the ragdoll)
         if (SafeAliveAgain(r.get())) continue;
+        if (r->carExtraction) {
+            auto reach = [&] { PosePullArms(r.get()); };
+            Guarded(reach);
+        }
         // the engine played the model's animation (a death animation) since our write: the muscles' next target
         float ow = SafeOverwritten(r.get());
         if (ow > 0.5f && jolt_ragdoll::Has(r.get()) && SafeSnapshotNow(r.get())) r->animSerial++;
@@ -2176,6 +2328,11 @@ void Rendered() {
                 auto &row = g_pull.rows.back();
                 row.drawnHead = pose.pts[Ragdoll::HEAD];
                 row.drawnNose = pose.pts[Ragdoll::NOSE];
+                if (g_pullArms.model && SafeSnapshot(game::Player(), &pose)) {
+                    row.ikWeight = jolt_ragdoll::ChestContacts(g_pull.body, row.contact);
+                    row.drawnWrist[0] = pose.pts[Ragdoll::LHAND];
+                    row.drawnWrist[1] = pose.pts[Ragdoll::RHAND];
+                }
                 row.drawn = true;
             }
         }
@@ -2201,6 +2358,8 @@ void Rendered() {
         }
     };
     Guarded(read);   // observation only: no pose, velocity or collision policy changes
+    auto restore = [] { RestorePullArms(); };
+    Guarded(restore);
 }
 
 void OnHit(const MmlEvent &ev) {
@@ -2247,6 +2406,9 @@ void OnHit(const MmlEvent &ev) {
     Ragdoll *rd = Find(human);
     if (!rd) {
         bool died = wasAlive && !alive;
+        // Native promotion marks the already dead driver as dead on the new
+        // human. This event transfers ownership and carries no second impact.
+        if (died && !IsPed(human) && TakeClonedDriver(human)) return;
         if (died && !IsPed(human) && BeingPulledFromCar(human)) return;
         // (someone alive in a car's seat is the game's: a crash's hit on its driver, type 5, made him a ragdoll that
         // got up on the street under his own car, still seated, and died there)
@@ -2351,6 +2513,7 @@ bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
 }
 
 void OnWorldReset(const char *reason) {
+    g_pullArms = {};
     g_occupants.clear();
     g_carriageMeshes.clear();
     EndPullTrace("world reset");
@@ -2390,6 +2553,8 @@ void Settings() {
     const bool wasEnabled = g_cfg.enabled;
     g_cfg.enabled = flag("enabled", d.enabled);
     if (wasEnabled && !g_cfg.enabled) {
+        auto restore = [] { RestorePullArms(); };
+        Guarded(restore);
         Purge();
         const int state = H->mission_state();
         if (state == MML_MISSION_RUNNING || state == MML_MISSION_PAUSED) {
@@ -2448,6 +2613,8 @@ void Start() {
     Settings();
     const bool v10 = game::g_exe == &game::kExe10;
     const bool traffic = H->hook_mid(M, v10 ? 0x506C00 : 0x4BADD0, TrafficDeath, nullptr);
+    if (!H->hook_mid(M, v10 ? 0x4A8829 : 0x5882B9, TrafficDriverCloned, nullptr))
+        LOG("traffic driver model handover unavailable");
     const bool rail = H->hook_mid(M, v10 ? 0x4D5160 : 0x484230, RailDeath, nullptr);
     const bool carHit = H->hook(M, v10 ? 0x46A670 : 0x423600, reinterpret_cast<void *>(&CarHit), reinterpret_cast<void **>(&originalCarHit));
     const bool railHit = H->hook(M, v10 ? 0x4E1D90 : 0x490B40, reinterpret_cast<void *>(&RailwayHit), reinterpret_cast<void **>(&originalRailHit));
@@ -2462,6 +2629,8 @@ void Start() {
 }
 
 void Stop() {
+    auto restore = [] { RestorePullArms(); };
+    Guarded(restore);
     g_occupants.clear();
     g_carriageMeshes.clear();
     EndPullTrace("unload");
@@ -2518,8 +2687,8 @@ std::string State() {
     for (auto &o : g_occupants) {
         o.sampleDraw = true;
         const auto p = o.body->BodyPos(Ragdoll::B_PELVIS), h = o.body->BodyPos(Ragdoll::B_HEAD);
-        occupants += Fmt("%s{\"model\":\"0x%08X\",\"carrier\":\"0x%08X\",\"kind\":\"%s_%s\",\"carriage\":%d,\"in_cabin\":%s,\"drawn_neck_error\":%.4f,\"age\":%.3f,\"pelvis\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f]}",
-            occupants.empty() ? "" : ",", (unsigned)(uintptr_t)o.model, (unsigned)(uintptr_t)o.carrier, o.rail ? "rail" : "traffic",
+        occupants += Fmt("%s{\"body_serial\":%u,\"model\":\"0x%08X\",\"carrier\":\"0x%08X\",\"kind\":\"%s_%s\",\"carriage\":%d,\"in_cabin\":%s,\"drawn_neck_error\":%.4f,\"age\":%.3f,\"pelvis\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f]}",
+            occupants.empty() ? "" : ",", o.body->serial, (unsigned)(uintptr_t)o.model, (unsigned)(uintptr_t)o.carrier, o.rail ? "rail" : "traffic",
             o.driver ? "driver" : "passenger", o.carriage, jolt_ragdoll::SeatedCar(o.body.get()) ? "true" : "false", o.drawnNeckError, o.body->age, p.x,p.y,p.z,h.x,h.y,h.z);
     }
     std::string supports;

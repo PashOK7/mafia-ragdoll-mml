@@ -27,10 +27,11 @@ void Init(LogFn log);
 // seat, the door and the wheel and is thrown about as the car moves.
 bool Add(Ragdoll *r, std::string *err, const void *seatedIn = nullptr, const void *struckBy = nullptr);
 // Move a seated corpse with the player's grip during the native extraction track.
-void PullFromSeat(Ragdoll *r, const void *holder, const V3 &left, const V3 &right, const V3 &player, float dt);
+void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt);
+float ChestContacts(const Ragdoll *r, V3 (&contacts)[2]); // left, right in world space; IK blend weight
 void FinishPull(Ragdoll *r);
 const void *SeatedCar(const Ragdoll *r);
-float GripDistance(const Ragdoll *r, V3 *contact = nullptr); // metres to the hands, or -1 when released
+float GripDistance(const Ragdoll *r, V3 *contact = nullptr); // physical grip error in metres, or -1 when released
 // Nearest physical segment of this body on the shot ray, in world coordinates.
 int ShotPart(const Ragdoll *r, const V3 &from, const V3 &delta, V3 *point);
 bool CabinBlocksShot(const void *key, const V3 &from, const V3 &point, bool requireCabin = true);

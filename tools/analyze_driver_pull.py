@@ -17,6 +17,13 @@ def hand(row):
     return tuple((a + b) * .5 for a, b in zip(row['left'], row['right']))
 
 
+def grip_hands(row):
+    if 'drawn_wrists' in row:
+        left, right = row['drawn_wrists']
+        return tuple((a + b) * .5 for a, b in zip(left, right))
+    return hand(row)
+
+
 def side(row, point):
     return dot(subtract(point, row['car']), row['side'])
 
@@ -87,7 +94,7 @@ def analyze(trace):
     for s in settled[1:]:
         if s['t'] - base['t'] < .08:
             continue
-        h = subtract(hand(s), hand(base))
+        h = subtract(grip_hands(s), grip_hands(base))
         if math.hypot(*h) > .015:
             hand_travel += math.hypot(*h)
             coat_progress += dot(subtract(s['coat'], base['coat']), h) / math.hypot(*h)
@@ -101,7 +108,7 @@ def analyze(trace):
     # neighbouring residuals. Smooth translation or a turn by Tommy cancels out.
     jitter = []
     for a, b, c in zip(settled, settled[1:], settled[2:]):
-        ra, rb, rc = [subtract(s['coat'], hand(s)) for s in (a, b, c)]
+        ra, rb, rc = [subtract(s['coat'], grip_hands(s)) for s in (a, b, c)]
         u = (b['t'] - a['t']) / (c['t'] - a['t'])
         jitter.append(math.dist(rb, [x + u * (y - x) for x, y in zip(ra, rc)]))
 
@@ -117,6 +124,18 @@ def analyze(trace):
     edge = trace['outer_tyre_x_m']
     if all('cabin_contacts' in row for row in settled):
         result['opposing_cabin_contacts_while_lagging'] = cabin_resistance(settled, edge)
+    def wrist_gap(row):
+        return max(math.dist(w, c) for w, c in zip(row['drawn_wrists'], row['chest_contacts']))
+    drawn = [s for s in held if 'drawn_wrists' in s]
+    if drawn:
+        before = [s for s in rows if s['t'] < start and 'drawn_wrists' in s]
+        result['chest_grip'] = {
+            'drawn_ticks': len(drawn),
+            'before_grasp_m': wrist_gap(before[-1]) if before else None,
+            'first_grasp_m': wrist_gap(drawn[0]),
+            'p95_m': percentile95([wrist_gap(s) for s in drawn]),
+            'max_m': max(wrist_gap(s) for s in drawn),
+        }
     final = rows[-1]
     tail = [s for s in rows if s['t'] >= final['t'] - .25]
     result.update(grip_s=end-start, max_tick_s=max(b['t']-a['t'] for a,b in zip(rows, rows[1:])),
