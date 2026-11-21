@@ -48,14 +48,8 @@ void OnEvent(const MmlEvent *ev, void *) {
     switch (ev->type) {
     case MML_EVENT_MISSION_OPEN: headwear::Prepare(); break;
     case MML_EVENT_MISSION_TICK: if (!loading) core::Tick(ev->dt); break;
-    case MML_EVENT_RENDER_BEGIN:
-        if (ev->world && !loading) {
-            core::Render();
-            headwear::ApplyPlayerFade();
-        }
-        break;
+    case MML_EVENT_RENDER_BEGIN: if (ev->world && !loading) core::Render(); break;
     case MML_EVENT_RENDER_WORLD: if (ev->world && !loading) core::Rendered(); break;
-    case MML_EVENT_RENDER_END: headwear::RestorePlayerFade(); break;
     case MML_EVENT_HUMAN_HIT:
     case MML_EVENT_PEDESTRIAN_HIT: if (!loading) core::OnHit(*ev); break;
     case MML_EVENT_ACTOR_DESTROYED: core::OnActorDestroyed(ev->actor); break;
@@ -106,8 +100,7 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
         H->log(M, MML_LOG_ERROR, "not a Mafia build the ragdolls know (Game.exe %s, LS3DF.dll %s)", game::ExeName(), game::Ls3dName());
         return 1;
     }
-    for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_RENDER_WORLD, MML_EVENT_RENDER_END,
-                           MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT,
+    for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_RENDER_WORLD, MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT,
                            MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_OPEN, MML_EVENT_MISSION_CLOSE, MML_EVENT_GAME_LOADED,
                            MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION})
         H->subscribe(M, t, OnEvent, nullptr);
@@ -130,7 +123,4 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
     return 0;
 }
 
-MML_EXPORT void mml_mod_unload(MmlMod *) {
-    headwear::RestorePlayerFade();
-    core::Stop();
-}
+MML_EXPORT void mml_mod_unload(MmlMod *) { core::Stop(); }

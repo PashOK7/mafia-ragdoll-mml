@@ -16,8 +16,8 @@
 namespace hats {
 using Bytes = std::vector<uint8_t>;
 
-// Split only rigid, neck-weighted hat face groups. All original vertices, joint
-// indices, morph channels and other node indices remain valid in the character.
+// Separate the hat's motion from the neck while keeping its faces in the native
+// character skin. Original vertex indices, joint indices and morphs stay valid.
 struct Reader {
     const Bytes &data;
     size_t pos = 0;
@@ -48,7 +48,8 @@ struct Lod {
     std::vector<Group> groups;
     std::vector<Group> retained;
     std::set<uint16_t> morphVertices;
-    size_t vertexStart{}, groupCountAt{};
+    size_t vertexStart{}, groupCountAt{}, groupsEnd{}, skinStart{}, skinEnd{};
+    uint32_t unweighted{};
     struct Bone { uint32_t first, rigid; std::array<float,16> bind; };
     std::vector<Bone> bones;
 };
@@ -77,11 +78,14 @@ inline void readMesh(Reader &r, const std::vector<bool> &hat, std::vector<Lod> &
                 lod.groups.push_back(std::move(group));
             } else if (skinned) lod.retained.push_back(std::move(group));
         }
+        lod.groupsEnd=r.pos;
     }
     if (!skinned) return;
     for (auto &lod:lods) {
+        lod.skinStart=r.pos;
         lod.bones.resize(r.get<uint8_t>());
-        r.skip(28);
+        lod.unweighted=r.get<uint32_t>();
+        r.skip(24);
         unsigned first=0;
         for (auto &bone:lod.bones) {
             bone.bind=r.get<std::array<float,16>>();
@@ -92,6 +96,8 @@ inline void readMesh(Reader &r, const std::vector<bool> &hat, std::vector<Lod> &
             if (uint64_t(first)+bone.rigid+blended>lod.vertices.size()) throw Reader::Invalid{};
             first+=bone.rigid+blended;
         }
+        if (uint64_t(first)+lod.unweighted!=lod.vertices.size()) throw Reader::Invalid{};
+        lod.skinEnd=r.pos;
     }
 }
 inline void readMorph(Reader &r, std::vector<Lod> &meshes) {
@@ -178,72 +184,104 @@ struct PropMesh {
     std::vector<uint16_t> indices;
     float radius=0;
 };
-inline Bytes object(const std::vector<Lod> &lods, int joint, V3 &centre, bool worn, uint16_t lining=0, PropMesh *collision=nullptr) {
+struct HatGeometry {
+    std::vector<Vertex> vertices;
+    std::vector<Group> groups;
+};
+inline HatGeometry neckGeometry(const Lod &lod, const Lod::Bone &neck, bool fullDetail) {
+    HatGeometry geometry{{},lod.groups};
+    const M3 basis=M3::Raw(neck.bind.data());
+    const V3 translation{neck.bind[12],neck.bind[13],neck.bind[14]};
+    std::vector<int> remap(lod.vertices.size(),-1);
+    for (auto &group:geometry.groups) for (auto &index:group.index) {
+        if (index>=remap.size() || (fullDetail && (index<neck.first || index-neck.first>=neck.rigid)))
+            throw Reader::Invalid{};
+        if (remap[index]<0) {
+            remap[index]=int(geometry.vertices.size());
+            auto v=lod.vertices[index];
+            v.pos=basis.Apply(v.pos)+translation;
+            v.normal=Norm(basis.Apply(v.normal));
+            geometry.vertices.push_back(v);
+        }
+        index=uint16_t(remap[index]);
+    }
+    return geometry;
+}
+inline Bytes looseObject(HatGeometry geometry, V3 centre, uint16_t lining, PropMesh &collision) {
+    auto &[vertices,groups]=geometry;
+    lineProp(vertices,groups,centre,lining);
     Bytes mesh;
     put(mesh,uint16_t(0));
-    const size_t count=worn ? lods.size() : 1;
-    put(mesh,uint8_t(count));
-    if (joint<0 || size_t(joint)>=lods.front().bones.size()) throw Reader::Invalid{};
-    const auto &bone=lods.front().bones[joint];
-    for (size_t level=0;level<count;++level) {
-        const auto &lod=lods[level];
-        M3 basis=M3::Raw(bone.bind.data());
-        V3 translation{bone.bind[12],bone.bind[13],bone.bind[14]};
-        std::vector<Vertex> vertices;
-        auto groups=lod.groups;
-        std::vector<int> remap(lod.vertices.size(),-1);
-        for (auto &group:groups) for (auto &index:group.index) {
-            if (index>=remap.size() || (!level && (index<bone.first || index-bone.first>=bone.rigid))) throw Reader::Invalid{};
-            if (remap[index]<0) {
-                remap[index]=int(vertices.size());
-                auto v=lod.vertices[index];
-                v.pos=basis.Apply(v.pos)+translation;
-                v.normal=Norm(basis.Apply(v.normal));
-                vertices.push_back(v);
-            }
-            index=uint16_t(remap[index]);
-        }
-        if (&lod==lods.data()) {
-            if (vertices.empty()) throw Reader::Invalid{};
-            V3 lo=vertices.front().pos, hi=lo;
-            for (const auto &v:vertices) {
-                lo={std::min(lo.x,v.pos.x),std::min(lo.y,v.pos.y),std::min(lo.z,v.pos.z)};
-                hi={std::max(hi.x,v.pos.x),std::max(hi.y,v.pos.y),std::max(hi.z,v.pos.z)};
-            }
-            centre=(lo+hi)*.5f;
-            if (!(Len(hi-lo)<1.2f && Len(hi-lo)>.08f)) throw Reader::Invalid{};
-        }
-        if (!worn) lineProp(vertices,groups,centre,lining);
-        if (collision) {
-            for (const auto &v:vertices) {
-                V3 p=v.pos-centre;
-                collision->vertices.push_back(p);
-                collision->radius=std::max(collision->radius,Len(p));
-            }
-            for (const auto &group:groups)
-                collision->indices.insert(collision->indices.end(),group.index.begin(),group.index.end());
-        }
-        if (vertices.empty()) {
-            // Native objects keep a valid draw range even at a distance where
-            // the original skin omits the hat. This LOD has zero surface area.
-            vertices.push_back({centre,{0,1,0},{0,0}});
-            groups.push_back({lods.front().groups.front().material,{0,0,0}});
-        }
-        put(mesh,worn ? lod.distance : 0.f); put(mesh,uint16_t(vertices.size()));
-        for (auto &v:vertices) { v.pos=v.pos-centre; put(mesh,v); }
-        put(mesh,uint8_t(groups.size()));
-        for (const auto &g:groups) {
-            put(mesh,uint16_t(g.index.size()/3));
-            for (auto i:g.index) put(mesh,i);
-            put(mesh,g.material);
-        }
+    put(mesh,uint8_t(1)); put(mesh,0.f); put(mesh,uint16_t(vertices.size()));
+    for (auto &v:vertices) {
+        v.pos=v.pos-centre;
+        put(mesh,v);
+        collision.vertices.push_back(v.pos);
+        collision.radius=std::max(collision.radius,Len(v.pos));
+    }
+    put(mesh,uint8_t(groups.size()));
+    for (const auto &g:groups) {
+        put(mesh,uint16_t(g.index.size()/3));
+        for (auto i:g.index) put(mesh,i);
+        put(mesh,g.material);
+        collision.indices.insert(collision.indices.end(),g.index.begin(),g.index.end());
     }
     return mesh;
 }
+
+constexpr std::array<float,16> identity{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+inline void jointSkin(Bytes &out,uint32_t count,const scalp::Bounds &bounds) {
+    put(out,identity);
+    put(out,count); put(out,uint32_t(0)); put(out,uint32_t(0));
+    put(out,bounds.lo); put(out,bounds.hi);
+}
+inline void mountInSkin(const Lod &lod,HatGeometry geometry,V3 centre,std::vector<Edit> &edits) {
+    const auto &[vertices,groups]=geometry;
+    const size_t first=lod.vertices.size();
+    if (first+vertices.size()>65535 || lod.retained.size()+groups.size()>255) throw Reader::Invalid{};
+    Edit count{lod.vertexStart-2,lod.vertexStart,{}};
+    put(count.replacement,uint16_t(first+vertices.size()));
+    edits.push_back(std::move(count));
+    Edit geometryEdit{lod.groupCountAt,lod.groupCountAt+1,{}};
+    scalp::Bounds hatBounds;
+    for (auto v:vertices) {
+        v.pos=v.pos-centre;
+        put(geometryEdit.replacement,v);
+        hatBounds.add(v.pos);
+    }
+    put(geometryEdit.replacement,uint8_t(lod.retained.size()+groups.size()));
+    edits.push_back(std::move(geometryEdit));
+    Edit faces{lod.groupsEnd,lod.groupsEnd,{}};
+    for (const Group &group:groups) {
+        put(faces.replacement,uint16_t(group.index.size()/3));
+        for (uint16_t index:group.index) put(faces.replacement,uint16_t(first+index));
+        put(faces.replacement,group.material);
+    }
+    edits.push_back(std::move(faces));
+
+    // A joint at mesh identity consumes the original rigid tail in place.
+    // That keeps face and indexed or implicit morph references at their stock indices.
+    Edit skin{lod.skinStart,lod.skinStart+5,{}};
+    put(skin.replacement,uint8_t(lod.bones.size()+2));
+    put(skin.replacement,uint32_t(0));
+    edits.push_back(std::move(skin));
+    scalp::Bounds fixedBounds;
+    for (size_t i=first-lod.unweighted;i<first;++i) fixedBounds.add(lod.vertices[i].pos);
+    Edit weights{lod.skinEnd,lod.skinEnd,{}};
+    jointSkin(weights.replacement,lod.unweighted,fixedBounds);
+    jointSkin(weights.replacement,uint32_t(vertices.size()),hatBounds);
+    edits.push_back(std::move(weights));
+}
+
 inline void node(Bytes &out, const Bytes &mesh, const std::string &name, uint16_t parent, V3 pos) {
     put(out,uint8_t(1)); put(out,uint8_t(0)); put(out,uint16_t(0x2a00)); put(out,parent);
     put(out,pos); put(out,V3{1,1,1}); put(out,Q{1,0,0,0}); put(out,uint8_t(9));
     str(out,name); str(out,""); out.insert(out.end(),mesh.begin(),mesh.end());
+}
+inline void jointNode(Bytes &out,const std::string &name,uint16_t parent,V3 pos,uint32_t index) {
+    put(out,uint8_t(10)); put(out,parent);
+    put(out,pos); put(out,V3{1,1,1}); put(out,Q{1,0,0,0}); put(out,uint8_t(9));
+    str(out,name); str(out,""); put(out,identity); put(out,index);
 }
 inline bool split(const Bytes &source, const std::string &marker, Bytes &person, Bytes &prop,V3 &dimensions,PropMesh &collision) {
     try {
@@ -262,14 +300,17 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
         }
         if (std::find(hats.begin(),hats.end(),true)==hats.end()) return false;
         const size_t countAt=r.pos;
-        int count=r.get<uint16_t>(), neck=-1, joint=-1;
+        int count=r.get<uint16_t>(), neck=-1, joint=-1, skin=-1;
         std::vector<Edit> edits;
         std::vector<Lod> hatLods;
-        if (count<2 || count>=65535) return false;
+        std::vector<uint16_t> parents;
+        std::vector<std::pair<int,uint32_t>> joints;
+        if (count<2 || count>65533) return false;
         for (int i=0;i<count;++i) {
             auto type=r.get<uint8_t>(); int visual=-1;
             if (type==1) { visual=r.get<uint8_t>(); r.skip(2); }
-            r.skip(43); auto name=lower(r.str()); r.str();
+            parents.push_back(r.get<uint16_t>());
+            r.skip(41); auto name=lower(r.str()); r.str();
             if (name.starts_with("rdhat_")) return false;
             if (type==1 && ((visual>=0 && visual<=3) || visual==5)) {
                 std::vector<Lod> lods;
@@ -283,35 +324,65 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
                     // Replace those same materials with the neck-rigid original.
                     for (auto &lod:lods) for (auto &g:lod.groups)
                         if (std::none_of(first.begin(),first.end(),[&](auto &f){return f.material==g.material;})) return false;
+                    skin=i+1;
                     hatLods=std::move(lods);
                 }
             } else if (type==10) {
                 r.skip(64); auto id=r.get<uint32_t>();
-                if (name=="neck") { neck=i; joint=int(id); }
+                joints.emplace_back(i+1,id);
+                if (name=="neck") { neck=i+1; joint=int(id); }
             } else if (type==6) r.skip(24);
             else if (type==7) { r.skip(2); r.skip(size_t(r.get<uint8_t>())*2); }
             else return false;
         }
         if (neck<0 || hatLods.empty()) return false;
+        const auto nativeJoints=hatLods.front().bones.size();
+        if (joint<0 || size_t(joint)>=nativeJoints || nativeJoints>62) return false;
+        std::vector<bool> seen(nativeJoints);
+        for (auto [frame,id]:joints) {
+            int parent=frame;
+            for (int depth=0; parent>0 && parent<=count && parent!=skin && depth<count; ++depth)
+                parent=parents[parent-1];
+            if (parent!=skin) {
+                if (frame==neck) return false;
+                continue;
+            }
+            if (id>=nativeJoints || seen[id]) return false;
+            seen[id]=true;
+        }
+        if (std::find(seen.begin(),seen.end(),false)!=seen.end()) return false;
+        if (std::any_of(hatLods.begin(),hatLods.end(),[&](const Lod &lod){return lod.bones.size()!=nativeJoints;}))
+            return false;
         removeHatFaces(hatLods,edits);
         scalp::Bounds shell;
         for (const auto &g:hatLods.front().groups) for (auto i:g.index) shell.add(hatLods.front().vertices[i].pos);
         dimensions=shell.hi-shell.lo;
         repairCrowns(hatLods,edits);
-        V3 centre{};
+        const auto &neckBind=hatLods.front().bones[joint];
+        auto full=neckGeometry(hatLods.front(),neckBind,true);
+        if (full.vertices.empty()) return false;
+        scalp::Bounds local;
+        for (const auto &v:full.vertices) local.add(v.pos);
+        const auto extent=Len(local.hi-local.lo);
+        if (!(extent>.08f && extent<1.2f)) return false;
+        const V3 centre=local.middle();
         if (hats.size()>65535) return false;
         const auto lining=uint16_t(hats.size());
-        Bytes mesh=object(hatLods,joint,centre,false,lining,&collision);
+        Bytes mesh=looseObject(full,centre,lining,collision);
+        for (const auto &lod:hatLods)
+            mountInSkin(lod,neckGeometry(lod,neckBind,false),centre,edits);
         person.assign(source.begin(),source.begin()+countAt);
         prop=person;
         memcpy(prop.data()+14,&lining,sizeof lining); // 4DS material count
         put(prop,uint32_t(1u<<18));
         put(prop,V3{.65f,.65f,.65f}); put(prop,V3{.85f,.85f,.85f});
         put(prop,V3{}); put(prop,1.f); str(prop,"rd_lining.bmp");
-        put(prop,uint16_t(1)); put(person,uint16_t(count+1));
+        put(prop,uint16_t(1)); put(person,uint16_t(count+2));
         node(prop,mesh,"hat",0,{});
         put(prop,uint8_t(0)); // no model animation
-        std::sort(edits.begin(),edits.end(),[](auto &a,auto &b){return a.start<b.start;});
+        std::stable_sort(edits.begin(),edits.end(),[](const Edit &a,const Edit &b){
+            return a.start==b.start ? a.end<b.end : a.start<b.start;
+        });
         size_t cursor=countAt+2;
         for (const auto &edit:edits) {
             if (edit.start<cursor || edit.end<edit.start || edit.end>r.pos) return false;
@@ -320,8 +391,8 @@ inline bool split(const Bytes &source, const std::string &marker, Bytes &person,
             cursor=edit.end;
         }
         person.insert(person.end(),source.begin()+cursor,source.begin()+r.pos);
-        auto worn=object(hatLods,joint,centre,true);
-        node(person,worn,marker,uint16_t(neck+1),centre);
+        jointNode(person,"rd_rigid_tail",uint16_t(skin),{},uint32_t(nativeJoints));
+        jointNode(person,marker,uint16_t(neck),centre,uint32_t(nativeJoints+1));
         person.insert(person.end(),source.begin()+r.pos,source.end());
         return true;
     } catch (Reader::Invalid &) { return false; }

@@ -203,7 +203,10 @@ def check(game):
         return actor, frames()-before
 
     def visible(frame):
-        return bool(int(game.call('frame', addr=frame)['flags'], 16) & 1)
+        state = game.call('frame', addr=frame)
+        assert state['type'] == 10, state
+        data = game.call('mem.read', addr=hex(int(frame, 16)+0x90), size=4)['hex']
+        return struct.unpack('<f', bytes.fromhex(data))[0] > .5
 
     def hit(actor):
         game.call('human.hit', actor=actor, type=0, damage=1000, dir=[0, 0, 0])

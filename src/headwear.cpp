@@ -2,7 +2,6 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include "headwear.h"
@@ -71,6 +70,7 @@ struct FallenHat {
     V3 previous, drawn;
     const hats::PropMesh *mesh;
     float scale;
+    V3 restLocal;
     bool touchedRagdoll=false;
     bool reportedGround=false;
     bool sleeping=false;
@@ -224,20 +224,20 @@ void show(void *frame, bool on) {
     reinterpret_cast<SetOn>((*reinterpret_cast<void ***>(frame))[0x24/4])(frame,on);
 }
 
-// C_player::SetAlpha fades the current skin and its cached object list. After a
-// player model change that list can omit the generated hat under the neck.
-constexpr int kPlayerSkin = 0xab4;
-constexpr int kObjectOpacity = 0x214;
-constexpr int kVisualType = 0x1d4;
-constexpr uint32_t kObjectVisual = 0x5f4a424f;
-struct PlayerHatFade {
-    void *frame = nullptr;
-    float original = 1.f;
-} playerHatFade;
+bool IsMountJoint(void *frame) {
+    return game::at<uint32_t>(frame,game::kFrameType)==10;
+}
 
-void SetOpacity(void *frame, float opacity) {
-    using SetTransparency = void (__stdcall *)(void *, float);
-    reinterpret_cast<SetTransparency>((*reinterpret_cast<void ***>(frame))[0x84/4])(frame,opacity);
+void SetMountScale(void *frame,float scale,V3 position) {
+    game::at<V3>(frame,game::kFrameScale)={scale,scale,scale};
+    auto &flags=game::at<uint32_t>(frame,game::kFrameFlags);
+    flags=(flags & ~game::kFlagScaled) | game::kFlagRotValid;
+    H->bone_set(M,frame,nullptr,&position.x);
+}
+
+void RestoreReleasedMount(void *frame,const FallenHat &hat) {
+    if (IsMountJoint(frame)) SetMountScale(frame,1.f,hat.restLocal);
+    else show(frame,true); // character models already loaded before the mod was reloaded
 }
 
 void gone(void *frame, void *) {
@@ -247,44 +247,6 @@ void gone(void *frame, void *) {
     retired.push_back(it->second);
     fallen.erase(it);
 }
-}
-
-void ApplyPlayerFade() {
-    void *player=game::Player();
-    if (!player) return;
-    void *skin=game::at<void *>(player,kPlayerSkin);
-    if (!skin) return;
-    const float opacity=game::at<float>(skin,kObjectOpacity);
-    if (!(opacity>=0.f && opacity<1.f)) return;
-
-    void *model=game::at<void *>(player,game::kActorFrame);
-    void *neck=model ? game::FindChild(model,"neck") : nullptr;
-    if (!neck) return;
-    std::vector<void *> children;
-    game::EnumFrames(neck,&children);
-    for (void *frame:children) {
-        if (game::at<uint32_t>(frame,game::kFrameType)!=1 ||
-            game::at<uint32_t>(frame,kVisualType)!=kObjectVisual ||
-            !(game::at<uint32_t>(frame,game::kFrameFlags)&1)) continue;
-        const char *full=game::at<const char *>(frame,game::kFrameName);
-        if (!full) continue;
-        const char *dot=strrchr(full,'.');
-        std::string_view name=dot ? dot+1 : full;
-        if (!name.starts_with("rdhat_") || !name.ends_with("_scalp")) continue;
-
-        const float original=game::at<float>(frame,kObjectOpacity);
-        if (opacity<original) {
-            playerHatFade={frame,original};
-            SetOpacity(frame,opacity);
-        }
-        return;
-    }
-}
-
-void RestorePlayerFade() {
-    if (!playerHatFade.frame) return;
-    SetOpacity(playerHatFade.frame,playerHatFade.original);
-    playerHatFade={};
 }
 
 void Prepare() {
@@ -344,7 +306,7 @@ void Tick(std::span<const MmlPedestrian> pedestrians) {
         // The traffic manager can return a still-live frame to the model pool.
         // Restore only the visual we hid before another pedestrian inherits it.
         H->frame_watch(M,frame,nullptr,nullptr);
-        show(frame,true);
+        RestoreReleasedMount(frame,hat);
         retired.push_back(hat);
         it=fallen.erase(it);
     }
@@ -653,7 +615,7 @@ bool Release(Ragdoll &body,void *frame,const MountedHat &mount,V3 position,Q rot
         return false;
     }
     FallenHat hat{prop,body.pedestrian ? body.actor : nullptr,body.model,
-                  body.pedestrian && !body.puppet,id,position,position,&mount.model->mesh,mount.scale};
+                  body.pedestrian && !body.puppet,id,position,position,&mount.model->mesh,mount.scale,mount.restLocal};
     hat.releaseGroup=ownerGroup;
     hat.flightStart=position;
     const auto &fit=body.hatFit;
@@ -675,8 +637,14 @@ bool Release(Ragdoll &body,void *frame,const MountedHat &mount,V3 position,Q rot
     const auto *neckWorld=game::WorldMatrix(mount.neck);
     const V3 seated=Translation(neckWorld)+M3::Raw(neckWorld).Apply(mount.restLocal);
     const float actualLift=Len(position-seated);
-    show(frame,false);
-    RestoreMount(frame,mount);
+    if (IsMountJoint(frame)) {
+        // Skinning normalizes the joint matrix's rotation and requires nonzero
+        // scale. Park the collapsed faces inside the closed scalp.
+        SetMountScale(frame,.0001f,{0,.075f,0});
+    } else {
+        show(frame,false);
+        RestoreMount(frame,mount);
+    }
     Log("headwear handover: %u slide frames, pose gap %.4f m, speed gap %.4f m/s, angle gap %.4f rad",
         mount.slideFrames,poseGap,velocityGap,angleGap);
     Log("headwear visible slide %.4f m, largest step %.4f m",actualLift,mount.maxSlideStep);
@@ -795,7 +763,7 @@ void Reset() {
     fallen.clear();
     for (auto [frame,hat] : entries) {
         H->frame_watch(M,frame,nullptr,nullptr);
-        show(frame,true);
+        RestoreReleasedMount(frame,hat);
         Remove(hat);
     }
     for (const auto &hat:retired) Remove(hat);

@@ -7,8 +7,6 @@ class Ragdoll;
 namespace JPH { class BodyID; }
 namespace headwear {
 void Prepare();
-void ApplyPlayerFade();
-void RestorePlayerFade();
 void Tick(std::span<const MmlPedestrian> pedestrians);
 void Advance(Ragdoll &body,float dt);
 void FinishStep();

@@ -5,7 +5,7 @@ from collections import Counter
 from pathlib import Path
 
 
-def skin_lods(data, lined_prop=False):
+def skin_lods(data, lined_prop=False, mounted=False):
     stream = io.BytesIO(data)
 
     def read(fmt):
@@ -51,6 +51,7 @@ def skin_lods(data, lined_prop=False):
             stream.read(68)
         else:
             assert kind == 1 and visual in ((0,) if lined_prop else (2, 3)) and read('H') == (0,)
+            lods = []
             for _ in range(read('B')[0]):
                 stream.read(4)
                 vertices = [read('8f')[:3] for _ in range(read('H')[0])]
@@ -66,6 +67,25 @@ def skin_lods(data, lined_prop=False):
                         for outer, inner in zip(vertices[:half], vertices[half:], strict=True):
                             assert all(abs(a*.985-b) < 1e-5 for a, b in zip(outer, inner))
                     faces.extend(tris)
+                lods.append((vertices, faces))
+            for level, (vertices, faces) in enumerate(lods):
+                if mounted:
+                    joints, rigid = read('BI')
+                    assert joints >= 3 and rigid == 0
+                    stream.read(24)
+                    skinned = 0
+                    for _ in range(joints):
+                        stream.read(64)
+                        solid, blended = read('II')
+                        stream.read(28 + blended * 4)
+                        skinned += solid + blended
+                    assert skinned == len(vertices) and not blended
+                    hat_first = len(vertices) - solid
+                    hat_faces = [tri for tri in faces if max(tri) >= hat_first]
+                    assert all(min(tri) >= hat_first for tri in hat_faces)
+                    if level == 0:
+                        assert hat_faces and {v for tri in hat_faces for v in tri} == set(range(hat_first, len(vertices)))
+                    faces = [tri for tri in faces if max(tri) < hat_first]
                 yield vertices, faces
             return
     raise AssertionError('no character skin in model')
@@ -123,7 +143,7 @@ def check(game):
         assert len(list(skin_lods(prop.read_bytes(), lined_prop=True))) == 1
     levels = 0
     for path in wearers:
-        prepared = list(skin_lods(path.read_bytes()))
+        prepared = list(skin_lods(path.read_bytes(), mounted=True))
         if path.stem.lower() in ('bookmaker01', 'bookmaker02', 'enemy10+', 'enemy10k',
                                  'freegang02', 'friend1', 'homeless01', 'salman05k'):
             check_hands(game, path, prepared)

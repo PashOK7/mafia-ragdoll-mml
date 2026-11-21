@@ -229,7 +229,6 @@ inline void removeHatFaces(std::vector<Lod> &lods,std::vector<Edit> &edits) {
     const V3 pad=(bounds.hi-bounds.lo)*.5f;
     const V3 lo=bounds.lo-pad, hi=bounds.hi+pad;
     for (auto &lod:lods) {
-        unsigned count=lod.retained.size()+lod.groups.size();
         for (auto &g:lod.groups) {
             Group other{g.material,{},g.countAt};
             std::vector<uint16_t> head;
@@ -244,8 +243,7 @@ inline void removeHatFaces(std::vector<Lod> &lods,std::vector<Edit> &edits) {
             }
             if (!head.empty()) {
                 Edit e{g.countAt,g.countAt+4+g.index.size()*2,{}};
-                if (other.index.empty()) --count;
-                else {
+                if (!other.index.empty()) {
                     put(e.replacement,uint16_t(other.index.size()/3));
                     for (auto i:other.index) put(e.replacement,i);
                     put(e.replacement,other.material);
@@ -256,7 +254,6 @@ inline void removeHatFaces(std::vector<Lod> &lods,std::vector<Edit> &edits) {
             g.index=std::move(head);
         }
         std::erase_if(lod.groups,[](const Group &g){return g.index.empty();});
-        edits.push_back({lod.groupCountAt,lod.groupCountAt+1,{uint8_t(count)}});
     }
 }
 inline void repairCrowns(const std::vector<Lod> &lods,std::vector<Edit> &edits) {
