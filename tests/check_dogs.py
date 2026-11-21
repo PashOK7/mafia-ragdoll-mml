@@ -36,7 +36,8 @@ def check(game):
         while time.monotonic() < deadline:
             dog = tracked()
             if dog['active'] and dog['age'] >= .4:
-                assert dog['parts'] == 17 and all(map(math.isfinite, dog['centre'])), dog
+                assert dog['parts'] == 18 and all(map(math.isfinite, dog['centre'])), dog
+                assert 0 <= dog['pose_error'] < .015 and dog['max_speed'] < 18, dog
                 return dog
             time.sleep(.05)
         raise AssertionError(game.call('ragdoll.dogs'))
@@ -48,6 +49,19 @@ def check(game):
 
     def vector(*xyz):
         return {'buf': 12, 'hex': struct.pack('<3f', *xyz).hex()}
+
+    def settled():
+        deadline = time.monotonic() + 9
+        while time.monotonic() < deadline:
+            dog = tracked()
+            if dog['sleeping']:
+                x, y, z = dog['centre']
+                ground = game.call('world.ground', at=[x, y + .35, z])
+                assert ground['hit'] and .06 < y - ground['height'] < .4, (dog, ground)
+                assert dog['max_speed'] < .04 and dog['pose_error'] < .015, dog
+                return dog
+            time.sleep(.1)
+        raise AssertionError(('Dog did not settle', tracked()))
 
     name = f'ragdoll_pes_{os.getpid()}'
     game.tool('restore', save=name)
@@ -62,26 +76,26 @@ def check(game):
         assert not tracked()['active']
 
         def shot_path():
-            x, y, z = tracked()['centre']
-            return [x - 2, y, z], [x + 2, y, z]
+            x, y, z = next(d['pos'] for d in game.call('actors') if d['actor'] == actor)
+            return [x - 2, y + .42, z], [x + 2, y + .42, z]
 
-        deadline = time.monotonic() + 3
-        while True:
-            start, end = shot_path()
-            ray = game.call('world.ray', **{'from': start, 'to': end, 'what': 'moving'})
-            if ray.get('actor') == actor:
-                break
-            assert time.monotonic() < deadline, ray
-            time.sleep(.03)
         mission = int(game.call('game')['mission'], 16)
         engine = read(mission + 0x24, 'I')
         seq = game.latest()
-        native(shoot_at, engine, player, *[{'float': f} for f in (*start, 160, 0, 0, 180)], 0, 0, 1)
+        deadline = time.monotonic() + 3
+        while read(int(actor, 16) + 0xD0, 'f') > 0:
+            start, end = shot_path()
+            ray = game.call('world.ray', **{'from': start, 'to': end, 'what': 'moving'})
+            if ray.get('actor') == actor:
+                native(shoot_at, engine, player, *[{'float': f} for f in (*start, 160, 0, 0, 180)], 0, 0, 1)
+            assert time.monotonic() < deadline, ray
+            time.sleep(.08)
         result = wait_for_active()
         assert read(int(actor, 16) + 0xD0, 'f') < 0
         hits = game.call('events.since', seq=seq, types='BULLET_HIT')['events']
         assert any(hit['data'].get('struck') == actor for hit in hits), hits
         print(game.build, 'shot', result)
+        print(game.build, 'settled after shot', settled())
 
         game.tool('restore', load=name)
         dog = tracked()
@@ -91,6 +105,7 @@ def check(game):
         result = wait_for_active()
         assert read(int(dog['actor'], 16) + 0xD0, 'f') < 0
         print(game.build, 'native vehicle collision', result)
+        print(game.build, 'settled after vehicle collision', settled())
 
         game.tool('restore', load=name)
         dog = tracked()

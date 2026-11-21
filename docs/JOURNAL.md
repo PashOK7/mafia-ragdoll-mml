@@ -919,3 +919,15 @@ Both builds enter death state 0x0f when health at +0xd0 reaches zero. Verified t
 `tests/check_dogs.py` passes in both labs from the stock Motel Clark save. It checks that a nonlethal hit does not activate Jolt, a real game bullet and the native vehicle collision callback each produce one 17-part ragdoll, and loading a living save clears the old physics. The vehicle test calls the game's real collision response directly. Native 1.0 and 1.2 owner/lab skeleton evidence and screenshots are in `../MafiaModLoader/build/dog-ragdoll-0138/`.
 
 Both lab DLLs and the loaded owner DLL match SHA-256 `f773461e43c952522e1bfb92c1afb8dc104da9e6dd81c410c7f5c27a03c6b9d6`. The owner copy hot-reloaded 0.1.38 as generation 2 in PID 5976. It remained in the paused Motel Clark mission with the live dog.
+
+## 2026-11-21 — Shared articulation and dog-specific limits (0.1.39)
+
+The early dog rig set every joint relative to the last walking pose, gave all segments the same transport velocity, and sometimes settled with the hind paws still holding the pelvis high. People and dogs now share the 4DS reference skeleton reader, the hinge and swing-twist setup, the Jolt rig stabilization, and the passive joint resistance. The human joint settings and pose mapping retain their existing behavior. The quadruped binds its own model's hierarchy and carries fixed elbow and stifle axes from the bind pose into the posed body. The remaining rotating joints have dog-specific ranges, and the tail has two physical sections.
+
+Rounded trunk boxes and sized limb capsules give the 18 parts distinct support. Local linear and angular velocity are sampled from the native animation and clamped against pose discontinuities. A brief elbow and stifle flexion motor fades out over 0.64 s and leaves passive resistance. The impact impulse is shared by the struck part and trunk. Water drag and buoyancy use the same world path as human parts.
+
+Both Motel Clark suites passed the nonlethal control, native bullet, direct native car-collision callback, pose check, grounding and sleep, and same-mission restore. In the reported prison mission both builds bound all four `pes03` dogs, and all eight bodies settled within the eight-second observation. The tests measured the rendered bone positions against the applied physics transforms. Captures and readings are in `../MafiaModLoader/build/dog-ragdoll-0139/`.
+
+Human pedestrian-motion and trunk-axis offline tests passed. Both builds also passed the full native headwear suite, including human ragdoll falls, hits and the truck test through the shared articulation setup. Both labs were closed and their prior startup flags restored.
+
+The loaded owner DLL matches tested SHA-256 `42ff7ca978043dc9993e7d6b9c7320c68685f79a0a1ecf6176b334537d7b8017`. It reloaded in the paused prison mission as generation 3 in PID 5976. The user's configuration hashes match their pre-install values.

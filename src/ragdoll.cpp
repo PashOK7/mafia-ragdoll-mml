@@ -3,6 +3,7 @@
 #include "game.h"
 #include "collision.h"
 #include "mod.h"
+#include "model_skeleton.h"
 #include <windows.h>
 #include <cstdio>
 #include <algorithm>
@@ -41,38 +42,22 @@ bool ReferencePose(void *model, Ragdoll::PoseSnap *out, std::string *err) {
     if (!mod::H->model_file(mod::M, model, file, sizeof file)) { *err = "no model file for skeleton calibration"; return false; }
     auto found = cache.find(file);
     if (found != cache.end()) { *out = found->second; return true; }
-    int handle = mod::H->model_open(mod::M, file);
-    if (!handle) { *err = std::string("cannot read rest skeleton: ") + file; return false; }
-    int count = mod::H->model_nodes(mod::M, handle, nullptr, 0);
-    if (count <= 0 || count > 4096) { mod::H->model_close(mod::M, handle); *err = "invalid rest skeleton node count"; return false; }
-    std::vector<MmlModelNode> nodes(count);
-    mod::H->model_nodes(mod::M, handle, nodes.data(), count);
-    mod::H->model_close(mod::M, handle);
-    std::vector<M3> world(count);
-    std::vector<V3> pos(count);
-    for (int i=0;i<count;i++) {
-        const auto &n = nodes[i];
-        if (n.parent >= i || n.parent < -1) { *err = "rest skeleton parent order is invalid"; return false; }
-        float q[16]; QuatMatrix({n.rot[0],n.rot[1],n.rot[2],n.rot[3]},q);
-        M3 local = M3::Raw(q);
-        for (int k=0;k<3;k++) local.r[k] = local.r[k]*n.scale[k];
-        V3 p{n.pos[0],n.pos[1],n.pos[2]};
-        world[i] = n.parent < 0 ? local : local * world[n.parent];
-        pos[i] = n.parent < 0 ? p : pos[n.parent]+world[n.parent].Apply(p);
-    }
+    std::vector<MmlModelNode> nodes;
+    std::vector<SkeletonTransform> world;
+    if (!ReadSkeleton(file,nodes,world,err)) return false;
     const char *names[] = {"r_thigh","r_shin","r_foot","l_thigh","l_shin","l_foot","back1","back2","back3",
                           "neck","r_shoulder","r_arm","r_elbow","r_hand","l_shoulder","l_arm","l_elbow","l_hand"};
     Ragdoll::PoseSnap pose{};
     int pelvis = -1;
     for (int b=0;b<18;b++) {
         int index=-1;
-        for (int i=0;i<count;i++) if (!std::strcmp(nodes[i].name,names[b])) { index=i; break; }
+        for (int i=0;i<int(nodes.size());i++) if (!std::strcmp(nodes[i].name,names[b])) { index=i; break; }
         if (index<0) { *err=std::string("rest skeleton lacks ")+names[b]; return false; }
-        pose.rot[b]=world[index]; pose.rot[b].Orthonormalize(); pose.org[b]=pos[index];
+        pose.rot[b]=world[index].basis; pose.rot[b].Orthonormalize(); pose.org[b]=world[index].pos;
         if (b==0) pelvis=nodes[index].parent;
     }
     if (pelvis<0) { *err="rest skeleton lacks pelvis"; return false; }
-    pose.rot[18]=world[pelvis]; pose.rot[18].Orthonormalize(); pose.org[18]=pos[pelvis];
+    pose.rot[18]=world[pelvis].basis; pose.rot[18].Orthonormalize(); pose.org[18]=world[pelvis].pos;
     pose.rot[19]=M3::Identity(); pose.fwd={0,0,1};
     Ragdoll::PointsFromPose(pose.rot,pose.org,pose.pts);
     cache.emplace(file,pose); *out=pose;

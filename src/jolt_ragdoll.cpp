@@ -4,6 +4,7 @@
 #include "pull_reach.h"
 #include "anatomy.h"
 #include "joint_resistance.h"
+#include "articulation.h"
 #include "vehicles.h"
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -181,24 +182,10 @@ JPH::Ref<JPH::SwingTwistConstraintSettings> Ball(const Ragdoll *r, const Ragdoll
     V3 z2 = JoltBridge::Rot(cb.q, {0, 0, 1});
     c = Norm(c);
     f = Orth(f, c);
-    float flex = a.flex * kDeg, side = a.side * kDeg, lo = a.twistLo * kDeg, hi = a.twistHi * kDeg;
     c = JoltBridge::Rot(pb.q,JoltBridge::InvRot(rp.q,c));
     f = JoltBridge::Rot(pb.q,JoltBridge::InvRot(rp.q,f));
 
-    JPH::Ref<JPH::SwingTwistConstraintSettings> s = new JPH::SwingTwistConstraintSettings;
-    s->mSpace = JPH::EConstraintSpace::WorldSpace;
-    s->mPosition1 = s->mPosition2 = J(anchor);
-    s->mTwistAxis1 = J(c);
-    s->mPlaneAxis1 = J(f);
-    s->mTwistAxis2 = J(bone);
-    s->mPlaneAxis2 = J(z2);
-    s->mNormalHalfConeAngle = flex;
-    s->mPlaneHalfConeAngle = side;
-    s->mTwistMinAngle = lo;
-    s->mTwistMaxAngle = hi;
-    s->mMaxFrictionTorque = 0; // updated from relative joint speed before the passive solve
-    s->mSwingMotorSettings = s->mTwistMotorSettings = JPH::MotorSettings(JPH::ESpringMode::FrequencyAndDamping, T(kMuscleHz), 1.0f);
-    return s;
+    return articulation::Ball(anchor,{c,f},{bone,z2},a.flex,a.side,a.twistLo,a.twistHi,T(kMuscleHz));
 }
 
 // The hinge between `parent` and `child` at `anchor`: positive angles bend the child's bone about `axis` (world).
@@ -212,18 +199,8 @@ JPH::Ref<JPH::HingeConstraintSettings> Hinge(const Ragdoll *r, const Ragdoll *re
     V3 n1=JoltBridge::Rot(pb.q,JoltBridge::InvRot(rp.q,n)), n2=JoltBridge::Rot(cb.q,JoltBridge::InvRot(rc.q,n));
     float phi = std::atan2(Dot(h1, Cross(n1, n2)), Dot(n1, n2));
     *startAngle = phi;
-    JPH::Ref<JPH::HingeConstraintSettings> s = new JPH::HingeConstraintSettings;
-    s->mSpace = JPH::EConstraintSpace::WorldSpace;
-    s->mPoint1 = s->mPoint2 = J(anchor);
-    s->mHingeAxis1 = J(h1); s->mHingeAxis2 = J(h2);
     // The normals are the two bones: Jolt's angle 0 is where they meet, so the angle is the bend from straight.
-    s->mNormalAxis1 = J(n1);
-    s->mNormalAxis2 = J(n2);
-    s->mLimitsMin = a.flex * kDeg;
-    s->mLimitsMax = a.side * kDeg;
-    s->mMaxFrictionTorque = 0;
-    s->mMotorSettings = JPH::MotorSettings(JPH::ESpringMode::FrequencyAndDamping, T(kMuscleHz), 1.0f);
-    return s;
+    return articulation::Hinge(anchor,{h1,n1},{h2,n2},a.flex,a.side,T(kMuscleHz));
 }
 
 // A part's collision shape in its body frame (x along the bone; for the pelvis, the trunk and the head z forward;
@@ -1110,10 +1087,7 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn, const void *struckB
         V3 footFwd = Orth(pf, shinDir);
         ball(foot, ptAnkle, Tilt(footFwd, shinDir, 15), -shinDir, kAnkle);
     }
-    rs->Stabilize();
-    rs->DisableParentChildCollisions(joints, 0.02f);   // and parts that already overlap in the start pose
-    rs->CalculateConstraintPriorities();
-    rs->CalculateBodyIndexToConstraintIndex();
+    articulation::Prepare(*rs,joints,.02f);
     JPH::Ragdoll *rag = rs->CreateRagdoll(g_nextGroup++, (JPH::uint64)(uintptr_t)r, jolt_world::System());
     if (!rag) { *err = "Jolt could not make the ragdoll (body or constraint limit)"; return false; }
     rag->AddToPhysicsSystem(JPH::EActivation::Activate, false);
