@@ -120,21 +120,22 @@ def check(game):
         shooter=int(game.call('game')['player'],16)
         def bits(value):
             return struct.unpack('<I',struct.pack('<f',value))[0]
-        def fire_down(origin):
+        def fire_down(origin,damage=28):
             game.call('native.call',at='0x5A84A0' if game.build=='1.2' else '0x5E3DF0',
                       conv='thiscall',this=engine,ret='uint',
-                      args=[shooter,*map(bits,origin),*map(bits,[0,-160,0]),bits(28),0,0,1])
-            game.sleep(200)
+                      args=[shooter,*map(bits,origin),*map(bits,[0,-160,0]),bits(damage),0,0,1])
         def ground_impacts():
             return int(game.tool('tap',cmd='show '+tap).split(': ',1)[1].split()[0])
         control=[pos[0]+1.5,pos[1]+1,pos[2]]
         fire_down(control)
+        game.sleep(200)
         assert ground_impacts()==1
         def hit_lines():
             return [v for v in game.tool('log_tail',lines=200).splitlines() if 'headwear bullet impulse' in v]
         displacements=[]
+        lifts=[]
         attempts=0
-        for _ in range(6):
+        for damage in (28,50,28,50,28,50):
             pos=hats()[prop]['pos']
             _,points,faces=mesh_world(prop)
             targets=[]
@@ -151,7 +152,11 @@ def check(game):
                 before=hit_lines()
                 ground_before=ground_impacts()
                 origin=[x,y+.20,z]
-                fire_down(origin)
+                fire_down(origin,damage)
+                trail=[]
+                for _ in range(5):
+                    game.sleep(20)
+                    trail.append(hats()[prop]['pos'])
                 hits=[line for line in hit_lines() if line not in before]
                 if not hits:
                     continue
@@ -160,10 +165,13 @@ def check(game):
                 travelled=math.dist(pos,hats()[prop]['pos'])
                 assert travelled<.70,travelled
                 displacements.append(round(travelled,3))
+                lifts.append(round(max(sample[1]-pos[1] for sample in trail),3))
+                game.sleep(360)
                 break
             else:
                 raise AssertionError(('no hit on visible hat triangles',pos))
-        print(game.build,'six resolved shots in',attempts,'attempts, displacement in m',displacements)
+        assert sum(.028<rise<.22 for rise in lifts)>=5,lifts
+        print(game.build,'six resolved shots in',attempts,'attempts, lift in m',lifts,'displacement',displacements)
 
     def walk_into_hat(prop):
         car=game.player()['vehicle']['actor']

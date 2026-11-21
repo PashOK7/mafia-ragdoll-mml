@@ -811,3 +811,9 @@ The owner saw the asphalt effect behind the target even though the 0.1.24 log sh
 Both windowed builds resolved six of six shots at triangle centres toward the rim, with a single impulse per shot. A control shot beside the hat exercised the native static-impact branch at 5E5975 (1.0) and 5AA025 (1.2). Confirmed hat hits never entered that branch. The host's BULLET_HIT event can still report the precomputed asphalt impact before the game's ray call returns to the mod hook. The test observes the later native effects branch directly. Over the first 200 ms the hat moved 0.8–2.6 cm on 1.0 and 1.8–8.8 cm on 1.2. Owner installation SHA-256 `08e9ee7e7c41b40ac7bc3ca5f042afe1721ce6d09e30dd56692cf8757eb45bc6`.
 
 The repeated run also resolved all six shots on each build. The walking check uses its own wearer so repeated bullet impacts cannot move its fixture out of reach. The full rerun passed both builds. The owner process hot-loaded generation 9 at 13:10:57.723, and the live DLL matched the installed hash.
+
+## 2026-11-21 — Visible rebound from a hat on the ground (0.1.26)
+
+The owner's 0.1.25 log contained 16 consecutive detected hits on the ground-supported cap between 13:13:28 and 13:13:42. The earlier regression accepted a few millimetres of displacement. Supported impacts now apply the off-centre impulse at the struck triangle and set a bounded minimum outgoing velocity along the ground normal and tangent. Repeated shots do not add upward rebound to a hat already above that outgoing speed.
+
+The lab checks alternate damage 28 and 50 and sample the position during the rise. All 12 direct shots registered once and preserved the native floor-effect suppression. Eleven rose 0.061–0.102 m with measured displacement up to 0.278 m. One registered impact rose only 0.002 m. Owner installation SHA-256 `1a3673f254de95757e72410a42373141445f276fe81b9ac10d14b94527456932`.

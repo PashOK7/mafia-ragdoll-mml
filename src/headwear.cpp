@@ -327,6 +327,7 @@ void BulletImpulse(uint32_t body,V3 direction,V3 point,float damage) {
     const V3 centre=jolt_world::ToWorld(F(p));
     const float strength=std::min(.12f,damage*.002f);
     V3 impulse=direction*strength;
+    float reboundSpeed=0.f;
     const float below=Support(hat->second,q,{0,1,0});
     const V3 end=centre-V3{0,below+.035f,0};
     MmlHit ground{};
@@ -337,18 +338,26 @@ void BulletImpulse(uint32_t body,V3 direction,V3 point,float damage) {
         const float compression=std::max(0.f,-Dot(direction,n));
         const V3 offset=point-centre;
         const V3 radial=offset-n*Dot(offset,n);
-        // The floor absorbs the inward component. The flexible shell tips
-        // away from the struck edge and springs back within the same budget.
-        V3 response=direction+n*(1.15f*compression)+Norm(-radial,{})*(.85f*compression);
-        const float len=Len(response);
-        impulse=response*(strength/std::max(1.f,len));
-        // Apply at the real contact, plus a bounded rebound at the centre.
-        // For a hard downward hit a 220 g hat rises a few centimetres at most.
-        const float rebound=std::min(.13f,damage*.004f)*compression;
-        bi.AddImpulse(id,J(n*rebound));
+        const V3 tangent=direction-n*Dot(direction,n);
+        V3 slide=tangent+Norm(-radial,{})*(.85f*compression);
+        impulse=slide*(strength/std::max(1.f,Len(slide)));
+        bi.AddImpulse(id,J(impulse),J(jolt_world::ToJolt(point)));
+
+        // A compressed hat springs off the floor. Set the outgoing normal
+        // speed rather than adding it to the previous hit's rebound.
+        const auto normal=J(n);
+        const auto velocity=bi.GetLinearVelocity(id);
+        const float outgoing=velocity.Dot(normal);
+        reboundSpeed=std::min(1.5f,damage*.045f)*compression;
+        const V3 side=Norm(slide,{});
+        const float sideSpeed=std::min(.9f,damage*.026f)*std::min(1.f,Len(slide));
+        const float sideGain=std::max(0.f,sideSpeed-velocity.Dot(J(side)));
+        bi.SetLinearVelocity(id,velocity+normal*std::max(0.f,reboundSpeed-outgoing)+J(side*sideGain));
+    } else {
+        bi.AddImpulse(id,J(impulse),J(jolt_world::ToJolt(point)));
     }
-    bi.AddImpulse(id,J(impulse),J(jolt_world::ToJolt(point)));
-    Log("headwear bullet impulse %.3f Ns at %.3f %.3f %.3f support %d",Len(impulse),point.x,point.y,point.z,supported);
+    Log("headwear bullet impulse %.3f Ns at %.3f %.3f %.3f support %d rebound %.3f m/s",
+        Len(impulse),point.x,point.y,point.z,supported,reboundSpeed);
 }
 
 void BodyContact(uint32_t propBody) {
