@@ -1800,10 +1800,10 @@ const char *GetUpReason(const Ragdoll &body) {
 
 void TickBody(float dt) {
     g_tick++;
-    headwear::Tick();
     Purge();
     PruneOccupants();
     ListPeople();
+    headwear::Tick(g_pedList);
     TracePedestrians(TrajectoryStage::TickBegin);
     scenery::Tick();
     KeptTick();

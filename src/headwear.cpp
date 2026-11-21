@@ -32,7 +32,8 @@ const char *candidates =
     "tommytaxidriverhigh;tony;vrabec;vratny1;vypravci2;willg2;willman01;willman02;zenarad01";
 std::unordered_map<std::string,V3> ready;
 bool prepared = false;
-std::unordered_map<void *, void *> fallen;
+struct FallenHat { void *prop, *pedestrian, *model; bool wasDead; };
+std::unordered_map<void *, FallenHat> fallen;
 std::vector<void *> retired;
 
 fs::path utf8path(const std::string &s) {
@@ -67,7 +68,7 @@ void show(void *frame, bool on) {
 void gone(void *frame, void *) {
     auto it = fallen.find(frame);
     if (it == fallen.end()) return;
-    retired.push_back(it->second);
+    retired.push_back(it->second.prop);
     fallen.erase(it);
 }
 }
@@ -113,8 +114,26 @@ void Prepare() {
     Log("detachable headwear prepared for %u installed character models",unsigned(ready.size()));
 }
 
-void Tick() {
+void Tick(std::span<const MmlPedestrian> pedestrians) {
     if (!prepared) Prepare();
+    for (auto it=fallen.begin();it!=fallen.end();) {
+        auto &[frame,hat]=*it;
+        if (!hat.pedestrian) { ++it; continue; }
+        auto p=std::find_if(pedestrians.begin(),pedestrians.end(),[&](const auto &person){
+            return person.element==hat.pedestrian && person.model==hat.model && person.spawned;
+        });
+        if (p!=pedestrians.end() && !(hat.wasDead && p->alive)) {
+            hat.wasDead=!p->alive;
+            ++it;
+            continue;
+        }
+        // The traffic manager can return a still-live frame to the model pool.
+        // Restore only the visual we hid before another pedestrian inherits it.
+        H->frame_watch(M,frame,nullptr,nullptr);
+        show(frame,true);
+        retired.push_back(hat.prop);
+        it=fallen.erase(it);
+    }
     for (void *prop : retired) H->prop_remove(M,prop);
     retired.clear();
 }
@@ -209,7 +228,8 @@ void Drop(Ragdoll &body, float dt) {
             H->prop_remove(M,prop);
             return;
         }
-        fallen.emplace(frame,prop);
+        fallen.emplace(frame,FallenHat{prop,body.pedestrian ? body.actor : nullptr,body.model,
+                                       body.pedestrian && !body.puppet});
         show(frame,false);
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
@@ -221,10 +241,10 @@ void Drop(Ragdoll &body, float dt) {
 void Reset() {
     auto entries = std::move(fallen);
     fallen.clear();
-    for (auto [frame,prop] : entries) {
+    for (auto [frame,hat] : entries) {
         H->frame_watch(M,frame,nullptr,nullptr);
         show(frame,true);
-        H->prop_remove(M,prop);
+        H->prop_remove(M,hat.prop);
     }
     for (void *prop : retired) H->prop_remove(M,prop);
     retired.clear();
