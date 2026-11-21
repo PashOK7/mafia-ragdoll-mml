@@ -1,5 +1,6 @@
 """Check per-wearer visibility and falling props in a running freeride lab."""
 import math
+import struct
 import sys
 
 from check_transport_occupants import Game
@@ -64,6 +65,30 @@ def check(game):
     def hit(actor):
         game.call('human.hit', actor=actor, type=0, damage=1000, dir=[0, 0, 0])
 
+    def shoot_hat(prop):
+        game.sleep(1600)
+        pos=hats()[prop]['pos']
+        mission=int(game.call('game')['mission'],16)
+        engine=struct.unpack('<I',bytes.fromhex(game.call('mem.read',addr=hex(mission+0x24),size=4)['hex']))[0]
+        shooter=int(game.call('game')['player'],16)
+        def bits(value):
+            return struct.unpack('<I',struct.pack('<f',value))[0]
+        # Try the open side of the hat. A nearby corpse can occlude one side.
+        for x,z in ((0,1),(0,-1),(1,0),(-1,0)):
+            pos=hats()[prop]['pos']
+            origin=[pos[0]-.45*x,pos[1]+.018,pos[2]-.45*z]
+            game.call('native.call',at='0x5A84A0' if game.build=='1.2' else '0x5E3DF0',
+                      conv='thiscall',this=engine,ret='uint',
+                      args=[shooter,*map(bits,origin),*map(bits,[160*x,-6.4,160*z]),bits(28),0,0,1])
+            game.sleep(650)
+            travelled=math.dist(pos,hats()[prop]['pos'])
+            assert travelled<1.4, travelled
+            if travelled>.015:
+                break
+        else:
+            raise AssertionError(('no measurable hat response',pos))
+        print(game.build,'hat displaced by bullet',round(travelled,3),'m')
+
     for model in ('civil19', 'freegang01', 'TommyHAT', 'pauliecoathat', 'czena08'):
         owner, a = spawn(model, 3)
         _, b = spawn(model, 6)
@@ -82,11 +107,13 @@ def check(game):
         assert len(new) == 1 and not visible(first) and visible(second), (model, new)
         prop = new.pop()
         assert after[prop]['model'].lower() == 'rdhat_' + model.lower() + '_lined.i3d'
-        assert after[prop]['parent'] == 'world' and 'actor' in after[prop]['physics']
+        assert after[prop]['parent'] == 'world'
         game.sleep(850)
         distance = math.dist(after[prop]['pos'], hats()[prop]['pos'])
         assert math.isfinite(distance) and distance < 20, (model, distance)
         print(game.build, model, 'independent hat, travelled', round(distance, 3), 'm')
+        if model == 'civil19':
+            shoot_hat(prop)
         game.cleanup()
     bare, markers = spawn('Tommy', 9)
     assert not markers

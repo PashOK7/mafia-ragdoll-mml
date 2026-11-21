@@ -775,3 +775,9 @@ Both windowed labs passed the mesh, ordinary fall and moving truck regressions. 
 A hidden worn frame can survive despawn. Detached hats now track the traffic element, its model and death state. Losing the active element/model pair or recycling a dead slot as a living pedestrian restores the watched frame and retires the world prop. A living knockdown can recover with the hat still off. Native frame destruction still retires the prop without touching a released frame.
 
 In two windowed 1.0 trials a 400 m departure and return led to the same traffic slot, model and hat frame reappearing alive and visible. Both builds removed the old prop after departure. In 1.2 the natural run did not return the same slot during observation. A controlled restoration of the dead pedestrian's health on the same active slot restored the exact hidden frame and removed the prop in both builds. The owner's installed DLL SHA-256 is `bdf38752fd1805f9dd075d465a9ab39eaa7cbcbf9b1fe1241904231495b25c2b`.
+
+## 2026-11-21 — Loose hats in the ragdoll world (0.1.21)
+
+Loose hats now use a 220 g Jolt body with continuous collision detection and a rounded core approximating the crown. The brim beyond that core is visual. The same body meets ragdolls, scenery and vehicles. The native prop is used for rendering, and removing a pooled pedestrian's old hat retires both the prop and the physics body.
+
+The existing bullet stretch checks the hat against the native hit limit and nearer ragdoll geometry. A bullet through a hat transfers 0.003 Ns per damage point up to 0.30 Ns, applied at the hit point. The bullet continues onwards. Both windowed labs logged actual hat/ragdoll contacts and 0.084 Ns per test shot. The successful horizontal shots moved the resting hat by 5.7 cm on 1.0 and 2.6 cm on 1.2. The five-wearer, bareheaded, mesh and truck regressions also passed. Owner installation SHA-256 `f29e2bc6bbfd5dfa8647898454c27310f4ba07b444d8f534398ec33376b4d710`.

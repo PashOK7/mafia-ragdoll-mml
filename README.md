@@ -19,6 +19,7 @@ into the folder containing Game.exe. [Download the latest release](https://githu
   can also work the band over the crown. The fit uses the installed hat's dimensions. As it comes
   free, the hat inherits the velocity of the point on
   the head where it was worn, including motion from head rotation.
+    Once loose, the hat collides with ragdolls in Jolt. Bullets can nudge or spin it as they pass through.
   The detached hat has a cloth lining and a sweatband inside its original shell. The mod uses the installed
   model's exterior mesh and textures. Where the original head ends at the brim, the mod builds a rounded
   crown from that character's head outline and face texture at each level of detail. After a hot

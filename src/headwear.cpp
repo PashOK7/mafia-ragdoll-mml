@@ -10,6 +10,13 @@
 #include "mod.h"
 #include "ragdoll.h"
 #include "jolt_world.h"
+#include <Jolt/Jolt.h>
+#include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/TransformedShape.h>
 
 namespace headwear {
 namespace {
@@ -32,9 +39,21 @@ const char *candidates =
     "tommytaxidriverhigh;tony;vrabec;vratny1;vypravci2;willg2;willman01;willman02;zenarad01";
 std::unordered_map<std::string,V3> ready;
 bool prepared = false;
-struct FallenHat { void *prop, *pedestrian, *model; bool wasDead; };
+struct FallenHat { void *prop, *pedestrian, *model; bool wasDead; JPH::BodyID body; bool touchedRagdoll=false; };
 std::unordered_map<void *, FallenHat> fallen;
-std::vector<void *> retired;
+std::vector<FallenHat> retired;
+constexpr float hatMass=.22f;
+JPH::Vec3 J(V3 v) { return {v.x,v.y,v.z}; }
+V3 F(JPH::RVec3Arg v) { return {float(v.GetX()),float(v.GetY()),float(v.GetZ())}; }
+
+void Remove(const FallenHat &hat) {
+    if (jolt_world::Running()) {
+        auto &bi=jolt_world::Bodies();
+        bi.RemoveBody(hat.body);
+        bi.DestroyBody(hat.body);
+    }
+    H->prop_remove(M,hat.prop);
+}
 
 fs::path utf8path(const std::string &s) {
     return fs::path(std::u8string(s.begin(),s.end()));
@@ -68,7 +87,7 @@ void show(void *frame, bool on) {
 void gone(void *frame, void *) {
     auto it = fallen.find(frame);
     if (it == fallen.end()) return;
-    retired.push_back(it->second.prop);
+    retired.push_back(it->second);
     fallen.erase(it);
 }
 }
@@ -131,11 +150,57 @@ void Tick(std::span<const MmlPedestrian> pedestrians) {
         // Restore only the visual we hid before another pedestrian inherits it.
         H->frame_watch(M,frame,nullptr,nullptr);
         show(frame,true);
-        retired.push_back(hat.prop);
+        retired.push_back(hat);
         it=fallen.erase(it);
     }
-    for (void *prop : retired) H->prop_remove(M,prop);
+    for (const auto &hat:retired) Remove(hat);
     retired.clear();
+}
+
+void Sync() {
+    if (fallen.empty() || !jolt_world::Running()) return;
+    auto &bi=jolt_world::Bodies();
+    for (const auto &[_,hat]:fallen) {
+        JPH::RVec3 p;
+        JPH::Quat q;
+        bi.GetPositionAndRotation(hat.body,p,q);
+        V3 pos=jolt_world::ToWorld(F(p));
+        const Q rotation{q.GetW(),-q.GetX(),-q.GetY(),-q.GetZ()};
+        H->prop_place(M,hat.prop,&pos.x,&rotation.w,0);
+    }
+}
+
+bool Shot(V3 from,V3 axis,float range,V3 *point,uint32_t *body) {
+    if (fallen.empty() || !jolt_world::Running()) return false;
+    JPH::RRayCast ray{J(jolt_world::ToJolt(from)),J(axis*range)};
+    JPH::RayCastResult hit;
+    hit.mFraction=1.f;
+    bool found=false;
+    for (const auto &[_,hat]:fallen)
+        if (jolt_world::Bodies().GetTransformedShape(hat.body).CastRay(ray,hit)) {
+            *body=hat.body.GetIndexAndSequenceNumber();
+            found=true;
+        }
+    if (!found) return false;
+    *point=from+axis*(range*hit.mFraction);
+    return true;
+}
+
+void BulletImpulse(uint32_t body,V3 direction,V3 point,float damage) {
+    // A bullet passes through cloth and transfers only a small fraction of
+    // its momentum. A stronger shot can still spin the hat off-centre.
+    float impulse=std::min(.30f,damage*.003f);
+    jolt_world::Bodies().AddImpulse(JPH::BodyID(body),J(direction*impulse),J(jolt_world::ToJolt(point)));
+    Log("headwear bullet impulse %.3f Ns",impulse);
+}
+
+void BodyContact(uint32_t propBody) {
+    for (auto &[_,hat]:fallen) {
+        if (hat.body.GetIndexAndSequenceNumber()!=propBody || hat.touchedRagdoll) continue;
+        hat.touchedRagdoll=true;
+        Log("headwear collided with ragdoll");
+        break;
+    }
 }
 
 void Drop(Ragdoll &body, float dt) {
@@ -219,17 +284,34 @@ void Drop(Ragdoll &body, float dt) {
         void *prop = H->prop_create(M,(name+"_lined").c_str(),nullptr,&position.x,&rotation.w,scale);
         if (!prop) return;
         V3 velocity=fit.hatMotion;
-        // Mafia puts a prop created at zero velocity to sleep in mid-air.
-        // Start a stationary, newly unsupported hat with its first gravity step.
-        const float gravityStep=9.81f*std::clamp(dt,.001f,.05f);
-        if (Len(velocity)<gravityStep) velocity.y=std::min(velocity.y,-gravityStep);
-        MmlPropPhysics physics{1,{velocity.x,velocity.y,velocity.z}};
-        if (!H->prop_physics(M,prop,&physics) || !H->frame_watch(M,frame,gone,nullptr)) {
+        if (!H->frame_watch(M,frame,gone,nullptr)) {
+            H->prop_remove(M,prop);
+            return;
+        }
+        V3 half=ready.at(name)*(.5f*scale);
+        // The central volume carries mass. Leave the soft brim out of the
+        // solid shape so a release from the scalp starts with little overlap.
+        auto shape=new JPH::BoxShape(J({std::max(.025f,half.x*.70f),std::max(.018f,half.y*.65f),
+                                      std::max(.025f,half.z*.70f)}),.008f);
+        JPH::Quat q(-rotation.x,-rotation.y,-rotation.z,rotation.w);
+        JPH::BodyCreationSettings settings(shape,J(jolt_world::ToJolt(position)),q,
+                                           JPH::EMotionType::Dynamic,jolt_world::kDynamic);
+        settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
+        settings.mMassPropertiesOverride.mMass=hatMass;
+        settings.mLinearVelocity=J(velocity);
+        settings.mMotionQuality=JPH::EMotionQuality::LinearCast;
+        settings.mFriction=.78f;
+        settings.mRestitution=.05f;
+        settings.mAngularDamping=1.5f;
+        settings.mLinearDamping=.55f;
+        auto id=jolt_world::Bodies().CreateAndAddBody(settings,JPH::EActivation::Activate);
+        if (id.IsInvalid()) {
+            H->frame_watch(M,frame,nullptr,nullptr);
             H->prop_remove(M,prop);
             return;
         }
         fallen.emplace(frame,FallenHat{prop,body.pedestrian ? body.actor : nullptr,body.model,
-                                       body.pedestrian && !body.puppet});
+                                       body.pedestrian && !body.puppet,id});
         show(frame,false);
         Log("headwear detached: %s ragdoll %u age %.3f up_y %.3f lift %.3f m at %.3f %.3f %.3f velocity %.3f %.3f %.3f torso %.3f %.3f %.3f",
             name.c_str(),body.serial,body.age,up.y,body.hatFit.lift,position.x,position.y,position.z,
@@ -244,9 +326,9 @@ void Reset() {
     for (auto [frame,hat] : entries) {
         H->frame_watch(M,frame,nullptr,nullptr);
         show(frame,true);
-        H->prop_remove(M,hat.prop);
+        Remove(hat);
     }
-    for (void *prop : retired) H->prop_remove(M,prop);
+    for (const auto &hat:retired) Remove(hat);
     retired.clear();
 }
 } // namespace headwear

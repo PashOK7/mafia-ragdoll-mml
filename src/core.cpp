@@ -1165,7 +1165,7 @@ void ApplyTransportShot(const TransportShot &shot, const V3 &from, const V3 &dir
 // A dead rider has no native actor. Compare the body with the first native
 // moving hit and the precomputed static hit on this stretch of the shot.
 void RailBulletStretch(MmlMidContext *ctx, void *) {
-    if (g_occupants.empty() || !g_cfg.enabled || !g_cfg.bullets) return;
+    if (!g_cfg.enabled || !g_cfg.bullets) return;
     auto trace = [&] {
         void *stack = reinterpret_cast<void *>(ctx->esp);
         auto *gameObject = reinterpret_cast<void *>(ctx->ebp);
@@ -1203,6 +1203,23 @@ void RailBulletStretch(MmlMidContext *ctx, void *) {
             limit = Len(contact - from);
             point = contact;
             part = segment;
+        }
+        V3 hatPoint{};
+        uint32_t hatBody=0;
+        bool hatHit=headwear::Shot(from,axis,limit,&hatPoint,&hatBody);
+        if (hatHit) {
+            for (const auto &r:g_ragdolls) {
+                if (Len(r->Center()-hatPoint)>2.f) continue;
+                V3 contact{};
+                if (jolt_ragdoll::ShotPart(r.get(),from,hatPoint-from,&contact)>=0) {
+                    hatHit=false;
+                    break;
+                }
+            }
+        }
+        if (hatHit) {
+            // Let the original shot continue through the cloth.
+            headwear::BulletImpulse(hatBody,axis,hatPoint,damage);
         }
         if (!target) return;
         const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
@@ -1861,6 +1878,7 @@ void TickBody(float dt) {
     bool joltOk = SafeJoltStep(jolt, dt);
     if (!joltOk) {
         g_occupants.clear();
+        headwear::Reset();
         LOG("jolt world faulted: its ragdolls dropped, the world made anew on the next tick");
         jolt_ragdoll::Clear();
         jolt_world::Stop();
@@ -1870,6 +1888,7 @@ void TickBody(float dt) {
         }
     }
     if (joltOk) {
+        headwear::Sync();
         for (Ragdoll *body : jolt) headwear::Drop(*body,dt);
         SamplePull(dt);
         TracePedestrians(TrajectoryStage::Physics);

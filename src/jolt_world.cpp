@@ -1,6 +1,7 @@
 // The mod's rigid-body world on Jolt Physics (see jolt_world.h).
 #include "fmt.h"
 #include "jolt_world.h"
+#include "headwear.h"
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
@@ -134,6 +135,10 @@ void NoteCarReaction(const void *car);
 class Contacts final : public JPH::ContactListener {
 public:
     void OnContactAdded(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m, JPH::ContactSettings &s) override {
+        if (a.IsDynamic() && b.IsDynamic() && bool(a.GetUserData())!=bool(b.GetUserData())) {
+            const auto &loose=a.GetUserData() ? b : a;
+            headwear::BodyContact(loose.GetID().GetIndexAndSequenceNumber());
+        }
         PersonContact(a, b, m, s);
         WheelContact(a, b, m, s);
         DrivenCarContact(a, b, m, s);
