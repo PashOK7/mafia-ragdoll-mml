@@ -89,7 +89,8 @@ int Command(const char *args, MmlReply *r, void *user) {
     if (!strcmp(name, "camera")) { Reply(r, ragcam::State()); return 0; }
     bool ok = false;
     const bool address = !strcmp(name, "start") || !strcmp(name, "drop") || !strcmp(name, "inspect") ||
-                         !strcmp(name, "handover") || !strcmp(name, "trajectory") || !strcmp(name, "vehicle");
+                         !strcmp(name, "handover") || !strcmp(name, "trajectory") || !strcmp(name, "vehicle") ||
+                         !strcmp(name, "railtrace");
     std::string out = core::Exec(name, address ? Address(args) : std::string(args ? args : ""), &ok);
     if (!ok) { H->reply_error(r, out.c_str()); return 1; }
     Reply(r, out);
@@ -128,6 +129,7 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
         {"inspect", "read-only physics joints, initial pose and render errors: {actor | pedestrian: 0x...}"},
         {"handover", "retained car-contact poses for 3.5 s; stages 1/2 tick apply, 3/4 render apply, 5 world drawn: {actor | pedestrian}"},
         {"trajectory", "last car contact or {pedestrian: 0x...}; native, physics and drawn pose samples including failed ragdolls"},
+        {"railtrace", "recent railway passenger physics steps in carriage coordinates, optionally {model: 0x...}"},
         {"vehicle", "read-only physical car shape: current car or {car: 0x...}"},
         {"knock", "the knock-downs by bodies: the last decisions"},
         {"dodge", "diagnostic A/B for this load only: {mode: native | fixed}; retains ragdoll physics"},

@@ -1146,7 +1146,7 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
             Unseat(entry);
             continue;
         }
-        jolt_world::RequestCabin(entry.car, body);
+        jolt_world::RequestCabin(entry.car, body, body->railOccupant);
     }
     // Bodies passing through a car's hull: its cabin kept while any part is inside the hull; out for half a second
     // (or the car gone from the world): an ordinary body again.

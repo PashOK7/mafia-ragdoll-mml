@@ -34,7 +34,10 @@ namespace jolt_world {
 namespace {
 
 LogFn g_log;
-std::unordered_map<uint64_t, const void *> g_occupantCabins; // refreshed by the solver before each step
+constexpr uint64_t kPedestrianBarrier = 1;
+struct OccupantCabin { const void *car; bool railway; };
+std::unordered_map<uint64_t, OccupantCabin> g_occupantCabins; // refreshed by the solver before each step
+std::unordered_map<uint64_t, RailwayStep> g_railwayContacts;
 #define JLOG(...) (g_log ? g_log(__VA_ARGS__) : (void)0)
 
 
@@ -144,6 +147,7 @@ public:
         DrivenCarContact(a, b, m, s);
         SlidingCabinContact(a, b, s);
         TraceDriver(a, b, m);
+        TraceRailway(a, b, m);
         if (m.mRelativeContactPointsOn1.empty()) return;
         JPH::RVec3 p = m.GetWorldSpaceContactPointOn1(0);
         JPH::Vec3 n = m.mWorldSpaceNormal;   // from a towards b
@@ -166,10 +170,23 @@ public:
         DrivenCarContact(a, b, m, s);
         SlidingCabinContact(a, b, s);
         TraceDriver(a, b, m);
+        TraceRailway(a, b, m);
     }
     // A body passing through a car's hull (SetPassThrough) does not meet that car's hull bodies; it meets the car's
     // cabin, which is not one of them.
     JPH::ValidateResult OnContactValidate(const JPH::Body &a, const JPH::Body &b, JPH::RVec3Arg, const JPH::CollideShapeResult &) override {
+        if (a.GetObjectLayer() == kOccupant || b.GetObjectLayer() == kOccupant) {
+            const bool riderA = a.GetObjectLayer() == kOccupant;
+            const auto &rider = riderA ? a : b;
+            const auto &other = riderA ? b : a;
+            if (other.GetObjectLayer() == kStatic && other.GetUserData() == kPedestrianBarrier) {
+                const auto cabin = g_occupantCabins.find(rider.GetUserData());
+                if (cabin != g_occupantCabins.end() && cabin->second.railway) {
+                    ++g_railwayContacts[rider.GetUserData()].barriersRejected;
+                    return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+                }
+            }
+        }
         if (a.IsDynamic() && b.IsDynamic() && bool(a.GetUserData())!=bool(b.GetUserData())) {
             const auto &loose=a.GetUserData() ? b : a;
             const auto &wearer=a.GetUserData() ? a : b;
@@ -181,7 +198,7 @@ public:
             const auto &person = a.GetObjectLayer() == kCabin ? b : a;
             if (person.GetObjectLayer() == kOccupant) {
                 auto owner = g_occupantCabins.find(person.GetUserData());
-                if (owner != g_occupantCabins.end() && cabin.GetUserData() != reinterpret_cast<uintptr_t>(owner->second))
+                if (owner != g_occupantCabins.end() && cabin.GetUserData() != reinterpret_cast<uintptr_t>(owner->second.car))
                     return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
             }
         }
@@ -189,6 +206,35 @@ public:
         return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
     }
 private:
+    static void TraceRailway(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m) {
+        const bool riderA = a.GetObjectLayer() == kOccupant;
+        if ((!riderA && b.GetObjectLayer() != kOccupant) || m.mRelativeContactPointsOn1.empty()) return;
+        const auto &rider = riderA ? a : b;
+        const auto traced = g_occupantCabins.find(rider.GetUserData());
+        if (traced == g_occupantCabins.end() || !traced->second.railway) return;
+        const auto &other = riderA ? b : a;
+        if (other.GetUserData() == rider.GetUserData()) return;
+        auto &sample = g_railwayContacts[rider.GetUserData()];
+        if (other.GetObjectLayer() != kCabin) {
+            ++sample.outsideContacts;
+            if (sample.outsideContacts == 1 || m.mPenetrationDepth > sample.outsideDepth) {
+                sample.outsideDepth = m.mPenetrationDepth;
+                sample.outsideBody = other.GetID().GetIndexAndSequenceNumber();
+                sample.outsideLayer = other.GetObjectLayer();
+            }
+            return;
+        }
+        ++sample.contacts;
+        const JPH::Vec3 forward = other.GetRotation() * JPH::Vec3::sAxisZ();
+        if (std::abs(forward.Dot(m.mWorldSpaceNormal)) < .7f) return;
+        ++sample.endContacts;
+        const auto point = m.GetWorldSpaceContactPointOn1(0);
+        const float approach = (a.GetPointVelocity(point)-b.GetPointVelocity(point)).Dot(m.mWorldSpaceNormal);
+        if (sample.endContacts == 1 || approach > sample.endApproach) {
+            sample.endApproach = approach;
+            sample.endPointZ = forward.Dot(JPH::Vec3(point-other.GetPosition()));
+        }
+    }
     // A driven car's wheel touching a body: the tyre rolls. A wheel rolling forward at v turns about up x forward at
     // v / R, so its surface where the contact's normal n (from the car, radial on a tyre) leaves it moves, against
     // the car, at v (up x forward) x n: down at its front. The body's friction on it is the other way: up, and the
@@ -440,6 +486,7 @@ void ApplyScenery() {
         if (it != g_statics.end()) { bi.RemoveBody(it->second.body); bi.DestroyBody(it->second.body); g_statics.erase(it); }
         if (!shape) continue;
         JPH::BodyCreationSettings s(shape, J(p.t - g_w->origin), FromAxes(p.ax), JPH::EMotionType::Static, kStatic);
+        if (p.pedestrianBarrier) s.mUserData = kPedestrianBarrier;
         s.mFriction = 0.8f;   // clothes on asphalt, stone, wood
         s.mRestitution = 0.0f;
         JPH::BodyID id = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);
@@ -881,6 +928,7 @@ void RemoveAll() {
     WatchDriver(nullptr, nullptr);
     g_passCar.clear();
     g_occupantCabins.clear();
+    g_railwayContacts.clear();
     g_holder.clear();
     g_personOfBody.clear();
     g_personTouches.clear();
@@ -1125,6 +1173,7 @@ void Step(float dt, const std::vector<smoke::Mover> &movers, const V3 *player, v
     g_carKicks.clear();       // a paused or failed step has no reaction to deliver
     g_wheelSupport.clear();
     g_vehicleContacts.clear();
+    g_railwayContacts.clear();
     g_personBlows.clear();   // (a paused tick has none)
     if (!g_w) return;
     Recentre(player);
@@ -1270,14 +1319,32 @@ bool EnsureVehicle(const smoke::Mover &m) {
 
 void SetImpactListener(ImpactFn fn) { g_impact = fn; }
 
-void RequestCabin(const void *car, const void *occupant) {
+void RequestCabin(const void *car, const void *occupant, bool railway) {
     if (!car) return;
     g_cabinWanted.insert(car);
-    if (occupant) g_occupantCabins[reinterpret_cast<uintptr_t>(occupant)] = car;
+    if (occupant) g_occupantCabins[reinterpret_cast<uintptr_t>(occupant)] = {car, railway};
 }
 JPH::BodyID CabinBody(const void *car) {
     auto it = g_cabins.find(car);
     return it != g_cabins.end() ? it->second.body : JPH::BodyID();
+}
+bool RailwaySample(const void *car, const void *occupant, V3 at, RailwayStep *step) {
+    const auto id = CabinBody(car);
+    if (!Running() || id.IsInvalid()) return false;
+    auto &bodies = Bodies();
+    const auto contacts = g_railwayContacts.find(reinterpret_cast<uintptr_t>(occupant));
+    *step = contacts == g_railwayContacts.end() ? RailwayStep{} : contacts->second;
+    if (step->outsideContacts && step->outsideLayer == kStatic) {
+        const auto body = JPH::BodyID(step->outsideBody);
+        const auto piece = std::find_if(g_statics.begin(), g_statics.end(),
+                                       [body](const auto &p) { return p.second.body == body; });
+        if (piece != g_statics.end()) step->outsideVisual = piece->first;
+    }
+    step->cabinPosition = ToWorld(F(bodies.GetPosition(id)));
+    step->cabinVelocity = F(bodies.GetLinearVelocity(id));
+    step->cabinAngular = F(bodies.GetAngularVelocity(id));
+    step->pointVelocity = step->cabinVelocity + Cross(step->cabinAngular,ToJolt(at)-F(bodies.GetCenterOfMassPosition(id)));
+    return true;
 }
 unsigned CabinVersion(const void *car) {
     auto it = g_cabins.find(car);

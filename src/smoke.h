@@ -17,6 +17,7 @@ struct SceneryPiece {
     const std::vector<V3> *pos = nullptr;          // the shape, in the piece's frame
     const std::vector<uint32_t> *tris = nullptr;   // three indices per triangle
     const char *name = nullptr;
+    bool pedestrianBarrier = false; // native invisible wall, not a solid object the train can hit
 };
 
 // Something the game moves: a human's body part, a car. Each becomes a kinematic body (or a car's body of its mass)

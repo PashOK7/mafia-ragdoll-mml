@@ -96,8 +96,17 @@ bool HasKinematic(const void *key);
 bool EnsureVehicle(const smoke::Mover &mover);
 
 // A car someone sits in: its cabin body (layer kCabin) is kept while asked for every tick, from the next Step on.
-void RequestCabin(const void *car, const void *occupant = nullptr);
+void RequestCabin(const void *car, const void *occupant = nullptr, bool railway = false);
 JPH::BodyID CabinBody(const void *car);   // invalid while there is none
+struct RailwayStep {
+    V3 cabinPosition{}, cabinVelocity{}, cabinAngular{}, pointVelocity{};
+    unsigned contacts{}, endContacts{}, outsideContacts{}, barriersRejected{};
+    unsigned outsideBody{}, outsideLayer{};
+    const void *outsideVisual{};
+    float endApproach{}, endPointZ{}, outsideDepth{};
+};
+// Carriage dynamics and the last step's contact summary for one rail rider.
+bool RailwaySample(const void *car, const void *occupant, V3 at, RailwayStep *step);
 // Told before a cabin's body goes (the car left the world, or nobody asks for it): constraints to it must go first.
 using CabinGoneFn = void (*)(const void *car);
 void SetCabinGoneListener(CabinGoneFn fn);

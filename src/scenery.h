@@ -3,6 +3,7 @@
 // own buffers), turned into pieces the rigid-body world cooks once a shape. mafia-ragdoll's scenery.h, the part
 // jolt_world uses.
 #pragma once
+#include <span>
 #include <string>
 #include <vector>
 #include "smoke.h"
@@ -13,8 +14,9 @@ enum Consumer { kRagdoll, kConsumers };
 void SetFocus(Consumer c, const V3 &lo, const V3 &hi);
 void ClearFocus(Consumer c);
 
-// Game thread, every tick: the host's newest pieces taken when its scan changed them.
-void Tick();
+// Game thread, every tick: collect the host's newest pieces. Active railway
+// cabins already supply their own collision geometry in the moving world.
+void Tick(std::span<void *const> railwayCabins = {});
 // The static pieces of the last scan (their shapes valid until the next scan or Clear).
 const std::vector<smoke::SceneryPiece> &Pieces();
 unsigned Scans();     // bumped by every new set of Pieces()

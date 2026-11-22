@@ -802,7 +802,7 @@ void SafeWatchTramGetUps() {
 struct Kept { void *actor; V3 J, at; bool hasAt; DWORD tick; float maxPart; };
 std::vector<Kept> g_kept;
 unsigned g_corpseHits, g_shapesGiven;
-struct BulletContact { void *actor; V3 at; int shape, part; float localDv; };
+struct BulletContact { void *actor; V3 at; int shape, part; float localDv; unsigned tick; };
 BulletContact g_lastBullet{};
 
 // A hit's momentum (N s): the game's damage times the kick, held to the strongest one shot gives (a script's or a
@@ -970,6 +970,70 @@ struct Occupant {
     bool posedForDraw{};
 };
 std::vector<Occupant> g_occupants;
+
+struct RailSample {
+    uintptr_t model, carrier;
+    unsigned tick, serial, mesh, shotTick;
+    int carriage, phase;
+    float dt, age, speed, target, poseError, drawnError, shotDv;
+    V3 origin, pelvis, head, relativeVelocity, cabinVelocity, cabinAngular;
+    jolt_world::RailwayStep contacts;
+};
+std::deque<RailSample> g_railTrace;
+
+void SampleRailway(float dt) {
+    if (dt <= 0.f) return;
+    for (const auto &o : g_occupants) {
+        if (!o.rail || !jolt_ragdoll::SeatedCar(o.body.get())) continue;
+        const V3 pelvis = o.body->BodyPos(Ragdoll::B_PELVIS);
+        jolt_world::RailwayStep step;
+        if (!jolt_world::RailwaySample(o.frame, o.body.get(), pelvis, &step)) continue;
+        const float *matrix = game::WorldMatrix(o.frame);
+        const M3 inverse = M3::FromWorld(matrix).T();
+        const V3 origin{matrix[12],matrix[13],matrix[14]};
+        const V3 head = o.body->BodyPos(Ragdoll::B_HEAD);
+        const bool shot = g_lastBullet.actor == o.model && g_tick-g_lastBullet.tick <= 1;
+        g_railTrace.push_back({
+            reinterpret_cast<uintptr_t>(o.model), reinterpret_cast<uintptr_t>(o.carrier),
+            g_tick, o.body->serial, jolt_world::CabinVersion(o.frame), shot ? g_lastBullet.tick : 0u,
+            o.carriage, game::at<int>(o.carrier,0xdc),
+            dt, o.body->age, game::at<float>(o.carrier,0xd4), game::at<float>(o.carrier,0xd0),
+            Len(step.cabinPosition-origin), o.drawnNeckError, shot ? g_lastBullet.localDv : 0.f,
+            origin, inverse.Apply(pelvis-origin), inverse.Apply(head-origin),
+            inverse.Apply(o.body->BodyVel(Ragdoll::B_PELVIS)-step.pointVelocity),
+            inverse.Apply(step.cabinVelocity), inverse.Apply(step.cabinAngular), step
+        });
+        constexpr std::size_t keptSamples = 960;
+        if (g_railTrace.size() > keptSamples) g_railTrace.pop_front();
+    }
+}
+
+std::string RailTrace(const std::string &args) {
+    const uintptr_t model = strtoul(args.c_str(), nullptr, 16);
+    std::string out = "[";
+    for (const auto &s : g_railTrace) {
+        if (model && s.model != model) continue;
+        if (out.size() > 1) out += ',';
+        out += Fmt("{\"tick\":%u,\"dt\":%.4f,\"age\":%.3f,\"model\":\"0x%08X\",\"body_serial\":%u,"
+                   "\"carrier\":\"0x%08X\",\"carriage\":%d,\"phase\":%d,\"speed\":%.4f,\"target\":%.4f,"
+                   "\"mesh\":%u,\"pose_error\":%.4f,\"drawn_neck_error\":%.4f,\"origin\":[%.4f,%.4f,%.4f],"
+                   "\"pelvis\":[%.4f,%.4f,%.4f],\"head\":[%.4f,%.4f,%.4f],"
+                   "\"relative_velocity\":[%.4f,%.4f,%.4f],\"cabin_velocity\":[%.4f,%.4f,%.4f],"
+                   "\"cabin_angular\":[%.4f,%.4f,%.4f],\"contacts\":%u,\"end_contacts\":%u,"
+                   "\"end_approach\":%.4f,\"end_point_z\":%.4f,\"outside_contacts\":%u,\"outside_depth\":%.4f,"
+                   "\"outside_layer\":%u,\"outside_visual\":\"0x%08X\",\"barriers_rejected\":%u,"
+                   "\"shot_tick\":%u,\"shot_local_dv\":%.4f}",
+                   s.tick,s.dt,s.age,(unsigned)s.model,s.serial,(unsigned)s.carrier,s.carriage,s.phase,s.speed,s.target,
+                   s.mesh,s.poseError,s.drawnError,s.origin.x,s.origin.y,s.origin.z,
+                   s.pelvis.x,s.pelvis.y,s.pelvis.z,s.head.x,s.head.y,s.head.z,
+                   s.relativeVelocity.x,s.relativeVelocity.y,s.relativeVelocity.z,
+                   s.cabinVelocity.x,s.cabinVelocity.y,s.cabinVelocity.z,s.cabinAngular.x,s.cabinAngular.y,s.cabinAngular.z,
+                   s.contacts.contacts,s.contacts.endContacts,s.contacts.endApproach,s.contacts.endPointZ,
+                   s.contacts.outsideContacts,s.contacts.outsideDepth,s.contacts.outsideLayer,
+                   (unsigned)(uintptr_t)s.contacts.outsideVisual,s.contacts.barriersRejected,s.shotTick,s.shotDv);
+    }
+    return out + ']';
+}
 
 void ApplyRailPose(Occupant &o) {
     if (o.posedForDraw) return;
@@ -1197,7 +1261,7 @@ void ApplyTransportShot(const TransportShot &shot, const V3 &from, const V3 &dir
     }
     if (!target) return;
     const float dv = Kick(target, dir, point, damage, part, g_cfg.shot);
-    g_lastBullet = {target->Model(), point, part, part, dv};
+    g_lastBullet = {target->Model(), point, part, part, dv, g_tick};
     ++g_corpseHits;
 }
 
@@ -1306,7 +1370,7 @@ void PhysicsBulletStretch(MmlMidContext *ctx, void *) {
             point=dogHit.point;
         } else if (target) {
             const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
-            g_lastBullet = {target->model, point, part, part, dv};
+            g_lastBullet = {target->model, point, part, part, dv, g_tick};
             ++g_corpseHits;
         } else {
             return;
@@ -1644,6 +1708,7 @@ void JoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
     OccupantMovers(movers);
     headwear::ApplyAirDrag(dt);
     jolt_ragdoll::Step(jolt, dt, movers, pl ? &pp : nullptr);
+    SampleRailway(dt);
     dogs::FinishStep();
 }
 bool SafeJoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
@@ -1912,7 +1977,11 @@ void TickBody(float dt) {
     ListPeople();
     headwear::Tick(g_pedList);
     TracePedestrians(TrajectoryStage::TickBegin);
-    scenery::Tick();
+    static std::vector<void *> railwayCabins;
+    railwayCabins.clear();
+    for (const auto &o : g_occupants)
+        if (o.rail) railwayCabins.push_back(o.frame);
+    scenery::Tick(railwayCabins);
     KeptTick();
     SafeWatchTramGetUps();
     for (size_t i = 0; i < g_ragdolls.size();) {
@@ -2273,7 +2342,7 @@ int HitFilter(void *person, int, MmlHumanHit *hit, void *) {
         if (Len(at) < 1e-3f) at = rd->Center();
         int part = Ragdoll::BulletBody(hit->shape - 1);
         float dv = Kick(rd, d, at, hit->damage, part, g_cfg.shot);
-        g_lastBullet = {person, at, hit->shape - 1, part, dv};
+        g_lastBullet = {person, at, hit->shape - 1, part, dv, g_tick};
         g_corpseHits++;
         return MML_HIT_TAKEN;
     }
@@ -2731,6 +2800,7 @@ void OnWorldReset(const char *reason) {
     g_lastAttached = {};
     g_pullArms = {};
     g_occupants.clear();
+    g_railTrace.clear();
     g_carriageMeshes.clear();
     EndPullTrace("world reset");
     for (auto &entry : g_handovers) { entry.traceEnded = true; PersistTrajectory(entry); }
@@ -2942,6 +3012,7 @@ std::string State() {
 
 std::string Exec(const std::string &cmd, const std::string &args, bool *ok) {
     *ok = true;
+    if (cmd == "railtrace") return RailTrace(args);
     if (cmd == "dodge") {
         bool native = args.find("\"native\"") != std::string::npos;
         bool fixed = args.find("\"fixed\"") != std::string::npos;

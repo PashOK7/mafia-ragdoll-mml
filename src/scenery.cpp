@@ -182,6 +182,9 @@ bool UpdateSlabs() {
         piece.pos = &shape.pos;
         piece.tris = &shape.tris;
         piece.name = "native slab";
+        // Across station entrances the game uses upright, material-33 slabs
+        // to keep a person on the platform while rail vehicles cross freely.
+        piece.pedestrianBarrier = material == 33 && std::abs(s.axes[4]) < .35f;
         g_slabs.push_back(piece);
     }
     return true;
@@ -215,16 +218,22 @@ void ClearFocus(Consumer c) {
     SendFocus();
 }
 
-void Tick() {
+void Tick(std::span<void *const> railwayCabins) {
     if (!g_sentFocus) return;
     int n = H->scene_pieces(M, nullptr, 0);
     if (n < 0) return;
     g_raw.resize(n);
     if (n) n = H->scene_pieces(M, g_raw.data(), n);
     g_raw.resize(std::max(n, 0));
-    // Detached hats already have dynamic hulls in Jolt. A prop may enter
-    // the visual cache as stationary on its first scan.
-    std::erase_if(g_raw, [](const MmlMeshPiece &p) { return headwear::OwnsVisual(p.visual); });
+    std::erase_if(g_raw, [railwayCabins](const MmlMeshPiece &p) {
+        if (headwear::OwnsVisual(p.visual)) return true;
+        if (railwayCabins.empty()) return false;
+        // A trailing carriage has its own root in the scene. Its visuals
+        // can still be in the stationary cache when the cabin moves away.
+        for (void *frame=p.visual; frame; frame=game::at<void *>(frame,game::kFrameParent))
+            if (std::ranges::find(railwayCabins,frame)!=railwayCabins.end()) return true;
+        return false;
+    });
     // a new set only when the host's pieces changed (their visuals and versions)
     // (the host gives them in no fixed order: a sum of each one's mixed key, not a chain)
     uint64_t sig = g_raw.size() * 0x9E3779B97F4A7C15ull;
