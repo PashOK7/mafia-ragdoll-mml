@@ -18,6 +18,7 @@
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Ragdoll/Ragdoll.h>
@@ -54,8 +55,8 @@ struct PartDef {
 constexpr PartDef parts[] = {
     {"pelvis", Pelvis, Pelvis, Tail, -1, .115f, 6.5f, 0, 0, 0},
     {"chest", Chest, Back, Neck, 0, .145f, 8.f, 24, 18, 15},
-    {"neck", Neck, Neck, Head, 1, .081f, 1.5f, 43, 34, 25},
-    {"head", Head, Head, Jaw, 2, .079f, 2.f, 36, 28, 22},
+    {"neck", Neck, Neck, Head, 1, .081f, 1.5f, 34, 22, 16},
+    {"head", Head, Head, Jaw, 2, .079f, 2.f, 26, 16, 13},
     {"front-left-shoulder", FrontLeftShoulder, FrontLeftShoulder, FrontLeftElbow, 1, .052f, 1.3f, 65, 30, 25},
     {"front-left-foreleg", FrontLeftElbow, FrontLeftElbow, FrontLeftWrist, 4, .038f, .7f, 112, 19, 0, true},
     {"front-left-paw", FrontLeftWrist, FrontLeftWrist, FrontLeftToe, 5, .032f, .3f, 48, 18, 16},
@@ -72,15 +73,21 @@ constexpr PartDef parts[] = {
     {"tail-tip", TailMid, TailMid, TailTip, 16, .018f, .09f, 32, 36, 22},
 };
 constexpr int PartCount = std::size(parts);
+constexpr int ChestPart=1, NeckPart=2, HeadPart=3;
+constexpr uint32_t kPoseVersion=3;
 
 struct Local { V3 pos; Q rot; V3 scale; };
 using Transform=SkeletonTransform;
-struct Pose { std::array<Local, BoneCount> local; std::array<Transform, BoneCount> world; };
+using Skeleton=std::array<Transform,BoneCount>;
+struct Pose { std::array<Local,BoneCount> local; Skeleton world; };
+struct HeadInfluence { V3 local; float weight; Bone bone; };
+using HeadVertex=std::array<HeadInfluence,2>; // stock LS3D skins have at most two influences
+struct DogModel { Skeleton rest{}; std::vector<HeadVertex> head; };
 struct Link { V3 offset; M3 rotation; };
 struct Shot { V3 pos{}, dir{}; float damage=0, remaining=0; };
 struct SavedPart { V3 position; Q rotation; V3 velocity,angularVelocity; };
 struct SavedDog {
-    uint32_t version=2,model=0,name=0,sleeping=0,bloodEffects=0,living=0;
+    uint32_t version=kPoseVersion,model=0,name=0,sleeping=0,bloodEffects=0,living=0;
     V3 nativePosition{};
     float age=0.f;
     Pose birth{};
@@ -97,7 +104,9 @@ struct Dog {
     std::array<Link, PartCount> links{};
     JPH::Ref<JPH::RagdollSettings> settings;
     JPH::Ref<JPH::Ragdoll> body;
-    std::array<Transform,BoneCount> rest{};
+    const DogModel *rig=nullptr;
+    std::vector<V3> headPoints;
+    V3 muzzlePoint{};
     std::array<V3,PartCount> velocity{}, spin{};
     std::array<V3,PartCount> pendingBlast{};
     V3 rootVelocity{};
@@ -114,7 +123,7 @@ struct Dog {
     bool restored=false;
 };
 std::unordered_map<void *, Dog> tracked;
-std::unordered_map<std::string,std::array<Transform,BoneCount>> restByModel;
+std::unordered_map<std::string,DogModel> rigs;
 std::vector<SavedDog> pendingRestore;
 unsigned tick;
 JPH::CollisionGroup::GroupID nextGroup = 0x40000000u;
@@ -171,6 +180,32 @@ uint32_t Identity(const char *name) {
 }
 uint32_t NameOf(const Dog &dog) { return Identity(game::at<const char *>(dog.model,game::kFrameName)); }
 
+void ReadHead(const char *file,DogModel &rig) {
+    MmlSkinMesh mesh{};
+    if (!mod::H->skin_get(mod::M,file,bones[Pelvis].name,0,&mesh)) return;
+    for (uint32_t i=0;i<mesh.skin.vertices;++i) {
+        const int count=mesh.skin.count[i];
+        HeadVertex vertex{};
+        if (!count || count>(int)vertex.size()) continue;
+        const V3 p{mesh.pos[3*i],mesh.pos[3*i+1],mesh.pos[3*i+2]};
+        float headWeight=0.f;
+        for (int j=0;j<count;++j) {
+            const auto influence=i*MML_SKIN_INFLUENCES+j;
+            const auto &joint=mesh.skin.bone[mesh.skin.index[influence]];
+            const float weight=mesh.skin.weight[influence];
+            if (!joint.joint || weight<=0.f) continue;
+            const Bone bone=!std::strcmp(bones[Head].name,joint.joint) ? Head :
+                            !std::strcmp(bones[Jaw].name,joint.joint) ? Jaw : BoneCount;
+            if (bone==BoneCount) continue;
+            vertex[j]={Position(joint.bind)+M3::Raw(joint.bind).Apply(p),weight,bone};
+            headWeight+=weight;
+        }
+        // These vertices move rigidly with the physical head and the jaw's
+        // captured local pose, including the chin and the tip of the muzzle.
+        if (headWeight>=.999f) rig.head.push_back(vertex);
+    }
+}
+
 bool Bind(Dog &d) {
     for (int i=0;i<BoneCount;++i) {
         const int parent=bones[i].parent;
@@ -184,9 +219,9 @@ bool Bind(Dog &d) {
     const auto *host=mod::H;
     if (!host->model_file(mod::M,d.model,file,sizeof file)) return false;
     d.modelTag=Identity(file);
-    const auto cached=restByModel.find(file);
-    if (cached!=restByModel.end()) {
-        d.rest=cached->second;
+    const auto cached=rigs.find(file);
+    if (cached!=rigs.end()) {
+        d.rig=&cached->second;
         return true;
     }
     std::vector<MmlModelNode> nodes;
@@ -196,6 +231,7 @@ bool Bind(Dog &d) {
         mod::Warn("dog rig: %s",error.c_str());
         return false;
     }
+    DogModel rig;
     std::array<int,BoneCount> indices{};
     for (int i=0;i<BoneCount;++i) {
         const int parent=bones[i].parent;
@@ -205,9 +241,10 @@ bool Bind(Dog &d) {
         });
         if (node==nodes.end()) return false;
         indices[i]=int(node-nodes.begin());
-        d.rest[i]=world[indices[i]];
+        rig.rest[i]=world[indices[i]];
     }
-    restByModel.emplace(file,d.rest);
+    ReadHead(file,rig);
+    d.rig=&rigs.emplace(file,std::move(rig)).first->second;
     return true;
 }
 Local LocalPose(void *frame) {
@@ -257,7 +294,6 @@ M3 PartOrientation(V3 from,V3 to,V3 lateral) {
     x=Norm(x);
     return {{x,y,Cross(x,y)}};
 }
-using Skeleton=std::array<Transform,BoneCount>;
 std::array<Transform,PartCount> PartPose(const Skeleton &pose) {
     const V3 lateral=Norm(pose[FrontRightShoulder].pos-pose[FrontLeftShoulder].pos,{1,0,0});
     std::array<Transform,PartCount> result;
@@ -300,6 +336,48 @@ JPH::RefConst<JPH::Shape> Shape(int index,float length,float scale,float side) {
         return new JPH::BoxShape(Vec(V3{radius+side,length*.5f+radius*.34f,radius*1.12f}),radius*.24f);
     return new JPH::CapsuleShape(std::max(.009f*scale,length*.5f-radius*.55f),radius);
 }
+V3 Forward(const Skeleton &rest) {
+    const V3 axis=rest[Neck].pos-rest[Tail].pos;
+    return Norm({axis.x,0,axis.z},{0,0,1});
+}
+JPH::RefConst<JPH::Shape> HeadShape(Dog &dog,const Transform &body,float length,float scale,V3 forward) {
+    dog.headPoints.clear();
+    if (dog.rig->head.size()<4) return Shape(HeadPart,length,scale,0.f);
+    const auto &rest=dog.rig->rest[Head];
+    const auto &pose=dog.pose.world;
+    const V3 muzzleAxis=body.basis.T().Apply(pose[Head].basis.Apply(rest.basis.Inverse().Apply(forward)));
+    dog.headPoints.reserve(dog.rig->head.size());
+    for (const auto &vertex:dog.rig->head) {
+        V3 posed{};
+        for (const auto &influence:vertex) {
+            if (influence.weight<=0.f) continue;
+            const auto &joint=pose[influence.bone];
+            posed=posed+(joint.pos+joint.basis.Apply(influence.local))*influence.weight;
+        }
+        const V3 local=body.basis.T().Apply(posed-body.pos);
+        if (dog.headPoints.empty() || Dot(local,muzzleAxis)>Dot(dog.muzzlePoint,muzzleAxis)) dog.muzzlePoint=local;
+        dog.headPoints.push_back(local);
+    }
+
+    // Jolt lets resting shapes sink by its contact slop. Pad the hull in
+    // multiple directions so the muzzle stays supported when the head rolls.
+    constexpr V3 directions[]={
+        {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1},
+        {1,1,1},{1,1,-1},{1,-1,1},{1,-1,-1},{-1,1,1},{-1,1,-1},{-1,-1,1},{-1,-1,-1},
+    };
+    const float padding=jolt_world::System()->GetPhysicsSettings().mPenetrationSlop+.002f;
+    JPH::Array<JPH::Vec3> points;
+    points.reserve(dog.headPoints.size()*std::size(directions));
+    for (V3 dir:directions) {
+        const V3 offset=Norm(dir)*padding;
+        for (V3 p:dog.headPoints) points.push_back(Vec(p+offset));
+    }
+    const auto shape=JPH::ConvexHullShapeSettings(points,.003f*scale).Create();
+    if (shape.IsValid()) return shape.Get();
+    dog.headPoints.clear();
+    mod::Warn("dog rig: could not build head collider");
+    return Shape(HeadPart,length,scale,0.f);
+}
 void Joint(JPH::RagdollSettings::Part &part,int index,V3 anchor,
            const std::array<Transform,PartCount> &now,const std::array<Transform,PartCount> &rest,
            V3 forward) {
@@ -313,6 +391,18 @@ void Joint(JPH::RagdollSettings::Part &part,int index,V3 anchor,
         const M3 carryChild=neutralChild.T()*child;
         part.mToParent=articulation::Hinge(anchor,{carryParent.Apply(axis),carryParent.Apply(normal)},
             {carryChild.Apply(axis),carryChild.Apply(normal)},-spec.side,spec.flex,4.f);
+    } else if (index==NeckPart || index==HeadPart) {
+        const float up=index==NeckPart ? 18.f : 14.f;
+        const V3 sideways=Norm(neutralChild.r[0]-forward*Dot(neutralChild.r[0],forward));
+        const V3 pitch=Cross(sideways,forward);
+        const V3 down=pitch.y<0.f ? pitch : -pitch;
+        const float centre=(spec.flex-up)*.5f*articulation::radians;
+        const V3 parentAxis=forward*std::cos(centre)+down*std::sin(centre);
+        const M3 carryChild=neutralChild.T()*child;
+        part.mToParent=articulation::Ball(anchor,
+            {carryParent.Apply(parentAxis),carryParent.Apply(sideways)},
+            {carryChild.Apply(forward),carryChild.Apply(sideways)},
+            (spec.flex+up)*.5f,spec.side,-spec.twist,spec.twist,4.f);
     } else {
         part.mToParent=articulation::Ball(anchor,
             {carryParent.Apply(neutralChild.r[1]),carryParent.Apply(neutralChild.r[0])},
@@ -364,8 +454,9 @@ bool Add(Dog &d,bool dead) {
     settings->mParts.resize(PartCount);
     JPH::Mat44 poses[PartCount];
     const auto &points=d.pose.world;
-    const auto now=PartPose(points), rest=PartPose(d.rest);
-    const V3 forward=Norm(d.rest[Neck].pos-d.rest[Tail].pos,{0,0,1});
+    const auto now=PartPose(points), rest=PartPose(d.rig->rest);
+    const V3 forward=Forward(d.rig->rest);
+    const V3 limbForward=Norm(d.rig->rest[Neck].pos-d.rig->rest[Tail].pos,forward);
     const float scale=std::clamp(Len(points[Pelvis].basis.r[0]),.6f,1.55f);
     const float shoulderWidth=Len(points[FrontRightShoulder].pos-points[FrontLeftShoulder].pos);
     for (int i=0;i<PartCount;++i) {
@@ -381,7 +472,7 @@ bool Add(Dog &d,bool dead) {
         d.links[i]={basis.T().Apply(bone.pos-centre),boneRotation*basis.T()};
         auto &part=settings->mParts[i];
         const float width=std::clamp(shoulderWidth*.5f-spec.radius*scale,0.f,.035f*scale);
-        part.SetShape(Shape(i,length,scale,width));
+        part.SetShape(i==HeadPart ? HeadShape(d,now[i],length,scale,forward) : Shape(i,length,scale,width));
         part.mPosition=Vec(jolt_world::ToJolt(centre));
         part.mRotation=Rotation(basis);
         part.mObjectLayer=jolt_world::kDynamic;
@@ -392,12 +483,18 @@ bool Add(Dog &d,bool dead) {
         part.mNumVelocityStepsOverride=12;
         part.mNumPositionStepsOverride=5;
         part.mMotionQuality=JPH::EMotionQuality::LinearCast;
+        if (i==HeadPart) {
+            // LinearCast sweeps translation. Bound the muzzle's rotational
+            // travel between collision steps and keep mesh seams from catching it.
+            part.mMaxAngularVelocity=12.f;
+            part.mEnhancedInternalEdgeRemoval=true;
+        }
         part.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
         part.mMassPropertiesOverride.mMass=spec.mass;
         part.mLinearVelocity=Vec(d.rootVelocity+d.velocity[i]+d.pendingBlast[i]);
         part.mAngularVelocity=Vec(d.spin[i]);
         poses[i]=JPH::Mat44::sRotationTranslation(part.mRotation,part.mPosition);
-        if (spec.parent>=0) Joint(part,i,jolt_world::ToJolt(bone.pos),now,rest,forward);
+        if (spec.parent>=0) Joint(part,i,jolt_world::ToJolt(bone.pos),now,rest,spec.hinge ? limbForward : forward);
     }
     articulation::Prepare(*settings,poses,.025f);
     d.body=settings->CreateRagdoll(nextGroup++,0,jolt_world::System());
@@ -435,7 +532,8 @@ bool ValidRotation(Q q) {
     return length>.98f && length<1.02f;
 }
 bool Valid(const SavedDog &saved) {
-    if (saved.version!=2 || !saved.model || saved.sleeping>1 || saved.living>1 || saved.bloodEffects>9 ||
+    if ((saved.version!=2 && saved.version!=kPoseVersion) ||
+        !saved.model || saved.sleeping>1 || saved.living>1 || saved.bloodEffects>9 ||
         !Finite(saved.nativePosition) || !std::isfinite(saved.age) || saved.age<0.f) return false;
     for (int i=0;i<BoneCount;++i) {
         const auto &local=saved.birth.local[i];
@@ -464,16 +562,43 @@ auto SavedFor(void *actor,const Dog &dog) {
     }
     return found;
 }
+V3 LowestHeadPoint(const Dog &dog,V3 origin,const M3 &basis) {
+    V3 lowest=origin+basis.Apply(dog.muzzlePoint);
+    for (V3 p:dog.headPoints) {
+        const V3 vertex=origin+basis.Apply(p);
+        if (vertex.y<lowest.y) lowest=vertex;
+    }
+    return lowest;
+}
+float LegacyHeadLift(const Dog &dog,const SavedPart &head) {
+    if (dog.headPoints.empty()) return 0.f;
+    const Q q=head.rotation;
+    const M3 basis=Rotation(JPH::Quat(q.x,q.y,q.z,q.w));
+    const V3 muzzle=head.position+basis.Apply(dog.muzzlePoint);
+    const V3 lowest=LowestHeadPoint(dog,head.position,basis);
+    float lift=0.f;
+    for (V3 point:{lowest,muzzle}) {
+        const float from[]={point.x,point.y+.22f,point.z}, to[]={point.x,point.y+.004f,point.z};
+        MmlHit ground{};
+        if (mod::H->world_ray(mod::M,from,to,MML_WORLD_STATIC,nullptr,&ground) && ground.normal[1]>.65f)
+            lift=std::max(lift,ground.pos[1]+.004f-point.y);
+    }
+    return lift;
+}
 void RestoreSaved(Dog &dog,const SavedDog &saved) {
     auto &physics=jolt_world::Bodies();
-    if (saved.sleeping) physics.DeactivateBodies(dog.body->GetBodyIDs().data(),PartCount);
+    // Older poses were settled with the short capsule and wider neck limits.
+    const bool resettle=saved.sleeping && saved.version!=kPoseVersion;
+    const V3 lift{0,resettle ? LegacyHeadLift(dog,saved.parts[HeadPart]) : 0.f,0};
+    if (saved.sleeping && !resettle) physics.DeactivateBodies(dog.body->GetBodyIDs().data(),PartCount);
     for (int i=0;i<PartCount;++i) {
         const auto &part=saved.parts[i];
         const auto id=dog.body->GetBodyID(i);
         const auto &q=part.rotation;
         const JPH::Quat rotation(q.x,q.y,q.z,q.w);
-        physics.SetPositionAndRotation(id,Vec(jolt_world::ToJolt(part.position)),rotation,JPH::EActivation::DontActivate);
+        physics.SetPositionAndRotation(id,Vec(jolt_world::ToJolt(part.position+lift)),rotation,JPH::EActivation::DontActivate);
         if (!saved.sleeping) physics.SetLinearAndAngularVelocity(id,Vec(part.velocity),Vec(part.angularVelocity));
+        else if (resettle) physics.SetLinearAndAngularVelocity(id,JPH::Vec3::sZero(),JPH::Vec3::sZero());
     }
     dog.age=saved.age;
     dog.bloodEffects=saved.bloodEffects;
@@ -871,12 +996,31 @@ std::string State() {
         const V3 p=Centre(dog);
         const bool sleeping=dog.body && !dog.body->IsActive(false);
         const float maxSpeed=dog.body ? Fastest(dog) : 0.f;
-        result+=Fmt("{\"actor\":\"0x%08X\",\"bound\":%s,\"active\":%s,\"sleeping\":%s,\"parts\":%d,\"age\":%.3f,\"centre\":[%.4f,%.4f,%.4f],\"pose_error\":%.5f,\"max_speed\":%.4f,\"corpse_hits\":%u,\"last_hit_part\":\"%s\",\"last_shot_impulse\":%.3f,\"blood_effects\":%u,\"blast_hits\":%u,\"wheel_contacts\":%u,\"restored\":%s,\"recovering\":%s,\"dead\":%s}",
+        result+=Fmt("{\"actor\":\"0x%08X\",\"bound\":%s,\"active\":%s,\"sleeping\":%s,\"parts\":%d,\"age\":%.3f,\"centre\":[%.4f,%.4f,%.4f],\"pose_error\":%.5f,\"max_speed\":%.4f,\"corpse_hits\":%u,\"last_hit_part\":\"%s\",\"last_shot_impulse\":%.3f,\"blood_effects\":%u,\"blast_hits\":%u,\"wheel_contacts\":%u,\"restored\":%s,\"recovering\":%s,\"dead\":%s",
                     (unsigned)(uintptr_t)actor,dog.frames[0]?"true":"false",dog.body?"true":"false",sleeping?"true":"false",
                     dog.body?PartCount:0,dog.age,p.x,p.y,p.z,dog.poseError,maxSpeed,
                     dog.corpseHits,dog.lastHitPart<0?"":parts[dog.lastHitPart].name,dog.lastShotImpulse,
                     dog.bloodEffects,dog.blastHits,dog.wheelContacts,dog.restored?"true":"false",
                     dog.recovery>0.f?"true":"false",Dead(actor)?"true":"false");
+        if (dog.body && !dog.headPoints.empty()) {
+            auto &physics=jolt_world::Bodies();
+            JPH::RVec3 position;
+            JPH::Quat rotation;
+            physics.GetPositionAndRotation(dog.body->GetBodyID(HeadPart),position,rotation);
+            const V3 origin=jolt_world::ToWorld(Vec(position));
+            const M3 basis=Rotation(rotation);
+            const V3 muzzle=origin+basis.Apply(dog.muzzlePoint);
+            const V3 lowest=LowestHeadPoint(dog,origin,basis);
+            const auto rest=PartPose(dog.rig->rest);
+            const M3 chest=rest[ChestPart].basis.T()*Rotation(physics.GetRotation(dog.body->GetBodyID(ChestPart)));
+            const V3 forward=Forward(dog.rig->rest);
+            const V3 head=(rest[HeadPart].basis.T()*basis).Apply(forward);
+            const float pitch=std::atan2(Dot(head,chest.Apply({0,1,0})),Dot(head,chest.Apply(forward))) / articulation::radians;
+            result+=Fmt(",\"head\":{\"mesh_points\":%u,\"pitch\":%.2f,\"muzzle\":[%.4f,%.4f,%.4f],\"lowest\":[%.4f,%.4f,%.4f]}",
+                        (unsigned)dog.headPoints.size(),pitch,
+                        muzzle.x,muzzle.y,muzzle.z,lowest.x,lowest.y,lowest.z);
+        }
+        result+="}";
     }
     return result+"]";
 }

@@ -963,3 +963,13 @@ Dog bullet impulses are multiplied by six when a fatal hit starts physics and wh
 The native dog suite passed on 1.0 and 1.2. Both labs measured 34.8 N s at the lethal handoff, 31.8 N s on an already resting body, and eight resolved shotgun pellets stopped at the 36 N s budget. The repeated train and tram motion suite passed. In the 1.0 tram repeat the native route controller chose different braking states between the two runs (9 versus 7 and 0), with an observed final difference of 0.56 m/s. Evidence is in `../MafiaModLoader/build/ragdoll-dog-shots-0142/`.
 
 The owner's copy has 0.1.42 installed for the next launch. SHA-256 of the tested and installed DLL is `82fab7b29c3383ff897adba0f2348af85d6d9059fcf375ce3d4c061aaa774ee5`. Both labs were closed and their original startup flags restored.
+
+## 2026-11-22 — Dog muzzle contact and neck limits (0.1.43)
+
+The old head capsule used the distance between the head joint and the jaw hinge. A fitted comparison in Motel Clark found up to 16.4 cm of head geometry outside that capsule. The head now uses a rounded convex hull fitted to the stock skin's head and jaw vertices in the captured pose. Padding accounts for Jolt's contact slop. The hull handles both contact and repeat-shot queries. The dog's head has a local angular-speed cap and enhanced Jolt mesh-edge contact handling for fast impacts.
+
+The neck and skull cones use their own rest poses and favour flexion down. Their upward limits in the sagittal plane are 18 and 14 degrees, with downward limits of 34 and 26 degrees. The 18 saved parts retain their order. A sleeping version 2 pose checks for an intersecting floor at the old muzzle and settles once with the fitted collider. Version 3 saves restore sleep directly.
+
+Motel Clark passed on both builds, including heavy nonlethal recovery, lethal and repeat shots, blasts, a point-blank pellet volley, a vehicle impact and a save round trip. The final prison run settled four dogs per build with the lowest sampled head vertices 1.5 to 2.1 cm above the native ground. Both builds intercepted a low shot in the head collider. The 1.2 shot reached about 31 degrees of upward pitch. The other stock skin, `pes02`, fitted the same 88 head and jaw vertices and passed the water test in both labs. A saved 0.1.42 pose in 1.0 resettled above the ground. The standalone world-step, trunk-axis and pedestrian fixtures passed.
+
+The tested DLL was hot-reloaded into the owner's paused prison in PID 8232. The active file matches SHA-256 `6e302aa3d7835d3ee26dacf0cf04fad31d9bfbcc80255f816f99d202f445c58c`. Both laboratories were closed and their previous startup flags restored. Measurements, screenshots and installation backups are in `../MafiaModLoader/build/dog-head-0143/`.

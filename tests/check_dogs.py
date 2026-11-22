@@ -38,6 +38,8 @@ def check(game):
             if dog['active'] and dog['age'] >= .4:
                 assert dog['parts'] == 18 and all(map(math.isfinite, dog['centre'])), dog
                 assert 0 <= dog['pose_error'] < .015 and dog['max_speed'] < 18, dog
+                assert dog['head']['mesh_points'] >= 20, dog
+                assert dog['head']['pitch'] <= 36, dog
                 return dog
             time.sleep(.05)
         raise AssertionError(game.call('ragdoll.dogs'))
@@ -59,6 +61,11 @@ def check(game):
                 ground = game.call('world.ground', at=[x, y + .35, z])
                 assert ground['hit'] and .06 < y - ground['height'] < .4, (dog, ground)
                 assert dog['max_speed'] < .04 and dog['pose_error'] < .015, dog
+                head = dog['head']
+                assert head['mesh_points'] >= 20 and head['pitch'] <= 34, dog
+                for point in (head['lowest'], head['muzzle']):
+                    floor = game.call('world.ground', at=[point[0], point[1] + .35, point[2]])
+                    assert floor['hit'] and point[1] >= floor['height'] - .008, (point, floor, dog)
                 return dog
             time.sleep(.1)
         raise AssertionError(('Dog did not settle', tracked()))
