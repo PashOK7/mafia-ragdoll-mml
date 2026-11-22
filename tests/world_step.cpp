@@ -159,6 +159,45 @@ static bool SharedBarrierTest() {
     return valid;
 }
 
+// An ordinary off-centre bumper contact against a body resting on the ground.
+static bool GroundedBodyCarTest() {
+    using namespace JPH;
+    auto &bodies = jolt_world::Bodies();
+    BodyCreationSettings floor(new BoxShape(Vec3(2.f,.1f,3.f)), RVec3(12,9.13f,1.7f),
+        Quat::sIdentity(), EMotionType::Static, jolt_world::kStatic);
+    floor.mFriction = .9f;
+    const auto ground = bodies.CreateAndAddBody(floor, EActivation::DontActivate);
+    BodyCreationSettings segment(new SphereShape(.24f), RVec3(12.65f,9.47f,1.78f),
+        Quat::sIdentity(), EMotionType::Dynamic, jolt_world::kDynamic);
+    segment.mOverrideMassProperties = EOverrideMassProperties::CalculateInertia;
+    segment.mMassPropertiesOverride.mMass = 28.f;
+    segment.mFriction = .9f;
+    const auto body = bodies.CreateAndAddBody(segment, EActivation::Activate);
+    smoke::Mover car;
+    car.kind = smoke::Mover::BOX; car.key = &car; car.mass = 950;
+    car.h = {.8f,.48f,1.35f}; car.c = {12,10,0};
+    car.ax[0] = {1,0,0}; car.ax[1] = {0,1,0}; car.ax[2] = {0,0,1};
+    constexpr float dt = 1.f / 120;
+    jolt_world::Step(dt, {car}, nullptr);
+    float lift = 0, turn = 0;
+    for (int i = 0; i < 12; ++i) {
+        car.c.z += 8.f * dt;
+        jolt_world::Step(dt, {car}, nullptr);
+        for (const auto &kick : jolt_world::CarKicks()) {
+            if (kick.car != &car) continue;
+            lift = std::max(lift, kick.dv.y);
+            turn = std::max(turn, Len(kick.dw));
+        }
+    }
+    const float travel = bodies.GetPosition(body).GetZ() - 1.78f;
+    std::printf("Grounded body contact: car lift %.3f m/s, turn %.3f rad/s, body travel %.3f m\n", lift, turn, travel);
+    bodies.RemoveBody(body);
+    bodies.DestroyBody(body);
+    bodies.RemoveBody(ground);
+    bodies.DestroyBody(ground);
+    return lift > 0 && lift < .18f && turn > 0 && turn < .32f && travel > .4f;
+}
+
 int main() {
     static MmlMeshPiece input[2]{};
     static MmlShape slabs[3]{};
@@ -224,6 +263,7 @@ int main() {
         std::puts("FAIL: shared physics must pass pedestrian barriers and keep walls and floors");
         return 1;
     }
+    if (!GroundedBodyCarTest()) return 1;
     smoke::Mover car;
     car.kind = smoke::Mover::BOX; car.key = &car; car.mass = 1200;
     car.h = {1,.5f,2}; car.c = {0,10,0};

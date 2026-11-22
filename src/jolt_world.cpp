@@ -245,20 +245,29 @@ private:
         s.mCombinedFriction = 0.8f;   // rubber on cloth
 
     }
-    // A driven car (kCarBody) touching a body: noted for CarContacts.
-    static void DrivenCarContact(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m, const JPH::ContactSettings &s) {
+    // A driven car (kCarBody) touching a body: tune the contact and record it for CarContacts.
+    static void DrivenCarContact(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m, JPH::ContactSettings &s) {
         bool carA = a.GetObjectLayer() == kCarBody, carB = b.GetObjectLayer() == kCarBody;
         if (carA == carB) return;
         const JPH::Body &car = carA ? a : b;
         auto owner = g_carOfBody.find(car.GetID().GetIndexAndSequenceNumber());
         if (owner == g_carOfBody.end()) return;
         const JPH::Body &other = carA ? b : a;
-        if (!s.mIsSensor && other.GetObjectLayer() == kDynamic) NoteCarReaction(owner->second);
+        const bool solidBody = !s.mIsSensor && other.GetObjectLayer() == kDynamic;
+        if (solidBody) {
+            // A rigid segment caught between a tyre and the road can lever the
+            // proxy upwards. Keep body displacement and give back less heave and
+            // roll to the native chassis. The tyre can still roll over the body.
+            (carA ? s.mInvMassScale1 : s.mInvMassScale2) *= .25f;
+            (carA ? s.mInvInertiaScale1 : s.mInvInertiaScale2) *= .15f;
+            s.mCombinedFriction = std::min(s.mCombinedFriction, .45f);
+            NoteCarReaction(owner->second);
+        }
         JPH::Vec3 n = carA ? m.mWorldSpaceNormal : -m.mWorldSpaceNormal;   // from the car to the body
         const auto sub=carA ? m.mSubShapeID1 : m.mSubShapeID2;
         const uint64_t wheel=car.GetShape()->GetSubShapeUserData(sub);
         // Support is independent of diagnostic contact limits and compound part ordering.
-        if (!s.mIsSensor && other.GetObjectLayer() == kDynamic && n.GetY() < -0.5f) {
+        if (solidBody && n.GetY() < -0.5f) {
             if (wheel > 0 && wheel <= 32) g_wheelSupport[owner->second] |= 1u << (wheel - 1);
         }
         if (g_carContacts.size() >= 64) { ++g_carContactsDropped; return; }
