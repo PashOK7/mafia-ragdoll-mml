@@ -1001,3 +1001,9 @@ The common scenery importer now skips upright native material-33 slabs before an
 The standalone world fixture imported an invisible barrier, an ordinary solid wall and a floor with the barrier's material. The thin rigid body and both articulated-body shape and layer cases crossed the barrier and stopped at the solid wall. The floor remained present. The native tests and binary backups are in `../MafiaModLoader/build/shared-barriers-0146/`.
 
 The full dog and headwear suites passed in each build. Both `metro5` station runs retained native ray hits against the barriers and kept the ragdoll aboard through the entry and exit. The first 1.0 attempt timed out before the native passenger roster populated. The retry passed. The DLL with SHA-256 `5b5e514c70010620b93bfddba0028243be603f33c483e2fcdea86d5fee508c3c` is active in the owner's game. Both labs were closed and their previous startup flags restored.
+
+## 2026-11-22 — Live occupants in an exploded car
+
+Both labs reproduced visible roof penetration on 0.1.46 when the native explosion killed two initially live occupants of a Bolt-Thrower. With the mod unloaded, the charred driver and passenger stayed in their native death poses inside the wreck in the same view. The engine keeps the actor and model root, replaces the skeleton with the charred model and parents the root to the wreck after the generic explosion callback. The next tick adopts both bodies using the last pose snapshot. That snapshot supplies stale bone handles along with the pose values, and both labs reported a refused write to an invalid LS3D frame.
+
+The first-frame handoff needs the charred skeleton's current bindings and a validated pose in the wreck's space. This investigation changed documentation only. See [the engine notes](../../MafiaModLoader/knowledge/notes/car-explosion-live-occupants-20261122.md) and `../MafiaModLoader/build/car-explosion-live-occupants-20261122/` for the A/B captures and sampled state.
