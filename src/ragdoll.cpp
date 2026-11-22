@@ -28,6 +28,7 @@ QuatMakeFn QuatMake() {
 }
 
 void ReadPose(Ragdoll::PoseSnap *pose) {
+    pose->parent = game::at<void *>(pose->frames[19], game::kFrameParent);
     for (int i = 0; i < 20; ++i) {
         const float *m = game::WorldMatrix(pose->frames[i]);
         pose->rot[i] = M3::FromWorld(m);
@@ -210,6 +211,10 @@ void Ragdoll::Setup(const V3 *worldPts, const V3 &fwd, const M3 *rot20) {
     MakeBody(B_LFOOT, pts[LANKLE], pts[LTOE], rot20 ? rot20[5].r[1] : pts[LKNEE] - pts[LANKLE], 0.045f, 1.2f);
 }
 
+bool Ragdoll::PoseSnap::SameBinding(const PoseSnap &other) const {
+    return parent == other.parent && std::equal(std::begin(frames), std::end(frames), std::begin(other.frames));
+}
+
 bool Ragdoll::Snapshot(void *model, const V3 *dirIn, PoseSnap *out, std::string *err) {
     if (!model) { *err = "no model frame"; return false; }
     static const char *names[] = {"r_thigh", "r_shin", "r_foot", "l_thigh", "l_shin", "l_foot", "back1", "back2", "back3",
@@ -260,10 +265,7 @@ void Ragdoll::PointsFromPose(const M3 *rot, const V3 *org, V3 *pts) {
     leg(LHIP, LKNEE, LANKLE, LTOE, LTH, LSH, LFT);
 }
 
-bool Ragdoll::BindClonedModel(void *clone) {
-    PoseSnap next{};
-    std::string error;
-    if (!Snapshot(clone, nullptr, &next, &error)) return false;
+bool Ragdoll::RebindModel(void *newModel, const PoseSnap &next) {
     for (const auto &link : bones)
         if (std::find(std::begin(frames), std::end(frames), link.frame) == std::end(frames)) return false;
     for (auto &link : bones) {
@@ -274,9 +276,10 @@ bool Ragdoll::BindClonedModel(void *clone) {
     std::copy(std::begin(next.frames), std::end(next.frames), frames);
     rootFrame = frames[19];
     pelvisFrame = frames[18];
-    model = clone;
-    anim = {};
-    animSerial = 0;
+    model = newModel;
+    headwearChecked = false;
+    headwearFrame = nullptr;
+    hatFit = {};
     restWrites = 0;
     shapeAtRest = false;
     return true;
@@ -351,27 +354,21 @@ V3 Ragdoll::ClosestToLine(const V3 &a, const V3 &b) const {
     return at;
 }
 
-bool Ragdoll::Init(void *key, void *mdl, const V3 *dir, std::string *err, const V3 *prevPts, float prevDt, const PoseSnap *start) {
+bool Ragdoll::Init(void *key, void *mdl, const PoseSnap &live, std::string *err, const PoseSnap *start) {
     actor = key;
     model = mdl;
     if (!QuatMake()) { *err = "S_quat::Make not found in LS3DF.dll"; return false; }
-    PoseSnap now;
-    if (!start) {
-        if (!Snapshot(model, dir, &now, err)) return false;
-        start = &now;
-    }
-    const PoseSnap &ps = *start;
-    void *const *f = ps.frames;
+    const PoseSnap &ps = start && live.SameBinding(*start) ? *start : live;
+    void *const *f = live.frames;
     enum { RTH, RSH, RFT, LTH, LSH, LFT, B1, B2, B3, NK, RCL, RAR, REL, RHA, LCL, LAR, LEL, LHA, PEL, ROOT };
     pelvisFrame = f[PEL];
     rootFrame = f[ROOT];
     for (int i = 0; i < 20; i++) frames[i] = f[i];
     if (!ReferencePose(model, &reference, err)) return false;
     Setup(ps.pts, ps.fwd, ps.rot);
-    SetMotionFrom(prevPts, prevDt);
 
     // Bone links, parent-first. Clavicles ride on the chest, hands on the forearms. The binding of each bone
-    // to its body comes from the same snapshot as the bodies themselves.
+    // to its body uses the initial transforms and the live skeleton.
     struct { int fi; int b; const char *name; } links[] = {
         {PEL, B_PELVIS, "pelvis"}, {B1, B_ABDOMEN, "back1"}, {B2, B_CHESTLOW, "back2"}, {B3, B_CHEST, "back3"},
         {NK, B_HEAD, "neck"}, {RCL, B_CHEST, "r_shoulder"}, {RAR, B_RUARM, "r_arm"}, {REL, B_RFARM, "r_elbow"},

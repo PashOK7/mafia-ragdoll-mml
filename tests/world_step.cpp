@@ -74,10 +74,10 @@ static bool SwingTest(bool hinge, float scale, float dt) {
     return first > 2.f && (scale == 0 ? late > 3.f : late < .5f);
 }
 
-static bool RailPanelTest(bool solid) {
+static bool CabinPanelTest(bool solid, bool wreck = false) {
     using namespace JPH;
     std::vector<V3> surfaces{{-1,0,-6},{1,0,0},{1,0,-6}};
-    const std::vector<V3> wall{
+    std::vector<V3> wall{
         {-1,0,-5},{.25f,2,-5},{.25f,0,-5},
         {-1,0,-5},{-1,2,-5},{.25f,2,-5},
     };
@@ -90,32 +90,42 @@ static bool RailPanelTest(bool solid) {
     cabin.ax[2] = {0,0,1};
     cabin.hull = &surfaces;
     cabin.hullIsTriangles = cabin.cabinOnly = true;
-    if (solid) cabin.cabinPanels = &wall;
+    auto turn = [wreck](V3 v) { return wreck ? V3{-v.z, v.y, v.x} : v; };
+    for (V3 &v : surfaces) v = turn(v);
+    for (V3 &v : wall) v = turn(v);
+    const smoke::CabinInterior interior{turn({0, 1, -4.4f}), turn({0, .8f, -4.4f}),
+                                        turn({0, .6f, -4.4f}), turn({0, .4f, -4.4f})};
+    if (solid && wreck) cabin.wreckInterior = &interior;
+    if (solid && !wreck) cabin.cabinPanels = &wall;
     else surfaces.insert(surfaces.end(),wall.begin(),wall.end());
     auto &bodies = jolt_world::Bodies();
-    BodyCreationSettings limb(new SphereShape(.12f), RVec3(-.55f,11,-5.035f),
+    auto point = [&](V3 v) { v = turn(v); return RVec3(v.x, v.y + 10, v.z); };
+    BodyCreationSettings limb(new SphereShape(.12f), point({-.55f,1,-5.035f}),
         Quat::sIdentity(), EMotionType::Dynamic, jolt_world::kOccupant);
     limb.mGravityFactor = 0;
     limb.mMotionQuality = EMotionQuality::LinearCast;
     limb.mAllowSleeping = false;
     limb.mUserData = reinterpret_cast<uintptr_t>(&limb);
     const auto caught = bodies.CreateAndAddBody(limb, EActivation::Activate);
-    limb.mPosition = RVec3(.65f,11,-4.75f);
-    limb.mLinearVelocity = Vec3(0,0,-4);
+    limb.mPosition = point({.65f,1,-4.75f});
+    limb.mLinearVelocity = wreck ? Vec3(4,0,0) : Vec3(0,0,-4);
     const auto free = bodies.CreateAndAddBody(limb, EActivation::Activate);
     for (int i=0;i<40;++i) {
-        jolt_world::RequestCabin(&cabin,&limb,true);
+        jolt_world::RequestCabin(&cabin,&limb,!wreck);
         jolt_world::Step(1.f/120.f,{cabin},nullptr);
     }
-    const float recovered = bodies.GetPosition(caught).GetZ();
-    const float exited = bodies.GetPosition(free).GetZ();
+    auto depth = [&](BodyID id) {
+        const auto p = bodies.GetPosition(id);
+        return wreck ? -p.GetX() : p.GetZ();
+    };
+    const float recovered = depth(caught), exited = depth(free);
     for (auto id : {caught,free}) {
         bodies.RemoveBody(id);
         bodies.DestroyBody(id);
     }
     jolt_world::Step(1.f/120.f,{},nullptr);
-    std::printf("Rail %s settled at %.3f m; opening crossed to %.3f m\n",
-                solid ? "solid panel" : "two-sided mesh",recovered,exited);
+    std::printf("%s %s settled at %.3f m; opening crossed to %.3f m\n",
+                wreck ? "Wreck" : "Rail", solid ? "solid panel" : "two-sided mesh", recovered, exited);
     return (solid ? recovered > -4.93f : recovered < -5.f) && exited < -5.5f;
 }
 
@@ -185,8 +195,9 @@ int main() {
     }
     std::string error;
     if (!jolt_world::Start(nullptr, {}, &error)) { std::puts(error.c_str()); return 1; }
-    if (!RailPanelTest(false) || !RailPanelTest(true)) {
-        std::puts("FAIL: rail panel must return an overlapping limb inward and keep the gap open");
+    if (!CabinPanelTest(false) || !CabinPanelTest(true) ||
+        !CabinPanelTest(false, true) || !CabinPanelTest(true, true)) {
+        std::puts("FAIL: cabin panel must return an overlapping limb inward and keep the gap open");
         return 1;
     }
     for (int i=0;i<3;++i) {

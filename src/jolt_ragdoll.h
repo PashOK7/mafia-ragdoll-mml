@@ -31,6 +31,9 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt);
 float PullContacts(const Ragdoll *r, V3 (&contacts)[2], const char **part = nullptr);
 void FinishPull(Ragdoll *r);
 const void *SeatedCar(const Ragdoll *r);
+// Preserve a seated body's cabin-relative pose, motion and seat anchor when the engine replaces its carrier.
+bool TransferSeat(Ragdoll *r, void *car);
+void ForgetCarrier(const void *car);
 float GripDistance(const Ragdoll *r, V3 *contact = nullptr); // physical grip error in metres, or -1 when released
 // Nearest physical segment of this body on the shot ray, in world coordinates.
 int ShotPart(const Ragdoll *r, const V3 &from, const V3 &delta, V3 *point);

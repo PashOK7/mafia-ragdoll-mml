@@ -137,6 +137,7 @@ struct Entry {
     float age = 0;
     const void *car = nullptr;              // seated in this car's cabin
     JPH::Ref<JPH::Constraint> seat;         // the pelvis held to the seat
+    JPH::Ref<JPH::ConstraintSettings> seatAnchor; // local anchors retained across a carrier replacement
     const void *passCar = nullptr;          // born inside this car's hull (killed in its open door): passes through it
     float passClear = 0;                    // s since no part is inside that hull any more
     JPH::Ref<JPH::PointConstraint> grip;   // point on the driver's trunk reached by Tommy's hands
@@ -362,6 +363,7 @@ void ReleaseGrip(Entry &e, const Ragdoll *r, bool endAction = true) {
 
 void Unseat(Entry &e) {
     if (e.seat) { jolt_world::System()->RemoveConstraint(e.seat); e.seat = nullptr; }
+    e.seatAnchor = nullptr;
     if (e.car && e.ragdoll) {   // free now: an ordinary body again
         JPH::BodyInterface &bi = jolt_world::Bodies();
         for (int b = 0; b < BODIES; b++) bi.SetObjectLayer(e.ragdoll->GetBodyID(b), jolt_world::kDynamic);
@@ -539,12 +541,23 @@ void Seat(const Ragdoll *r, Entry &e) {
     if (cabin.IsInvalid() || e.seat) return;
     JPH::BodyInterface &bi = jolt_world::Bodies();
     JPH::BodyID pelvis = e.ragdoll->GetBodyID(PELVIS);
-    FitSeatBack(r, e, cabin);
     JPH::SixDOFConstraintSettings s;
-    s.mSpace = JPH::EConstraintSpace::WorldSpace;
-    s.mPosition1 = s.mPosition2 = bi.GetPosition(pelvis);
-    s.mAxisX1 = s.mAxisX2 = JPH::Vec3::sAxisX();
-    s.mAxisY1 = s.mAxisY2 = JPH::Vec3::sAxisY();
+    if (e.seatAnchor) {
+        const auto &saved = *static_cast<const JPH::SixDOFConstraintSettings *>(e.seatAnchor.GetPtr());
+        s.mSpace = saved.mSpace;
+        s.mPosition1 = saved.mPosition1 - bi.GetShape(cabin)->GetCenterOfMass();
+        s.mPosition2 = saved.mPosition2;
+        s.mAxisX1 = saved.mAxisX1;
+        s.mAxisY1 = saved.mAxisY1;
+        s.mAxisX2 = saved.mAxisX2;
+        s.mAxisY2 = saved.mAxisY2;
+    } else {
+        FitSeatBack(r, e, cabin);
+        s.mSpace = JPH::EConstraintSpace::WorldSpace;
+        s.mPosition1 = s.mPosition2 = bi.GetPosition(pelvis);
+        s.mAxisX1 = s.mAxisX2 = JPH::Vec3::sAxisX();
+        s.mAxisY1 = s.mAxisY2 = JPH::Vec3::sAxisY();
+    }
     // Soft in translation: a spring past the play, so a body pressed between the seat and the dashboard (both of
     // them as heavy as the car) yields instead of its joints being torn apart.
     for (JPH::SixDOFConstraintSettings::EAxis a : {JPH::SixDOFConstraintSettings::EAxis::TranslationX, JPH::SixDOFConstraintSettings::EAxis::TranslationY,
@@ -559,6 +572,7 @@ void Seat(const Ragdoll *r, Entry &e) {
     if (!c) return;
     jolt_world::System()->AddConstraint(c);
     e.seat = c;
+    e.seatAnchor = nullptr;
 }
 
 } // namespace
@@ -627,6 +641,15 @@ void FinishPull(Ragdoll *r) {
     ReleaseSeat(it->second); // The engine also vacates the seat if the player is interrupted.
     ReleaseGrip(it->second, r, false);
     jolt_world::ReleaseHolder(r);
+}
+
+void ForgetCarrier(const void *car) {
+    for (auto &[body, entry] : g_entries) {
+        if (entry.passCar == car) EndPass(entry);
+        if (entry.car != car) continue;
+        ReleaseGrip(entry, body);
+        Unseat(entry);
+    }
 }
 
 float PullContacts(const Ragdoll *r, V3 (&contacts)[2], const char **part) {
@@ -917,6 +940,56 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
 const void *SeatedCar(const Ragdoll *r) {
     auto it = g_entries.find(r);
     return it == g_entries.end() ? nullptr : it->second.car;
+}
+
+bool TransferSeat(Ragdoll *r, void *car) {
+    auto it = g_entries.find(r);
+    if (it == g_entries.end() || !it->second.car) return false;
+    Entry &e = it->second;
+    if (e.car == car) return true;
+    auto nativePose = [](void *vehicle, JPH::RMat44 &out) {
+        V3 p, axes[3];
+        if (!vehicles::Pose(vehicle, &p, axes)) return false;
+        const JPH::Mat44 turn(JPH::Vec4(J(axes[0]), 0), JPH::Vec4(J(axes[1]), 0),
+                              JPH::Vec4(J(axes[2]), 0), JPH::Vec4(0, 0, 0, 1));
+        out = JPH::RMat44::sRotationTranslation(turn.GetQuaternion().Normalized(), J(jolt_world::ToJolt(p)));
+        return true;
+    };
+    auto &bi = jolt_world::Bodies();
+    JPH::RMat44 from, to;
+    const auto source = jolt_world::CabinBody(e.car);
+    if (source.IsInvalid()) {
+        if (!nativePose(const_cast<void *>(e.car), from)) return false;
+    } else {
+        from = bi.GetWorldTransform(source);
+    }
+    if (!nativePose(car, to)) return false;
+    if (e.seat) {
+        e.seatAnchor = e.seat->GetConstraintSettings();
+        // Store the vehicle-local anchor. Different cabin shapes can have different centres of mass.
+        auto &saved = *static_cast<JPH::SixDOFConstraintSettings *>(e.seatAnchor.GetPtr());
+        saved.mPosition1 += bi.GetShape(source)->GetCenterOfMass();
+        jolt_world::System()->RemoveConstraint(e.seat);
+        e.seat = nullptr;
+    }
+    ReleaseGrip(e, r);
+    const auto map = to * from.InversedRotationTranslation();
+    const auto turn = map.GetQuaternion().Normalized();
+    for (int part = 0; part < BODIES; ++part) {
+        const auto id = e.ragdoll->GetBodyID(part);
+        const auto &b = JoltBridge::B(r, part);
+        const auto v = r->velocityEdited ? J(b.v) : e.holding ? e.heldV[part] : bi.GetLinearVelocity(id);
+        const auto w = r->velocityEdited ? J(b.w) : e.holding ? e.heldW[part] : bi.GetAngularVelocity(id);
+        const auto pose = map * bi.GetWorldTransform(id);
+        bi.SetPositionAndRotation(id, pose.GetTranslation(), pose.GetQuaternion(), JPH::EActivation::Activate);
+        bi.SetLinearAndAngularVelocity(id, turn * v, turn * w);
+        if (e.holding) { e.heldV[part] = turn * v; e.heldW[part] = turn * w; }
+    }
+    e.car = car;
+    r->velocityEdited = false;
+    jolt_world::RequestCabin(car, r);
+    ReadBack(r, e, 0.f);
+    return true;
 }
 
 float GripDistance(const Ragdoll *r, V3 *contact) {

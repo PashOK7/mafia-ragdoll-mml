@@ -49,6 +49,8 @@ into the folder containing Game.exe. [Download the latest release](https://githu
   ribs, waist, hips or upper thigh, depending on what he can reach in the driver's current pose. He starts pulling
   once both hands reach the surface and keeps the same two contact points until he lets go.
   The legs follow under their own weight, and the body stays in the street when the car leaves.
+  After a car explosion the native charred skeleton takes over. Bodies already simulated in a native seat
+  keep their pose, motion and seat anchor in the replacement wreck.
 - **The ragdoll camera.** While the player himself is a ragdoll and while he gets up, the camera circles his body:
   the mouse turns it round him, the wheel brings it nearer or further, and it keeps out of walls and cars; it blends
   back into the game's camera once he is up.
@@ -99,7 +101,7 @@ The same keys are in `mod/config.json` (the defaults); what is changed in the ga
 ## To do
 
 - Add ragdoll physics for dogs.
-- Apply ragdoll physics to bodies already inside a car when it explodes.
+- Detect bodies loose in an exploding car's cabin for charring.
 
 ## Cost
 

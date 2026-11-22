@@ -62,6 +62,7 @@ void OnEvent(const MmlEvent *ev, void *) {
     case MML_EVENT_BULLET_HIT: if (!loading && ev->bullet) dogs::Bullet(*ev->bullet); break;
     case MML_EVENT_ACTOR_DESTROYED: core::OnActorDestroyed(ev->actor); break;
     case MML_EVENT_EXPLOSION: if (ev->explosion && !loading) core::OnExplosion(*ev->explosion); break;
+    case MML_EVENT_CAR_EXPLODED: if (!loading) core::OnCarExploded(ev->actor); break;
     case MML_EVENT_MISSION_CLOSE: core::OnWorldReset("mission close"); break;
     case MML_EVENT_GAME_SAVING: dogs::Save(); break;
     case MML_EVENT_GAME_LOADED:
@@ -118,7 +119,7 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
                            MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT, MML_EVENT_BULLET_HIT,
                            MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_OPEN, MML_EVENT_MISSION_CLOSE,
                            MML_EVENT_GAME_SAVING, MML_EVENT_GAME_LOADED,
-                           MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION})
+                           MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION, MML_EVENT_CAR_EXPLODED})
         H->subscribe(M, t, OnEvent, nullptr);
     static const char *const kCommands[][2] = {
         {"state", "the ragdolls: each one's actor, kind, age, pelvis; the people tracked, the world, the counts"},

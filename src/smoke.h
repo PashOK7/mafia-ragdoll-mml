@@ -2,11 +2,14 @@
 // smoke is not a part of this mod): the static scenery's pieces (scenery.cpp, from the loader's scene_pieces) and
 // what the game moves (cars, people's body parts) as movers.
 #pragma once
+#include <array>
 #include <cstdint>
 #include <vector>
 #include "mathx.h"
 
 namespace smoke {
+
+using CabinInterior = std::array<V3, 4>;
 
 // A static object of the scene: a triangle mesh in its own pose.
 struct SceneryPiece {
@@ -45,6 +48,7 @@ struct Mover {
     bool hullAsMesh = false;
     bool cabinOnly = false; // private railway collision, in this carriage frame
     const std::vector<V3> *cabinPanels = nullptr; // rail end-wall triangles with solid backing
+    const CabinInterior *wreckInterior = nullptr; // cabin-local points used to orient a wreck's solid panels
 };
 
 } // namespace smoke

@@ -17,8 +17,10 @@
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
 #include <windows.h>
 #include <algorithm>
@@ -514,6 +516,7 @@ struct Kinematic {
     bool dynamic = false;
     bool still = false;   // a kinematic part left where it is (ApplyKinematics): its velocity zeroed once
     JPH::Vec3 vSet = JPH::Vec3::sZero(), wSet = JPH::Vec3::sZero();
+    bool backedWreck = false;
 };
 std::unordered_map<const void *, Kinematic> g_kinematic;   // by mover key
 unsigned g_tick;
@@ -753,27 +756,68 @@ JPH::RefConst<JPH::Shape> TwoSidedMesh(const smoke::Mover &m) {
     return r.IsValid() ? r.Get() : nullptr;
 }
 
+bool AddCabinPanel(JPH::StaticCompoundShapeSettings &cabin, const V3 *triangle, V3 outward) {
+    JPH::Vec3 points[6];
+    for (int j = 0; j < 3; ++j) {
+        points[j] = J(triangle[j] - outward * .025f);
+        points[j + 3] = J(triangle[j] + outward * .25f);
+    }
+    auto panel = JPH::ConvexHullShapeSettings(points, 6, .006f).Create();
+    if (!panel.IsValid()) return false;
+    cabin.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), panel.Get());
+    return true;
+}
+
 JPH::RefConst<JPH::Shape> CabinShape(const smoke::Mover &m) {
     auto surface = TwoSidedMesh(m);
-    if (!surface || !m.cabinPanels || m.cabinPanels->empty()) return surface;
+    if (!surface || (!m.wreckInterior && (!m.cabinPanels || m.cabinPanels->empty()))) return surface;
     JPH::StaticCompoundShapeSettings cabin;
-    cabin.AddShape(JPH::Vec3::sZero(),JPH::Quat::sIdentity(),surface);
-    const auto &panels = *m.cabinPanels;
-    for (std::size_t i=0; i<panels.size(); i+=3) {
-        const float direction = panels[i].z+panels[i+1].z+panels[i+2].z < 0.f ? -1.f : 1.f;
-        const V3 interior{0,0,-direction*.025f}, backing{0,0,direction*.25f};
-        JPH::Vec3 points[6];
-        for (int j=0;j<3;++j) {
-            points[j] = J(panels[i+j]+interior);
-            points[j+3] = J(panels[i+j]+backing);
+    if (m.cabinPanels) {
+        const auto &panels = *m.cabinPanels;
+        for (size_t i = 0; i < panels.size(); i += 3) {
+            const float direction = panels[i].z + panels[i + 1].z + panels[i + 2].z < 0.f ? -1.f : 1.f;
+            AddCabinPanel(cabin, &panels[i], {0, 0, direction});
         }
-        auto panel = JPH::ConvexHullShapeSettings(points,6,.006f).Create();
-        if (panel.IsValid()) cabin.AddShape(JPH::Vec3::sZero(),JPH::Quat::sIdentity(),panel.Get());
+    }
+    if (m.wreckInterior) {
+        const auto &triangles = *m.hull;
+        std::vector<V3> remaining;
+        remaining.reserve(triangles.size());
+        for (size_t i = 0; i + 2 < triangles.size(); i += 3) {
+            const V3 *t = &triangles[i];
+            const V3 normal = Norm(Cross(t[1] - t[0], t[2] - t[0]));
+            const V3 centre = (t[0] + t[1] + t[2]) * (1.f / 3.f);
+            // Only faces seen from the cabin can hold an occupant in. Preserve the
+            // surviving openings. A backed face is replaced so the old reverse face
+            // cannot hold a limb outside against the new solid.
+            const bool backed = std::any_of(m.wreckInterior->begin(), m.wreckInterior->end(), [&](V3 point) {
+                const V3 ray = centre - point;
+                const float facing = Dot(normal, ray);
+                JPH::RayCastResult hit;
+                return std::abs(facing) >= .025f &&
+                       surface->CastRay({J(point), J(ray * 1.02f)}, {}, hit) &&
+                       std::abs(1.f - hit.mFraction * 1.02f) * Len(ray) <= .01f &&
+                       AddCabinPanel(cabin, t, facing > 0 ? normal : -normal);
+            });
+            if (backed) continue;
+            remaining.insert(remaining.end(), t, t + 3);
+        }
+        if (remaining.size() != triangles.size()) {
+            smoke::Mover rest = m;
+            rest.hull = &remaining;
+            if (auto mesh = TwoSidedMesh(rest))
+                cabin.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), mesh);
+        } else {
+            cabin.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), surface);
+        }
+    } else {
+        cabin.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), surface);
     }
     auto shape = cabin.Create();
     if (shape.IsValid()) return shape.Get();
+    if (!m.cabinPanels) return surface;
     std::vector<V3> original = *m.hull;
-    original.insert(original.end(),panels.begin(),panels.end());
+    original.insert(original.end(), m.cabinPanels->begin(), m.cabinPanels->end());
     smoke::Mover fallback = m;
     fallback.hull = &original;
     return TwoSidedMesh(fallback);
@@ -787,11 +831,12 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
         if (!PoseOf(m, &pos, &rot, &version)) continue;
         version = m.shapeVersion; // Cabin geometry is always a mesh. Keep its source triangle revision.
         auto it = g_cabins.find(m.key);
-        if (it != g_cabins.end() && it->second.version != version) {
+        if (it != g_cabins.end() && (it->second.version != version || it->second.backedWreck != bool(m.wreckInterior))) {
             // Keep the seat constraint attached to the same cabin body as a door opens.
             if (auto shape = CabinShape(m)) {
                 bi.SetShape(it->second.body, shape, false, JPH::EActivation::Activate);
                 it->second.version = version;
+                it->second.backedWreck = m.wreckInterior != nullptr;
             }
         }
         if (it == g_cabins.end()) {
@@ -810,6 +855,7 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
             JPH::BodyID id = bi.CreateAndAddBody(s, JPH::EActivation::Activate);
             if (id.IsInvalid()) continue;
             g_cabins[m.key] = Kinematic{id, version, g_tick, pos};
+            g_cabins[m.key].backedWreck = m.wreckInterior != nullptr;
             continue;
         }
         Kinematic &k = it->second;
@@ -1277,6 +1323,16 @@ std::string DescribeCar(const void *car) {
     }
     std::string s = Fmt("jolt car %p: %s, mass %.0f kg, origin at height %.2f (world)", car, k.dynamic ? "dynamic" : "kinematic",
                         invM > 0 ? 1.0f / invM : 0.0f, (float)p.GetY() + g_w->origin.y);
+    if (auto id = CabinBody(car); !id.IsInvalid()) {
+        auto cabin = bi.GetShape(id);
+        if (cabin->GetSubType() == JPH::EShapeSubType::StaticCompound) {
+            const auto &compound = *static_cast<const JPH::StaticCompoundShape *>(cabin.GetPtr());
+            unsigned panels = 0;
+            for (JPH::uint i = 0; i < compound.GetNumSubShapes(); ++i)
+                panels += compound.GetSubShape(i).mShape->GetSubType() == JPH::EShapeSubType::ConvexHull;
+            s += Fmt("\n  cabin: %u solid panels", panels);
+        }
+    }
     JPH::Vec3 com = shape->GetCenterOfMass();
     if (shape->GetSubType() != JPH::EShapeSubType::StaticCompound) {
         JPH::AABox b = shape->GetLocalBounds();

@@ -58,12 +58,18 @@ public:
     // prevPts/prevDt: an earlier pose of the same human (world points) and the time since, so the ragdoll
     // starts with the motion the animation had (standing still, running, falling...).
     // A consistent picture of a pose: skeleton points plus the world rotation and origin of the 20 frames.
-    struct PoseSnap { V3 pts[COUNT]; V3 fwd; M3 rot[20]; V3 org[20]; void *frames[20]; };
+    struct PoseSnap {
+        V3 pts[COUNT];
+        V3 fwd;
+        M3 rot[20];
+        V3 org[20];
+        void *frames[20];
+        void *parent; // the root frame's parent, which can change even when the root survives
+        bool SameBinding(const PoseSnap &other) const;
+    };
     static bool Snapshot(void *model, const V3 *dir, PoseSnap *out, std::string *err);
-    // model: the human model frame; dir: the facing (a C_human's +0x30), or null to take the model's z axis.
-    // start: the pose to build the ragdoll from (null = the pose now); prevPts/prevDt: an earlier pose for motion.
-    bool Init(void *key, void *model, const V3 *dir, std::string *err, const V3 *prevPts = nullptr, float prevDt = 0,
-              const PoseSnap *start = nullptr);
+    // Bind to the freshly resolved frames in live. An earlier pose can supply the initial transforms.
+    bool Init(void *key, void *model, const PoseSnap &live, std::string *err, const PoseSnap *start = nullptr);
     // Closest point of the body to a line (a bullet's path), world.
     V3 ClosestToLine(const V3 &a, const V3 &b) const;
     // Skeleton points and helper tips follow the complete bone frames; fwd remains an informational heading.
@@ -71,7 +77,8 @@ public:
     PoseSnap reference{};   // the model file's rest skeleton, independent of the animation at death
     // The pose the model's frames hold now (the 20 frames found at Init), facing the way the physical pelvis does.
     bool SnapshotNow(PoseSnap *out) const;
-    bool BindClonedModel(void *clone); // same skeleton duplicated by the game's traffic carjack
+    // Attach a replacement of the same rig to the existing physical body.
+    bool RebindModel(void *model, const PoseSnap &live);
     // The pose the bodies hold now, as frames 0..18 of `frames` (PoseSnap's order; 18 the pelvis): each one's world
     // rotation (rows) and origin, from the bodies themselves (what Apply writes, without the game's matrices).
     void PhysicalPose(M3 *rot19, V3 *org19) const;

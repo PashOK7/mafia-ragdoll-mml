@@ -1007,3 +1007,15 @@ The full dog and headwear suites passed in each build. Both `metro5` station run
 Both labs reproduced visible roof penetration on 0.1.46 when the native explosion killed two initially live occupants of a Bolt-Thrower. With the mod unloaded, the charred driver and passenger stayed in their native death poses inside the wreck in the same view. The engine keeps the actor and model root, replaces the skeleton with the charred model and parents the root to the wreck after the generic explosion callback. The next tick adopts both bodies using the last pose snapshot. That snapshot supplies stale bone handles along with the pose values, and both labs reported a refused write to an invalid LS3D frame.
 
 The first-frame handoff needs the charred skeleton's current bindings and a validated pose in the wreck's space. This investigation changed documentation only. See [the engine notes](../../MafiaModLoader/knowledge/notes/car-explosion-live-occupants-20261122.md) and `../MafiaModLoader/build/car-explosion-live-occupants-20261122/` for the A/B captures and sampled state.
+
+## 2026-11-22 — Charred occupants retain their physical pose (0.1.47)
+
+Human ragdolls now resolve their live skeleton before creation. A change of bone frames or root parent invalidates both the prior pose and its velocity history, even when the model root address survives. Live occupants move from the native charred death pose into the wreck's physics. Existing ragdolls in native seats keep their body serial, pose and accumulated blast velocity. On the car explosion completion event the port binds their new bones and transfers the existing parts and seat anchor into the replacement wreck's space.
+
+The wreck cabin backs the visible roof and wall panels with solid collision on their outward side. Coverage comes from the stock wreck triangles viewed from the seating area. The side-wall fixture moved an overlapping part from 10.0 cm outside the thin surface to 12.5 cm inside the solid panel. The neighbouring opening remained passable.
+
+Both builds passed all three front-seat scenarios. A Bolt-Thrower started with two live occupants and then with one already dead driver. A Masseur Taxi started with an already dead passenger. The fixture checks the charred skeleton, the new parent, continuity of the existing body serial, physical head position, rendered bone error and the presence of solid cabin panels. The tested DLL hash is `ddf65306d9a137f5cdd4abe95e2943ad785a9abfeb6bdd7f7c1f0a2a5fab8661`. Evidence and backups are in `../MafiaModLoader/build/car-explosion-handover-0147/`.
+
+The loader's blast recovery and carjack regression passed 26 checks per build. The verified mod is installed in the closed Mafia10Fixes copy and will load when the owner next starts it.
+
+The final taxi captures retain a small sill-edge artifact. The side-wall fixture measures an overlapping physical shape, so it does not cover visible skin at that seam. Loose corpses without a native seat are outside this handover.

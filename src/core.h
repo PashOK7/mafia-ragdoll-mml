@@ -15,6 +15,7 @@ void RenderEnd();                     // RENDER_END: return the railway passenge
 void OnHit(const MmlEvent &ev);       // HUMAN_HIT, PEDESTRIAN_HIT
 void OnActorDestroyed(void *actor);
 void OnExplosion(const MmlExplosion &x);   // EXPLOSION: the blast throws the bodies near it
+void OnCarExploded(void *car);              // the native wreck and charred occupant models are ready
 void OnWorldReset(const char *reason); // mission close or a save load that can reuse the mission
 void Settings();                      // the settings read again (config.json, the game's Options > Mods)
 std::string State();                  // the `state` command's reply (json)
