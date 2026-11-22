@@ -11,6 +11,7 @@ void Stop();                          // (its unload) every ragdoll dropped, the
 void Tick(float dt);                  // MISSION_TICK: after the game's world moved
 void Render();                        // RENDER_BEGIN: the bones written over the game's animation
 void Rendered();                      // RENDER_WORLD: observe the pose after the actual world drawing
+void RenderEnd();                     // RENDER_END: return the railway passengers' frames to the game
 void OnHit(const MmlEvent &ev);       // HUMAN_HIT, PEDESTRIAN_HIT
 void OnActorDestroyed(void *actor);
 void OnExplosion(const MmlExplosion &x);   // EXPLOSION: the blast throws the bodies near it

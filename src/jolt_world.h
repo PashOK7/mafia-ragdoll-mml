@@ -126,6 +126,7 @@ struct CarContactInfo {
     const void *car; int part; V3 at, n; float depth;
     uintptr_t owner; uint32_t body; bool sensor;
     V3 carOrigin, carRight, carForward, velocity;
+    unsigned wheel; // native wheel index plus one, or zero for other sub-shapes
 };
 const std::vector<CarContactInfo> &CarContacts();
 unsigned CarContactsDropped();   // diagnostic limit reached in the last step; absence is then inconclusive

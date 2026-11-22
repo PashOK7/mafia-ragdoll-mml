@@ -55,7 +55,7 @@ void OnEvent(const MmlEvent *ev, void *) {
             dogs::DrawPose();
         }
         break;
-    case MML_EVENT_RENDER_END: dogs::RestorePose(); break;
+    case MML_EVENT_RENDER_END: dogs::RestorePose(); core::RenderEnd(); break;
     case MML_EVENT_RENDER_WORLD: if (ev->world && !loading) core::Rendered(); break;
     case MML_EVENT_HUMAN_HIT:
     case MML_EVENT_PEDESTRIAN_HIT: if (!loading) core::OnHit(*ev); break;
@@ -63,7 +63,11 @@ void OnEvent(const MmlEvent *ev, void *) {
     case MML_EVENT_ACTOR_DESTROYED: core::OnActorDestroyed(ev->actor); break;
     case MML_EVENT_EXPLOSION: if (ev->explosion && !loading) core::OnExplosion(*ev->explosion); break;
     case MML_EVENT_MISSION_CLOSE: core::OnWorldReset("mission close"); break;
-    case MML_EVENT_GAME_LOADED: core::OnWorldReset("game loaded"); break;
+    case MML_EVENT_GAME_SAVING: dogs::Save(); break;
+    case MML_EVENT_GAME_LOADED:
+        core::OnWorldReset("game loaded");
+        dogs::Load();
+        break;
     case MML_EVENT_CONFIG_CHANGED: core::Settings(); break;
     default: break;
     }
@@ -111,7 +115,8 @@ MML_EXPORT int mml_mod_load(const MmlHost *host, MmlMod *m) {
     }
     for (MmlEventType t : {MML_EVENT_MISSION_TICK, MML_EVENT_RENDER_BEGIN, MML_EVENT_RENDER_WORLD, MML_EVENT_RENDER_END,
                            MML_EVENT_HUMAN_HIT, MML_EVENT_PEDESTRIAN_HIT, MML_EVENT_BULLET_HIT,
-                           MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_OPEN, MML_EVENT_MISSION_CLOSE, MML_EVENT_GAME_LOADED,
+                           MML_EVENT_ACTOR_DESTROYED, MML_EVENT_MISSION_OPEN, MML_EVENT_MISSION_CLOSE,
+                           MML_EVENT_GAME_SAVING, MML_EVENT_GAME_LOADED,
                            MML_EVENT_CONFIG_CHANGED, MML_EVENT_EXPLOSION})
         H->subscribe(M, t, OnEvent, nullptr);
     static const char *const kCommands[][2] = {

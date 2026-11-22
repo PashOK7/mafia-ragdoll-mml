@@ -943,3 +943,23 @@ Both Motel Clark fixtures now fire into a sleeping dog after the original lethal
 Nonlethal hits still use the game's dog reactions. The mod has no quadruped knockdown and get-up transition. Dog ragdolls do not yet receive the mod's explosion impulse, do not have a blood or impact effect for a shot resolved on the corpse, and do not serialize the individual simulated transforms. The validated rigs are `pes` and `pes03`. The direct native car callback exercised the death path. Controlled wheel contact, buoyancy and a shotgun burst against a dog corpse still need native scenarios.
 
 Both full native headwear suites passed, including shots intercepted by loose hats and eight-pellet shots at wearers. The tested DLL SHA-256 is `280b366a6162123ed9028145fa104a125bbb1d52fb84cbda8c5d8b5b986f415f`. The owner copy loaded the same DLL as generation 2 in PID 11492 and remained paused in `mise17-vezeni`. The labs were closed and their original startup flags were restored.
+
+## 2026-11-22 — Dog impacts, save poses and railway motion (0.1.41)
+
+Strong nonlethal hits retain the game's damage and enter physics. The engine's dog locomotion is held while the body settles. On dry support the body blends into the native stand clip. A living physical dog still takes native damage at the resolved segment. The death handoff follows health so a stale AI action cannot bring a dead body back to animation.
+
+Physical dogs use the shared radial blast profile and the native blood effect at the shot contact, respecting the mission gore setting. The save companion carries the birth pose, all 18 part transforms and velocities, and sleep status. Actor matching uses model file, frame name and saved engine position. Native saves without the companion use the game pose. The fixture displaced a body with a real explosion, saved, and restored it asleep at its saved centre.
+
+Both builds exercised nonlethal recovery, explosion reach, native blood and save restoration. A real car in the city struck a native dog and its driven tyres touched the physical body. Both stock model files, `pes02.4ds` and `pes03.4ds`, floated in the Little Italy river on both builds. The submerged trunk supports the lighter limbs.
+
+Railway riders start with native speed along their carriage axis. Their temporary bone pose is restored before native simulation, and street scenery no longer delays physics inside the carriage. In both builds the native tram and train accelerated and braked with a ragdoll held in the cabin. A/B with the same death and without the mod gave final speeds within 0.06 m/s in the tested cases.
+
+The owner received 0.1.41 (SHA-256 `60620d19e899d5fc202bf979941c2a6245c7fd29eb685182836d85743800786e`) by hot reload while paused in prison. Regression evidence is in `../MafiaModLoader/build/ragdoll-completion-0141/`.
+
+## 2026-11-22 — Stronger dog bullet reactions (0.1.42)
+
+Dog bullet impulses are multiplied by six when a fatal hit starts physics and when the bullet hits an existing rig. Most of the force moves the whole body. A shorter contact lever and a local velocity limit protect the struck joint. The accumulated budget of 36 N s per physics step limits point-blank pellets without dropping their hits or blood effects. Light nonlethal reactions, blasts and car contacts keep their own response.
+
+The native dog suite passed on 1.0 and 1.2. Both labs measured 34.8 N s at the lethal handoff, 31.8 N s on an already resting body, and eight resolved shotgun pellets stopped at the 36 N s budget. The repeated train and tram motion suite passed. In the 1.0 tram repeat the native route controller chose different braking states between the two runs (9 versus 7 and 0), with an observed final difference of 0.56 m/s. Evidence is in `../MafiaModLoader/build/ragdoll-dog-shots-0142/`.
+
+The owner's copy has 0.1.42 installed for the next launch. SHA-256 of the tested and installed DLL is `82fab7b29c3383ff897adba0f2348af85d6d9059fcf375ce3d4c061aaa774ee5`. Both labs were closed and their original startup flags restored.

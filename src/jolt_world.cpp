@@ -220,10 +220,10 @@ private:
         const JPH::Body &other = carA ? b : a;
         if (!s.mIsSensor && other.GetObjectLayer() == kDynamic) NoteCarReaction(owner->second);
         JPH::Vec3 n = carA ? m.mWorldSpaceNormal : -m.mWorldSpaceNormal;   // from the car to the body
+        const auto sub=carA ? m.mSubShapeID1 : m.mSubShapeID2;
+        const uint64_t wheel=car.GetShape()->GetSubShapeUserData(sub);
         // Support is independent of diagnostic contact limits and compound part ordering.
         if (!s.mIsSensor && other.GetObjectLayer() == kDynamic && n.GetY() < -0.5f) {
-            const auto sub = carA ? m.mSubShapeID1 : m.mSubShapeID2;
-            const uint64_t wheel = car.GetShape()->GetSubShapeUserData(sub);
             if (wheel > 0 && wheel <= 32) g_wheelSupport[owner->second] |= 1u << (wheel - 1);
         }
         if (g_carContacts.size() >= 64) { ++g_carContactsDropped; return; }
@@ -235,7 +235,8 @@ private:
                                                V3{n.GetX(), n.GetY(), n.GetZ()}, m.mPenetrationDepth,
                                                (uintptr_t)other.GetUserData(), other.GetID().GetIndexAndSequenceNumber(), s.mIsSensor,
                                                V3{(float)origin.GetX(), (float)origin.GetY(), (float)origin.GetZ()} + OriginNow(),
-                                               F(rotation * JPH::Vec3::sAxisX()), F(rotation * JPH::Vec3::sAxisZ()), F(other.GetLinearVelocity())});
+                                               F(rotation * JPH::Vec3::sAxisX()), F(rotation * JPH::Vec3::sAxisZ()), F(other.GetLinearVelocity()),
+                                               wheel<=32 ? (unsigned)wheel : 0u});
     }
     // A living person's capsule touching a dynamic body: no hard contact, remembered for ApplyPersonPushes.
     static void PersonContact(const JPH::Body &a, const JPH::Body &b, const JPH::ContactManifold &m, JPH::ContactSettings &s) {

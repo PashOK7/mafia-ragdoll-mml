@@ -2,6 +2,7 @@
 #include "anatomy.h"
 #include "game.h"
 #include "collision.h"
+#include "impact.h"
 #include "mod.h"
 #include "model_skeleton.h"
 #include <windows.h>
@@ -441,15 +442,11 @@ void Ragdoll::BulletCapsules(MmlCapsule *caps) const {
 }
 
 bool Ragdoll::Blast(const V3 &centre, float radius, float speed, float lift) {
-    if (radius <= 0) return false;
     bool any = false;
     for (auto &bd : body) {
-        V3 off = bd.x + origin - centre;
-        float d = Len(off);
-        if (d >= radius) continue;
-        float w = std::pow(1.0f - d / radius, 1.5f);
-        V3 away = Norm(Norm(off, {0, 1, 0}) + V3{0, lift, 0}, {0, 1, 0});
-        bd.v += away * (speed * w);
+        const V3 delta=BlastVelocity(bd.x+origin,centre,radius,speed,lift);
+        if (!(Dot(delta,delta)>0.f)) continue;
+        bd.v += delta;
         any = true;
     }
     if (!any) return false;

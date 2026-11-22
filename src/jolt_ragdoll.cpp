@@ -1105,8 +1105,9 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn, const void *struckB
         }
         if (hull && hull == struckBy) RLOG("ragdoll %p: striking car %p stays solid at initial contact", r->actor, hull);
     }
-    // Nothing to land on yet: held still until the static world around it comes (or 5 s, Step).
-    if (!jolt_world::StaticReady(GroundBox(r), GroundBox(r, true))) {
+    // Rail riders have a supplied carriage mesh in the first step. Waiting
+    // on street scenery would pin them to world space while the carriage leaves.
+    if (!r->railOccupant && !jolt_world::StaticReady(GroundBox(r), GroundBox(r, true))) {
         JPH::BodyInterface &bi = jolt_world::Bodies();
         for (int b = 0; b < BODIES; b++) {
             JPH::BodyID id = rag->GetBodyID(b);

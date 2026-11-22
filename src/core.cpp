@@ -965,8 +965,36 @@ struct Occupant {
     bool rail{}, driver{}, sampleDraw{};
     float drawnNeckError = -1;
     std::unique_ptr<Ragdoll> body;
+    struct LocalFrame { Q rotation; V3 position; };
+    std::array<LocalFrame,20> nativePose{};
+    bool posedForDraw{};
 };
 std::vector<Occupant> g_occupants;
+
+void ApplyRailPose(Occupant &o) {
+    if (o.posedForDraw) return;
+    void *const *frames=o.body->Frames();
+    for (int i=0;i<20;++i) {
+        const auto *local=&game::at<float>(frames[i],game::kFrameLocal);
+        game::WorldMatrix(frames[i]);
+        o.nativePose[i]={QuatOf(M3::FromWorld(local)),{local[12],local[13],local[14]}};
+    }
+    o.posedForDraw=true;
+    o.body->Apply();
+}
+
+void RestoreRailPose(Occupant &o) {
+    if (!o.posedForDraw) return;
+    o.posedForDraw=false;
+    if (g_freed.count(o.model) || o.body->UsesAny(g_freed)) return;
+    void *const *frames=o.body->Frames();
+    for (int i=0;i<20;++i) {
+        game::SetLocalRotation(frames[i],o.nativePose[i].rotation);
+        game::SetLocalPosition(frames[i],o.nativePose[i].position);
+    }
+    using Update=void (__stdcall *)(void *);
+    reinterpret_cast<Update>((*reinterpret_cast<void ***>(o.model))[0x18/4])(o.model);
+}
 // Trailing carriages have separate model frames outside the railway actor. Keep
 // their visual triangles in node space and refit moved or hidden parts (doors).
 struct RailPart {
@@ -1101,7 +1129,7 @@ struct TransportShot {
 };
 thread_local TransportShot *g_transportShot;
 
-void StartOccupant(Occupant o) {
+void StartOccupant(Occupant o,const smoke::Mover *railMover=nullptr) {
     if (!g_cfg.enabled || !o.model || !game::Player() || !jolt_ragdoll::Enabled()) return;
     for (const auto &other : g_occupants) if (other.model == o.model) return;
     smoke::Mover carMover;
@@ -1113,9 +1141,19 @@ void StartOccupant(Occupant o) {
         return;
     }
     o.body->railOccupant = o.rail;
-    const auto track = g_carTracks.find(o.carrier);
-    if (track != g_carTracks.end() && g_tick - track->second.tick <= 2)
-        o.body->SetMotionFrom(nullptr, 0, &track->second.vel);
+    if (railMover) {
+        // Each carriage follows its own tangent through a curve. The game's
+        // speed at +D4 is the scalar used by C_railway::GetActorSpeed.
+        const float speed=game::at<float>(o.carrier,0xd4);
+        if (std::fabs(speed)<45.f) {
+            const V3 velocity=railMover->ax[2]*speed;
+            o.body->SetMotionFrom(nullptr,0,&velocity);
+        }
+    } else {
+        const auto track=g_carTracks.find(o.carrier);
+        if (track!=g_carTracks.end() && g_tick-track->second.tick<=2)
+            o.body->SetMotionFrom(nullptr,0,&track->second.vel);
+    }
     if (!jolt_ragdoll::Add(o.body.get(), &err, o.rail ? o.frame : o.carrier)) {
         LOG("occupant %p model %p physics: %s", o.carrier, o.model, err.c_str());
         return;
@@ -1263,8 +1301,8 @@ void PhysicsBulletStretch(MmlMidContext *ctx, void *) {
             headwear::BulletImpulse(hatBody,axis,hatPoint,damage);
             point=hatPoint;
         } else if (hitDog) {
-            // Human and dog bodies use the same shot setting with a mass-appropriate dog impulse.
-            dogs::HitBody(dogHit,axis,Momentum(damage,g_cfg.shot)*.0265f);
+            dogs::HitBody(dogHit,axis,Momentum(damage,g_cfg.shot),damage,
+                          game::at<void *>(shot,game::kShotShooter));
             point=dogHit.point;
         } else if (target) {
             const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
@@ -1356,7 +1394,7 @@ void RailDeath(MmlMidContext *ctx, void *) {
         Watch(o.frame);
         smoke::Mover mover;
         if (!RailMover(o, mover)) return;
-        StartOccupant(std::move(o));
+        StartOccupant(std::move(o),&mover);
     };
     Guarded(capture);
 }
@@ -1606,6 +1644,7 @@ void JoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
     OccupantMovers(movers);
     headwear::ApplyAirDrag(dt);
     jolt_ragdoll::Step(jolt, dt, movers, pl ? &pp : nullptr);
+    dogs::FinishStep();
 }
 bool SafeJoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
     auto f = [&] { JoltStep(jolt, dt); };
@@ -1999,8 +2038,16 @@ void TickBody(float dt) {
         }
     }
     for (auto &o : g_occupants) {
-        auto write = [&] { o.body->Apply(); };
-        if (Guarded(write) && joltOk) headwear::Advance(*o.body,dt);
+        auto write = [&] {
+            if (o.rail) ApplyRailPose(o);
+            else o.body->Apply();
+            if (joltOk) headwear::Advance(*o.body,dt);
+        };
+        Guarded(write);
+        if (o.rail) {
+            auto restore=[&] { RestoreRailPose(o); };
+            Guarded(restore);
+        }
     }
     headwear::FinishStep();
     TracePedestrians(TrajectoryStage::TickEnd);
@@ -2423,7 +2470,7 @@ void Render() {
     auto arms = [] { RestorePullArms(); };
     Guarded(arms);
     for (auto &o : g_occupants) {
-        auto write = [&] { o.body->Apply(); };
+        auto write = [&] { if (o.rail) ApplyRailPose(o); else o.body->Apply(); };
         Guarded(write);
     }
     TracePedestrians(TrajectoryStage::RenderBegin);
@@ -2455,6 +2502,13 @@ void Render() {
                 s.flags = MML_DRAW_ON_TOP;
                 H->draw_world(M, &s);
             }
+}
+
+void RenderEnd() {
+    for (auto &o:g_occupants) if (o.rail) {
+        auto restore=[&] { RestoreRailPose(o); };
+        Guarded(restore);
+    }
 }
 
 // Stage 1 is after the world's actual drawing, unlike RENDER_BEGIN's pose preparation.
@@ -2615,7 +2669,7 @@ void OnExplosion(const MmlExplosion &x) {
     V3 c{x.pos.x, x.pos.y, x.pos.z};
     float reach = std::max(x.radius, 1.0f) * 1.5f;
     float speed = std::min(12.0f * std::sqrt(std::max(x.damage, 0.0f) / 400.0f), 25.0f) * g_cfg.blast;
-    unsigned thrown = 0;
+    unsigned thrown = dogs::Blast(c,reach,speed,.35f);
     for (auto &r : g_ragdolls) thrown += r->Blast(c, reach, speed, 0.35f) ? 1 : 0;
     LOG("explosion at %.1f %.1f %.1f (radius %.1f, force %.0f): %u bodies thrown, %.1f m/s at its centre", c.x, c.y, c.z,
         x.radius, x.damage, thrown, speed);
@@ -2766,6 +2820,7 @@ uint32_t VehicleSupport(void *car, void *) {
 
 void Start() {
     headwear::Prepare();
+    dogs::Start();
     if (MML_HAS(H, vehicle_support_hook) && H->vehicle_support_hook) {
         if (!H->vehicle_support_hook(M, VehicleSupport, nullptr))
             LOG("vehicle wheel support: native usability integration unavailable");
@@ -2862,9 +2917,11 @@ std::string State() {
     for (auto &o : g_occupants) {
         o.sampleDraw = true;
         const auto p = o.body->BodyPos(Ragdoll::B_PELVIS), h = o.body->BodyPos(Ragdoll::B_HEAD);
-        occupants += Fmt("%s{\"body_serial\":%u,\"model\":\"0x%08X\",\"carrier\":\"0x%08X\",\"kind\":\"%s_%s\",\"carriage\":%d,\"in_cabin\":%s,\"drawn_neck_error\":%.4f,\"age\":%.3f,\"pelvis\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f]}",
+        const auto v=o.body->BodyVel(Ragdoll::B_PELVIS);
+        occupants += Fmt("%s{\"body_serial\":%u,\"model\":\"0x%08X\",\"carrier\":\"0x%08X\",\"kind\":\"%s_%s\",\"carriage\":%d,\"in_cabin\":%s,\"drawn_neck_error\":%.4f,\"age\":%.3f,\"pelvis\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f],\"pelvis_velocity\":[%.4f,%.4f,%.4f]}",
             occupants.empty() ? "" : ",", o.body->serial, (unsigned)(uintptr_t)o.model, (unsigned)(uintptr_t)o.carrier, o.rail ? "rail" : "traffic",
-            o.driver ? "driver" : "passenger", o.carriage, jolt_ragdoll::SeatedCar(o.body.get()) ? "true" : "false", o.drawnNeckError, o.body->age, p.x,p.y,p.z,h.x,h.y,h.z);
+            o.driver ? "driver" : "passenger", o.carriage, jolt_ragdoll::SeatedCar(o.body.get()) ? "true" : "false", o.drawnNeckError,
+            o.body->age,p.x,p.y,p.z,h.x,h.y,h.z,v.x,v.y,v.z);
     }
     std::string supports;
     for (const auto &[car, track] : g_carTracks) {
