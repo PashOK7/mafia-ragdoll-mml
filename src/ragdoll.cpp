@@ -265,7 +265,7 @@ void Ragdoll::PointsFromPose(const M3 *rot, const V3 *org, V3 *pts) {
     leg(LHIP, LKNEE, LANKLE, LTOE, LTH, LSH, LFT);
 }
 
-bool Ragdoll::RebindModel(void *newModel, const PoseSnap &next) {
+bool Ragdoll::RebindModel(void *newModel, const PoseSnap &next, bool writePositions) {
     for (const auto &link : bones)
         if (std::find(std::begin(frames), std::end(frames), link.frame) == std::end(frames)) return false;
     for (auto &link : bones) {
@@ -277,6 +277,7 @@ bool Ragdoll::RebindModel(void *newModel, const PoseSnap &next) {
     rootFrame = frames[19];
     pelvisFrame = frames[18];
     model = newModel;
+    driveJointPositions = writePositions;
     headwearChecked = false;
     headwearFrame = nullptr;
     hatFit = {};
@@ -535,8 +536,10 @@ void Ragdoll::Apply() {
     }
     const float *rootW = game::WorldMatrix(rootFrame);
     M3 rootRot = M3::FromWorld(rootW);
-    std::vector<std::pair<void *, M3>> world;
-    world.reserve(bones.size());
+    const V3 rootOrigin{rootW[12], rootW[13], rootW[14]};
+    struct AppliedFrame { void *frame; M3 rotation; V3 position; };
+    AppliedFrame applied[19];
+    size_t appliedCount = 0;
     for (auto &l : bones) {
         const Body &bd = body[l.bodyIdx];
         M3 rows{{Rotate(bd.q, {1, 0, 0}), Rotate(bd.q, {0, 1, 0}), Rotate(bd.q, {0, 0, 1})}};
@@ -544,25 +547,38 @@ void Ragdoll::Apply() {
         w.Orthonormalize();
         void *parent = game::at<void *>(l.frame, game::kFrameParent);
         M3 parentW = rootRot;
-        for (auto &e : world) if (e.first == parent) { parentW = e.second; break; }
+        V3 parentOrigin = rootOrigin;
+        const auto known = std::find_if(applied, applied + appliedCount, [parent](auto &f) { return f.frame == parent; });
+        if (known != applied + appliedCount) {
+            parentW = known->rotation;
+            parentOrigin = known->position;
+        } else if (driveJointPositions && parent && parent != rootFrame) {
+            const float *pw = game::WorldMatrix(parent);
+            parentW = M3::FromWorld(pw);
+            parentOrigin = {pw[12], pw[13], pw[14]};
+        }
         M3 local = w * parentW.T();
         float m[16] = {local.r[0].x, local.r[0].y, local.r[0].z, 0, local.r[1].x, local.r[1].y, local.r[1].z, 0,
                        local.r[2].x, local.r[2].y, local.r[2].z, 0, 0, 0, 0, 1};
         Q q;
         make(&q, m);
         const float lq[4] = {q.w, q.x, q.y, q.z};
-        mod::H->bone_set(mod::M, l.frame, lq, nullptr);
-        const float *wq = &game::at<float>(l.frame, game::kFrameRot);
-        for (int k = 0; k < 4; k++) const_cast<BoneLink &>(l).written[k] = wq[k];
-        const_cast<BoneLink &>(l).wrote = true;
-        world.push_back({l.frame, w});
-        if (l.frame == pelvisFrame) {
-            // Subtract the two large numbers first so the small local offsets keep their precision.
-            V3 rel = (origin - V3{rootW[12], rootW[13], rootW[14]}) + (bd.x + Rotate(bd.q, pelvisOffset));
-            V3 lp = M3::Raw(rootW).Inverse().Apply(rel);
-            const float pp[3] = {lp.x, lp.y, lp.z};
-            mod::H->bone_set(mod::M, l.frame, nullptr, pp);
+        const V3 bodyOffset = bd.x + Rotate(bd.q, l.originLocal);
+        V3 localPosition;
+        const bool writePosition = driveJointPositions || l.frame == pelvisFrame;
+        // Replacement skins can have a different set of local bone offsets. Map
+        // both orientation and position to the same world joint on the existing rig.
+        if (driveJointPositions) {
+            localPosition = parentW.T().Apply((origin - parentOrigin) + bodyOffset);
+        } else if (writePosition) {
+            const V3 rel = (origin - rootOrigin) + (bd.x + Rotate(bd.q, pelvisOffset));
+            localPosition = M3::Raw(rootW).Inverse().Apply(rel);
         }
+        mod::H->bone_set(mod::M, l.frame, lq, writePosition ? &localPosition.x : nullptr);
+        const float *wq = &game::at<float>(l.frame, game::kFrameRot);
+        for (int k = 0; k < 4; k++) l.written[k] = wq[k];
+        l.wrote = true;
+        applied[appliedCount++] = {l.frame, w, origin + bodyOffset};
     }
     // (the bones are written through the loader's bone_set: it updates the model once after RENDER_BEGIN's mods, as
     // LS3D's Update re-skins the mesh from its joints, and keeps the pose drawn for human_get_up)

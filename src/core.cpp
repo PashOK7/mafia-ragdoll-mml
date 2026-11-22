@@ -528,10 +528,10 @@ void EraseAt(size_t i) {
     g_ragdolls.erase(g_ragdolls.begin() + i);
 }
 
-void PurgeOccupantFrames();
+void PurgeOccupantFrames(std::span<Ragdoll *const> rebound);
 void Purge(std::span<Ragdoll *const> rebound = {}) {
     if (g_freed.empty()) return;
-    PurgeOccupantFrames();
+    PurgeOccupantFrames(rebound);
     for (size_t i = 0; i < g_ragdolls.size();) {
         Ragdoll *rd = g_ragdolls[i].get();
         if (std::find(rebound.begin(), rebound.end(), rd) == rebound.end() &&
@@ -612,7 +612,7 @@ void *SeatCarOf(void *actor) {
 
 std::unordered_map<const void *, smoke::CabinInterior> g_wreckInteriors;
 
-void RememberWreckInterior(void *car, void *model, const Ragdoll::PoseSnap &live) {
+void RememberWreckInterior(void *car, void *model, const V3 *points) {
     if (!car || g_wreckInteriors.contains(car)) return;
     char file[512];
     if (!H->model_file(M, model, file, sizeof file)) return;
@@ -626,8 +626,8 @@ void RememberWreckInterior(void *car, void *model, const Ragdoll::PoseSnap &live
     };
     // Sample the centreline from the footwell to the neck. A seat or dashboard
     // can obscure a lower door panel from a single point higher in the cabin.
-    const V3 pelvis = live.pts[Ragdoll::PELVIS], neck = live.pts[Ragdoll::NECK];
-    const V3 feet = (live.pts[Ragdoll::RANKLE] + live.pts[Ragdoll::LANKLE]) * .5f;
+    const V3 pelvis = points[Ragdoll::PELVIS], neck = points[Ragdoll::NECK];
+    const V3 feet = (points[Ragdoll::RANKLE] + points[Ragdoll::LANKLE]) * .5f;
     g_wreckInteriors.try_emplace(car, smoke::CabinInterior{
         local(neck), local((pelvis + neck) * .5f), local(pelvis), local((pelvis + feet) * .5f)});
 }
@@ -974,7 +974,12 @@ bool BeingPulledFromCar(void *human) {
     return clip >= 312 && clip <= 315;
 }
 
-// A traffic or railway occupant is a model owned by a native roster, without a human actor.
+struct RemoveOccupantProp {
+    void operator()(void *prop) const { H->prop_remove(M, prop); }
+};
+
+// Roster occupants have no C_human. An exploded traffic car's occupant keeps
+// its physical body and adopts an owned charred model.
 struct Occupant {
     void *carrier{}, *record{}, *model{}, *frame{};
     void *clone{};
@@ -982,12 +987,33 @@ struct Occupant {
     int slot{}, carriage{};
     bool rail{}, driver{}, sampleDraw{};
     float drawnNeckError = -1;
+    std::unique_ptr<void, RemoveOccupantProp> wreckModel;
     std::unique_ptr<Ragdoll> body;
     struct LocalFrame { Q rotation; V3 position; };
     std::array<LocalFrame,20> nativePose{};
     bool posedForDraw{};
 };
 std::vector<Occupant> g_occupants;
+
+// NewExplosion runs inside CarExplosion before it registers the replacement.
+// Both builds set the replacement's C_car wreck flag at +0x65.
+constexpr unsigned kCarIsWreck = 0x65;
+constexpr float kWreckSearchRadius = 4.f;
+struct WreckSearch {
+    V3 origin;
+    std::vector<void *> existing;
+};
+std::unordered_map<void *, WreckSearch> g_wreckSearches;
+
+std::vector<void *> WrecksNear(V3 at) {
+    const int count = H->world_near(M, &at.x, kWreckSearchRadius, MML_ACTOR_CAR, nullptr, 0);
+    if (count <= 0) return {};
+    std::vector<void *> candidates(count);
+    const int found = H->world_near(M, &at.x, kWreckSearchRadius, MML_ACTOR_CAR, candidates.data(), count);
+    candidates.resize(std::clamp(found, 0, count));
+    std::erase_if(candidates, [](void *car) { return !game::at<uint8_t>(car, kCarIsWreck); });
+    return candidates;
+}
 
 struct RailSample {
     uintptr_t model, carrier;
@@ -1103,6 +1129,7 @@ template<class Visit> bool RosterContains(uintptr_t vector, Visit visit) {
 
 void PruneOccupants() {
     std::erase_if(g_occupants, [](const Occupant &o) {
+        if (o.wreckModel) return false;
         bool present = false;
         auto check = [&] {
             const uintptr_t vector = o.rail ? reinterpret_cast<uintptr_t>(o.carrier) + 0x254 : game::Exe().trafficElements;
@@ -1118,9 +1145,10 @@ void PruneOccupants() {
     });
 }
 
-void PurgeOccupantFrames() {
-    std::erase_if(g_occupants, [](const Occupant &o) {
-        return g_freed.count(o.model) || g_freed.count(o.frame) || o.body->UsesAny(g_freed);
+void PurgeOccupantFrames(std::span<Ragdoll *const> rebound) {
+    std::erase_if(g_occupants, [&](const Occupant &o) {
+        return std::find(rebound.begin(), rebound.end(), o.body.get()) == rebound.end() &&
+               (g_freed.count(o.model) || g_freed.count(o.frame) || o.body->UsesAny(g_freed));
     });
     for (void *frame : g_freed) g_carriageMeshes.erase(frame);
 }
@@ -1379,13 +1407,13 @@ void PhysicsBulletStretch(MmlMidContext *ctx, void *) {
         int part = -1;
         V3 point{};
         for (auto &o : g_occupants) {
-            if (!o.rail) continue;
+            if (!o.rail && !o.wreckModel) continue;
             const V3 hip = o.body->BodyPos(Ragdoll::B_PELVIS);
             const V3 nearest = from + axis * std::clamp(Dot(hip - from, axis), 0.f, limit);
             if (Len(hip - nearest) > 2.0f) continue;
             V3 contact{};
             const int segment = jolt_ragdoll::ShotPart(o.body.get(), from, axis * limit, &contact);
-            if (segment < 0 || jolt_ragdoll::CabinBlocksShot(o.frame, origin, contact,
+            if (segment < 0 || jolt_ragdoll::CabinBlocksShot(o.rail ? o.frame : o.carrier, origin, contact,
                     jolt_ragdoll::SeatedCar(o.body.get()) != nullptr)) continue;
             target = &o;
             limit = Len(contact - from);
@@ -1645,7 +1673,7 @@ Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy 
     Ragdoll *made = g_ragdolls.back().get();
     void *car = ped ? nullptr : SeatCarOf(actor);
     if (car) LOG("ragdoll %p dies sitting in car %p: its body stays in the car's cabin, held to the seat", actor, car);
-    RememberWreckInterior(car, made->Model(), currentPose);
+    RememberWreckInterior(car, made->Model(), currentPose.pts);
     std::string jerr;
     if (!jolt_ragdoll::Add(made, &jerr, car, struckBy)) {
         if (handover) handover->startResult = "physics_body_failed";
@@ -1692,10 +1720,6 @@ void JoltMovers(std::vector<smoke::Mover> &out) {
     for (const auto &body : g_ragdolls) {
         addVehicle(body->impactVehicle, *body);
         addVehicle(const_cast<void *>(jolt_ragdoll::SeatedCar(body.get())), *body);
-    }
-    for (auto &mover : out) {
-        const auto interior = g_wreckInteriors.find(mover.key);
-        if (interior != g_wreckInteriors.end()) mover.wreckInterior = &interior->second;
     }
     std::vector<V3> bodies;
     for (auto &r : g_ragdolls) bodies.push_back(r->BodyPos(Ragdoll::B_PELVIS));
@@ -1749,6 +1773,10 @@ void JoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
     static std::vector<smoke::Mover> movers;
     JoltMovers(movers);
     OccupantMovers(movers);
+    for (auto &mover : movers) {
+        const auto interior = g_wreckInteriors.find(mover.key);
+        if (interior != g_wreckInteriors.end()) mover.wreckInterior = &interior->second;
+    }
     headwear::ApplyAirDrag(dt);
     jolt_ragdoll::Step(jolt, dt, movers, pl ? &pp : nullptr);
     SampleRailway(dt);
@@ -2016,6 +2044,7 @@ const char *GetUpReason(const Ragdoll &body) {
 
 void TickBody(float dt) {
     g_tick++;
+    g_wreckSearches.clear();
     Purge();
     PruneOccupants();
     ListPeople();
@@ -2778,14 +2807,69 @@ void OnHit(const MmlEvent &ev) {
 // every body within its radius and a half thrown away from it. The speed at its centre grows with the root of its
 // force (a grenade's 400: 12 m/s, a car's larger one more), at most 25 m/s; a third of it upwards.
 void OnExplosion(const MmlExplosion &x) {
-    if (!g_cfg.enabled || g_cfg.blast <= 0) return;
+    if (!g_cfg.enabled) return;
     V3 c{x.pos.x, x.pos.y, x.pos.z};
+    if (x.source && std::any_of(g_occupants.begin(), g_occupants.end(), [&](const auto &o) {
+        return !o.rail && !o.wreckModel && o.carrier == x.source;
+    })) g_wreckSearches.insert_or_assign(x.source, WreckSearch{c, WrecksNear(c)});
+
+    if (g_cfg.blast <= 0) return;
     float reach = std::max(x.radius, 1.0f) * 1.5f;
     float speed = std::min(12.0f * std::sqrt(std::max(x.damage, 0.0f) / 400.0f), 25.0f) * g_cfg.blast;
     unsigned thrown = dogs::Blast(c,reach,speed,.35f);
-    for (auto &r : g_ragdolls) thrown += r->Blast(c, reach, speed, 0.35f) ? 1 : 0;
+    auto apply = [&](Ragdoll &body) {
+        // Its own car carries the seated body through the blast via the cabin.
+        // Free-field pressure here would launch limbs into the replacement shell.
+        const void *seat = jolt_ragdoll::SeatedCar(&body);
+        if (seat && seat == x.source) return;
+        if (body.Blast(c, reach, speed, 0.35f)) ++thrown;
+    };
+    for (auto &r : g_ragdolls) apply(*r);
+    for (auto &o : g_occupants) if (!o.rail) apply(*o.body);
     LOG("explosion at %.1f %.1f %.1f (radius %.1f, force %.0f): %u bodies thrown, %.1f m/s at its centre", c.x, c.y, c.z,
         x.radius, x.damage, thrown, speed);
+}
+
+void *FindNewWreck(void *car) {
+    auto entry = g_wreckSearches.extract(car);
+    if (entry.empty()) return nullptr;
+    auto &search = entry.mapped();
+    auto candidates = WrecksNear(search.origin);
+    std::erase_if(candidates, [&](void *candidate) {
+        return candidate == car || std::find(search.existing.begin(), search.existing.end(), candidate) != search.existing.end();
+    });
+    if (candidates.size() != 1) return nullptr;
+    for (auto &[source, other] : g_wreckSearches) other.existing.push_back(candidates.front());
+    return candidates.front();
+}
+
+bool CharTrafficOccupant(Occupant &o, void *wreck) {
+    void *parent = wreck ? H->actor_frame(M, wreck) : nullptr;
+    if (!parent) wreck = nullptr;
+    const V3 at = parent ? V3{} : o.body->BodyPos(Ragdoll::B_PELVIS);
+    std::unique_ptr<void, RemoveOccupantProp> model(H->prop_create(M, "ohorelec01.i3d", parent, &at.x, nullptr, 1.f));
+    if (!model) return false;
+    Ragdoll::PoseSnap live;
+    std::string err;
+    if (!Ragdoll::Snapshot(model.get(), nullptr, &live, &err)) return false;
+    if (!jolt_ragdoll::TransferSeat(o.body.get(), wreck)) {
+        wreck = nullptr;
+        if (!H->prop_attach(M, model.get(), nullptr, 1)) return false;
+        jolt_ragdoll::TransferSeat(o.body.get(), nullptr);
+    }
+    if (!o.body->RebindModel(model.get(), live, true)) return false;
+    o.record = nullptr;
+    o.carrier = wreck;
+    o.model = model.get();
+    o.body->actor = o.model;
+    o.wreckModel = std::move(model);
+    M3 rotation[19];
+    V3 origins[19], points[Ragdoll::COUNT];
+    o.body->PhysicalPose(rotation, origins);
+    Ragdoll::PointsFromPose(rotation, origins, points);
+    RememberWreckInterior(wreck, o.model, points);
+    LOG("traffic ragdoll body %u: charred model %p in wreck %p", o.body->serial, o.model, wreck);
+    return true;
 }
 
 void OnCarExploded(void *car) {
@@ -2801,12 +2885,20 @@ void OnCarExploded(void *car) {
             if (!SafeSnapshot(body->actor, &live)) return;
             if (wreck == car && std::equal(std::begin(live.frames), std::end(live.frames), body->Frames())) return;
             if (!jolt_ragdoll::TransferSeat(body.get(), wreck) || !body->RebindModel(ModelOf(body->actor), live)) return;
-            RememberWreckInterior(wreck, body->Model(), live);
+            RememberWreckInterior(wreck, body->Model(), live.pts);
             body->carExtraction = false;
             rebound.push_back(body.get());
             LOG("ragdoll %p body %u: rebound after car %p exploded, cabin %p", body->actor, body->serial, car, wreck);
         };
         Guarded(restore);
+    }
+    if (g_wreckSearches.contains(car)) {
+        void *wreck = FindNewWreck(car);
+        for (auto &o : g_occupants) {
+            if (o.rail || o.wreckModel || o.carrier != car) continue;
+            auto restore = [&] { if (CharTrafficOccupant(o, wreck)) rebound.push_back(o.body.get()); };
+            Guarded(restore);
+        }
     }
     // A new bone can reuse an address freed during this explosion. Only the bodies whose entire
     // skeleton was resolved again can survive those pending notifications.
@@ -2817,7 +2909,12 @@ void OnCarExploded(void *car) {
 void OnActorDestroyed(void *actor) {
     dogs::Forget(actor);
     jolt_ragdoll::ForgetCarrier(actor);
-    std::erase_if(g_occupants, [actor](const auto &o) { return o.carrier == actor; });
+    std::erase_if(g_occupants, [actor](auto &o) {
+        if (o.carrier != actor) return false;
+        if (!o.wreckModel) return true;
+        o.carrier = nullptr;
+        return false;
+    });
     if (g_pull.car == actor) g_pull.car = nullptr;
     for (auto &body : g_ragdolls) if (body->impactVehicle == actor) body->impactVehicle = nullptr;
     if (Find(actor)) Drop(actor);
@@ -2887,6 +2984,7 @@ void OnWorldReset(const char *reason) {
     g_waterCells.clear();   // (the next mission's water)
     vehicles::Clear();
     g_wreckInteriors.clear();
+    g_wreckSearches.clear();
     knock::Clear();
     g_railPassengers.clear();
     g_poses.clear();
@@ -3063,7 +3161,8 @@ std::string State() {
         const auto p = o.body->BodyPos(Ragdoll::B_PELVIS), h = o.body->BodyPos(Ragdoll::B_HEAD);
         const auto v=o.body->BodyVel(Ragdoll::B_PELVIS);
         occupants += Fmt("%s{\"body_serial\":%u,\"model\":\"0x%08X\",\"carrier\":\"0x%08X\",\"kind\":\"%s_%s\",\"carriage\":%d,\"in_cabin\":%s,\"drawn_neck_error\":%.4f,\"age\":%.3f,\"pelvis\":[%.3f,%.3f,%.3f],\"head\":[%.3f,%.3f,%.3f],\"pelvis_velocity\":[%.4f,%.4f,%.4f]}",
-            occupants.empty() ? "" : ",", o.body->serial, (unsigned)(uintptr_t)o.model, (unsigned)(uintptr_t)o.carrier, o.rail ? "rail" : "traffic",
+            occupants.empty() ? "" : ",", o.body->serial, (unsigned)(uintptr_t)o.model, (unsigned)(uintptr_t)o.carrier,
+            o.rail ? "rail" : o.wreckModel ? "wreck" : "traffic",
             o.driver ? "driver" : "passenger", o.carriage, jolt_ragdoll::SeatedCar(o.body.get()) ? "true" : "false", o.drawnNeckError,
             o.body->age,p.x,p.y,p.z,h.x,h.y,h.z,v.x,v.y,v.z);
     }

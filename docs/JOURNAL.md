@@ -1019,3 +1019,13 @@ Both builds passed all three front-seat scenarios. A Bolt-Thrower started with t
 The loader's blast recovery and carjack regression passed 26 checks per build. The verified mod is installed in the closed Mafia10Fixes copy and will load when the owner next starts it.
 
 The final taxi captures retain a small sill-edge artifact. The side-wall fixture measures an overlapping physical shape, so it does not cover visible skin at that seam. Loose corpses without a native seat are outside this handover.
+
+## 2026-11-22 — A traffic driver's body survives its car explosion (0.1.48)
+
+The owner's city freeride lost an existing traffic driver rig in a car explosion. Traffic drivers are models in the native roster. The engine's charred C_human conversion does not run for them, and the old roster releases their models. Both labs reproduced the disappearance before the fix.
+
+The completion event transfers the existing body and seat to the newly registered wreck and replaces the traffic model with the native charred asset through the prop service. The replacement writes bone positions as well as rotations to match the physical pose despite different bind offsets. The same body remains active outside a roster. The source car's own seated bodies react to the wreck's movement and collisions. Nearby bodies can still receive the blast.
+
+Both labs preserved the same body serial, seat and visible charred model. The drawn neck matched the physical joint. SHA-256 `46b6486d4ede97f51e4d621ca45d6d6722c87c00fae932358df448b21365aa47` is active in the owner's paused process 16620. Captures, logs and backups are in `../MafiaModLoader/build/traffic-explosion-0148/`.
+
+The Bolt-Thrower and Masseur Taxi native-seat cases passed on both builds. The charred traffic props were removed on mod unload in both labs. The standalone pedestrian-motion check passed.

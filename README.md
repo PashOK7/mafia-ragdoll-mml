@@ -50,7 +50,8 @@ into the folder containing Game.exe. [Download the latest release](https://githu
   once both hands reach the surface and keeps the same two contact points until he lets go.
   The legs follow under their own weight, and the body stays in the street when the car leaves.
   After a car explosion the native charred skeleton takes over. Bodies already simulated in a native seat
-  keep their pose, motion and seat anchor in the replacement wreck.
+  keep their pose, motion and seat anchor in the replacement wreck. Dead traffic drivers retain the
+  same ragdoll and receive the charred model when the traffic manager removes their original model.
 - **The ragdoll camera.** While the player himself is a ragdoll and while he gets up, the camera circles his body:
   the mouse turns it round him, the wheel brings it nearer or further, and it keeps out of walls and cars; it blends
   back into the game's camera once he is up.

@@ -944,9 +944,15 @@ const void *SeatedCar(const Ragdoll *r) {
 
 bool TransferSeat(Ragdoll *r, void *car) {
     auto it = g_entries.find(r);
-    if (it == g_entries.end() || !it->second.car) return false;
+    if (it == g_entries.end()) return false;
     Entry &e = it->second;
     if (e.car == car) return true;
+    if (!car) {
+        ReleaseGrip(e, r);
+        Unseat(e);
+        return true;
+    }
+    if (!e.car) return false;
     auto nativePose = [](void *vehicle, JPH::RMat44 &out) {
         V3 p, axes[3];
         if (!vehicles::Pose(vehicle, &p, axes)) return false;

@@ -78,7 +78,7 @@ public:
     // The pose the model's frames hold now (the 20 frames found at Init), facing the way the physical pelvis does.
     bool SnapshotNow(PoseSnap *out) const;
     // Attach a replacement of the same rig to the existing physical body.
-    bool RebindModel(void *model, const PoseSnap &live);
+    bool RebindModel(void *model, const PoseSnap &live, bool driveJointPositions = false);
     // The pose the bodies hold now, as frames 0..18 of `frames` (PoseSnap's order; 18 the pelvis): each one's world
     // rotation (rows) and origin, from the bodies themselves (what Apply writes, without the game's matrices).
     void PhysicalPose(M3 *rot19, V3 *org19) const;
@@ -168,6 +168,7 @@ private:
     // Bone mapping (engine row-matrix convention): bone world = offset * body world rows.
     struct BoneLink { void *frame; int bodyIdx; M3 offset; V3 originLocal; const char *name; float written[4] = {1, 0, 0, 0}; bool wrote = false; };
     std::vector<BoneLink> bones;
+    bool driveJointPositions = false;
     void *frames[20] = {};           // the frames of the start pose (PoseSnap::frames)
     void *rootFrame = nullptr;
     void *pelvisFrame = nullptr;
