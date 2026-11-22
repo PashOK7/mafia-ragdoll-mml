@@ -100,7 +100,7 @@ void RequestCabin(const void *car, const void *occupant = nullptr, bool railway 
 JPH::BodyID CabinBody(const void *car);   // invalid while there is none
 struct RailwayStep {
     V3 cabinPosition{}, cabinVelocity{}, cabinAngular{}, pointVelocity{};
-    unsigned contacts{}, endContacts{}, outsideContacts{}, barriersRejected{};
+    unsigned contacts{}, endContacts{}, outsideContacts{};
     unsigned solidPanels{};
     unsigned outsideBody{}, outsideLayer{};
     const void *outsideVisual{};

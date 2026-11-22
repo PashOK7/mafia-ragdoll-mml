@@ -991,3 +991,13 @@ The owner's next capture showed a body partly through the moving end wall. Its p
 The trailing `metro` carriage now cooks transverse faces at both ends of its fixed shell as convex panels backed away from the interior. The panels follow the original faces, including their cutouts. Door and window visuals, the cabin floor, and benches retain their existing mesh collision. The solid interior face can return a body inward after it crosses the thin rendered surface. In the standalone A/B test, the old two-sided surface settled the overlapping part 10.0 cm outside the panel. The solid panel returned it 12.5 cm inside. Both variants let the control part cross the neighbouring opening.
 
 On both game builds, `metro5` used 146 solid panel sub-shapes and passed the station entry and exit tests. The final DLL hash is `c8f0cbcac0b16e38b5efdbb8dc0d458d599fc921285651fae9794735c1725b64`. The capture, backup and checks are in `../MafiaModLoader/build/rail-panel-0145/`.
+
+## 2026-11-22 — Shared collision for native pedestrian barriers (0.1.46)
+
+People, dog rigs and detached hats share one Jolt world. Their shapes, joints and game handoffs differ. The station hotfix had coupled barrier rejection to rail occupant contacts, so the same plane could still stop a dog, a loose hat or a pedestrian ragdoll.
+
+The common scenery importer now skips upright native material-33 slabs before any Jolt bodies are built. The engine keeps its native barriers for walking gameplay and native rays. Native floors, ordinary slabs, the visible wall meshes and the carriage's solid panels keep supplying physical contacts. The contact listener has no body-specific barrier exception.
+
+The standalone world fixture imported an invisible barrier, an ordinary solid wall and a floor with the barrier's material. The thin rigid body and both articulated-body shape and layer cases crossed the barrier and stopped at the solid wall. The floor remained present. The native tests and binary backups are in `../MafiaModLoader/build/shared-barriers-0146/`.
+
+The full dog and headwear suites passed in each build. Both `metro5` station runs retained native ray hits against the barriers and kept the ragdoll aboard through the entry and exit. The first 1.0 attempt timed out before the native passenger roster populated. The retry passed. The DLL with SHA-256 `5b5e514c70010620b93bfddba0028243be603f33c483e2fcdea86d5fee508c3c` is active in the owner's game. Both labs were closed and their previous startup flags restored.

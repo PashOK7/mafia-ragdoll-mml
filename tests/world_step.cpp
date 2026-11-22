@@ -5,6 +5,8 @@
 #include "jolt_world.h"
 #include "joint_resistance.h"
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -117,8 +119,39 @@ static bool RailPanelTest(bool solid) {
     return (solid ? recovered > -4.93f : recovered < -5.f) && exited < -5.5f;
 }
 
+static bool SharedBarrierTest() {
+    using namespace JPH;
+    const RefConst<Shape> shapes[] = {
+        new BoxShape(Vec3(.16f,.035f,.17f),.015f),
+        new CapsuleShape(.12f,.085f),
+        new CapsuleShape(.10f,.11f),
+    };
+    const ObjectLayer layers[]{jolt_world::kDynamic,jolt_world::kDynamic,jolt_world::kOccupant};
+    BodyID bodiesUnderTest[3];
+    auto &bodies = jolt_world::Bodies();
+    for (int i=0;i<3;++i) {
+        BodyCreationSettings s(shapes[i], RVec3(2,10,.8f+1.2f*i), Quat::sIdentity(),
+                               EMotionType::Dynamic,layers[i]);
+        s.mGravityFactor = 0;
+        s.mLinearVelocity = Vec3(5,0,0);
+        s.mMotionQuality = EMotionQuality::LinearCast;
+        bodiesUnderTest[i] = bodies.CreateAndAddBody(s,EActivation::Activate);
+    }
+    for (int i=0;i<120;++i) jolt_world::Step(1.f/120.f,{},nullptr);
+    bool valid = true;
+    for (auto id : bodiesUnderTest) {
+        const float x = bodies.GetPosition(id).GetX();
+        std::printf("Shared barrier test: body stopped at x=%.3f m\n",x);
+        valid &= x>4.6f && x<5.f;
+        bodies.RemoveBody(id);
+        bodies.DestroyBody(id);
+    }
+    return valid;
+}
+
 int main() {
     static MmlMeshPiece input[2]{};
+    static MmlShape slabs[3]{};
     const float pos[] = {0,0,0, 0,0,1, 1,0,0};
     const uint32_t index[] = {0,1,2};
     for (auto &p : input) {
@@ -129,7 +162,11 @@ int main() {
     MmlHost host{};
     host.scene_focus = [](MmlMod *, const float *, const float *) { return 1; };
     host.scene_ready = host.scene_focus;
-    host.world_shapes = [](MmlMod *, const float *, const float *, uint32_t, MmlShape *, int) { return 0; };
+    host.world_shapes = [](MmlMod *, const float *, const float *, uint32_t, MmlShape *out, int cap) {
+        if (!slabs[0].kind) return 0;
+        if (out) std::copy_n(slabs,std::min(cap,3),out);
+        return 3;
+    };
     host.scene_pieces = [](MmlMod *, MmlMeshPiece *out, int cap) {
         if (out) std::copy_n(input, std::min(cap, 2), out);
         return 2;
@@ -150,6 +187,30 @@ int main() {
     if (!jolt_world::Start(nullptr, {}, &error)) { std::puts(error.c_str()); return 1; }
     if (!RailPanelTest(false) || !RailPanelTest(true)) {
         std::puts("FAIL: rail panel must return an overlapping limb inward and keep the gap open");
+        return 1;
+    }
+    for (int i=0;i<3;++i) {
+        auto &s = slabs[i];
+        s.prim = &s;
+        s.kind = MML_SHAPE_BOX;
+        s.flags = i==1 ? 0x0D000083 : 0x21000083;
+        s.center[0] = i==0 ? 3.f : i==1 ? 5.f : 4.f;
+        s.center[1] = i==2 ? 8.f : 10.f;
+        s.center[2] = 2.f;
+        s.half[0] = 2.f;
+        s.half[1] = .1f;
+        s.half[2] = i==2 ? 2.f : 1.f;
+        if (i==2) s.axes[0] = s.axes[4] = s.axes[8] = 1.f;
+        else s.axes[2] = s.axes[3] = s.axes[7] = 1.f;
+    }
+    scenery::SetFocus(scenery::kRagdoll,{-5,-5,-5},{8,11,5});
+    scenery::Tick();
+    const auto &pieces = scenery::Pieces();
+    const auto contains = [&](int i) {
+        return std::any_of(pieces.begin(),pieces.end(),[i](const auto &piece) { return piece.key==&slabs[i]; });
+    };
+    if (contains(0) || !contains(1) || !contains(2) || !SharedBarrierTest()) {
+        std::puts("FAIL: shared physics must pass pedestrian barriers and keep walls and floors");
         return 1;
     }
     smoke::Mover car;

@@ -166,6 +166,10 @@ bool UpdateSlabs() {
         const unsigned material = s.flags >> 24;
         const float x = s.half[0], z = s.half[2];
         if (material == 31 || material == 44 || !(x > 0 && z > 0)) continue;
+        // Upright material-33 slabs are native pedestrian barriers, such as
+        // the gates across station tracks. Keep them in the game's own grid.
+        // Physical walls enter the shared world through their scene meshes.
+        if (material == 33 && std::abs(s.axes[4]) < .35f) continue;
         auto [it, inserted] = g_slabShapes.try_emplace(s.prim);
         Shape &shape = it->second;
         if (inserted) {
@@ -182,9 +186,6 @@ bool UpdateSlabs() {
         piece.pos = &shape.pos;
         piece.tris = &shape.tris;
         piece.name = "native slab";
-        // Across station entrances the game uses upright, material-33 slabs
-        // to keep a person on the platform while rail vehicles cross freely.
-        piece.pedestrianBarrier = material == 33 && std::abs(s.axes[4]) < .35f;
         g_slabs.push_back(piece);
     }
     return true;

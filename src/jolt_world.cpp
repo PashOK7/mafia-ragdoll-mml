@@ -34,7 +34,6 @@ namespace jolt_world {
 namespace {
 
 LogFn g_log;
-constexpr uint64_t kPedestrianBarrier = 1;
 struct OccupantCabin { const void *car; bool railway; };
 std::unordered_map<uint64_t, OccupantCabin> g_occupantCabins; // refreshed by the solver before each step
 std::unordered_map<uint64_t, RailwayStep> g_railwayContacts;
@@ -175,18 +174,6 @@ public:
     // A body passing through a car's hull (SetPassThrough) does not meet that car's hull bodies; it meets the car's
     // cabin, which is not one of them.
     JPH::ValidateResult OnContactValidate(const JPH::Body &a, const JPH::Body &b, JPH::RVec3Arg, const JPH::CollideShapeResult &) override {
-        if (a.GetObjectLayer() == kOccupant || b.GetObjectLayer() == kOccupant) {
-            const bool riderA = a.GetObjectLayer() == kOccupant;
-            const auto &rider = riderA ? a : b;
-            const auto &other = riderA ? b : a;
-            if (other.GetObjectLayer() == kStatic && other.GetUserData() == kPedestrianBarrier) {
-                const auto cabin = g_occupantCabins.find(rider.GetUserData());
-                if (cabin != g_occupantCabins.end() && cabin->second.railway) {
-                    ++g_railwayContacts[rider.GetUserData()].barriersRejected;
-                    return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
-                }
-            }
-        }
         if (a.IsDynamic() && b.IsDynamic() && bool(a.GetUserData())!=bool(b.GetUserData())) {
             const auto &loose=a.GetUserData() ? b : a;
             const auto &wearer=a.GetUserData() ? a : b;
@@ -487,7 +474,6 @@ void ApplyScenery() {
         if (it != g_statics.end()) { bi.RemoveBody(it->second.body); bi.DestroyBody(it->second.body); g_statics.erase(it); }
         if (!shape) continue;
         JPH::BodyCreationSettings s(shape, J(p.t - g_w->origin), FromAxes(p.ax), JPH::EMotionType::Static, kStatic);
-        if (p.pedestrianBarrier) s.mUserData = kPedestrianBarrier;
         s.mFriction = 0.8f;   // clothes on asphalt, stone, wood
         s.mRestitution = 0.0f;
         JPH::BodyID id = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);

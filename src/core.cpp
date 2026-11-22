@@ -1021,7 +1021,7 @@ std::string RailTrace(const std::string &args) {
                    "\"relative_velocity\":[%.4f,%.4f,%.4f],\"cabin_velocity\":[%.4f,%.4f,%.4f],"
                    "\"cabin_angular\":[%.4f,%.4f,%.4f],\"contacts\":%u,\"end_contacts\":%u,"
                    "\"end_approach\":%.4f,\"end_point_z\":%.4f,\"outside_contacts\":%u,\"outside_depth\":%.4f,"
-                   "\"outside_layer\":%u,\"outside_visual\":\"0x%08X\",\"barriers_rejected\":%u,\"solid_panels\":%u,"
+                   "\"outside_layer\":%u,\"outside_visual\":\"0x%08X\",\"solid_panels\":%u,"
                    "\"shot_tick\":%u,\"shot_local_dv\":%.4f}",
                    s.tick,s.dt,s.age,(unsigned)s.model,s.serial,(unsigned)s.carrier,s.carriage,s.phase,s.speed,s.target,
                    s.mesh,s.poseError,s.drawnError,s.origin.x,s.origin.y,s.origin.z,
@@ -1030,7 +1030,7 @@ std::string RailTrace(const std::string &args) {
                    s.cabinVelocity.x,s.cabinVelocity.y,s.cabinVelocity.z,s.cabinAngular.x,s.cabinAngular.y,s.cabinAngular.z,
                    s.contacts.contacts,s.contacts.endContacts,s.contacts.endApproach,s.contacts.endPointZ,
                    s.contacts.outsideContacts,s.contacts.outsideDepth,s.contacts.outsideLayer,
-                   (unsigned)(uintptr_t)s.contacts.outsideVisual,s.contacts.barriersRejected,s.contacts.solidPanels,s.shotTick,s.shotDv);
+                   (unsigned)(uintptr_t)s.contacts.outsideVisual,s.contacts.solidPanels,s.shotTick,s.shotDv);
     }
     return out + ']';
 }
