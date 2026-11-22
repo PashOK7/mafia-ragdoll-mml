@@ -1,6 +1,7 @@
 // Production scenery and Jolt step, with two instances of one mesh supplied by the SDK.
 #include "mod.h"
 #include "scenery.h"
+#include "headwear.h"
 #include "jolt_world.h"
 #include "joint_resistance.h"
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
@@ -15,6 +16,15 @@ namespace mod {
 const MmlHost *H;
 MmlMod *M;
 void Log(const char *, ...) {}
+}
+
+// The standalone world fixture has no character models or headwear.
+namespace headwear {
+bool OwnsBody(uint32_t) { return false; }
+bool OwnsVisual(void *) { return false; }
+bool ReleasingFrom(uint32_t,uint32_t) { return false; }
+void BodyContact(uint32_t) {}
+void FlightContact(uint32_t,const JPH::BodyID &,unsigned,V3,V3,float) {}
 }
 
 // A supported torso with a freely hanging 6 kg head. Give the head one
