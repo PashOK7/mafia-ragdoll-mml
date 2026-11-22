@@ -105,6 +105,7 @@ def check(game):
             return rows if rows and rows[-1]['age'] >= 3 else []
 
         early = wait_for(early_trace, 8)
+        assert early[-1]['solid_panels'] > 0, early[-1]
         sources = outside_sources(early)
         assert all(not known_cabin_mesh(source) for source in sources), sources
         print(build, 'stationary cabin geometry stayed out of the ragdoll scenery', flush=True)

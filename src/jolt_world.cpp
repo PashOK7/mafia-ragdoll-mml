@@ -350,6 +350,7 @@ private:
         const unsigned part = body.GetCollisionGroup().GetSubGroupID();
         auto it = std::find_if(g_driverContacts.begin(), g_driverContacts.end(), [part](const auto &c){ return c.part == part; });
         if (it != g_driverContacts.end() && it->depth >= m.mPenetrationDepth) return;
+        if (cabin.GetShape()->GetSubType() != JPH::EShapeSubType::Mesh) return;
         const auto *mesh = static_cast<const JPH::MeshShape *>(cabin.GetShape());
         const auto idx = mesh->GetTriangleUserData(cabinA ? m.mSubShapeID1 : m.mSubShapeID2);
         PullContact contact{part, idx, m.mPenetrationDepth,
@@ -766,6 +767,32 @@ JPH::RefConst<JPH::Shape> TwoSidedMesh(const smoke::Mover &m) {
     return r.IsValid() ? r.Get() : nullptr;
 }
 
+JPH::RefConst<JPH::Shape> CabinShape(const smoke::Mover &m) {
+    auto surface = TwoSidedMesh(m);
+    if (!surface || !m.cabinPanels || m.cabinPanels->empty()) return surface;
+    JPH::StaticCompoundShapeSettings cabin;
+    cabin.AddShape(JPH::Vec3::sZero(),JPH::Quat::sIdentity(),surface);
+    const auto &panels = *m.cabinPanels;
+    for (std::size_t i=0; i<panels.size(); i+=3) {
+        const float direction = panels[i].z+panels[i+1].z+panels[i+2].z < 0.f ? -1.f : 1.f;
+        const V3 interior{0,0,-direction*.025f}, backing{0,0,direction*.25f};
+        JPH::Vec3 points[6];
+        for (int j=0;j<3;++j) {
+            points[j] = J(panels[i+j]+interior);
+            points[j+3] = J(panels[i+j]+backing);
+        }
+        auto panel = JPH::ConvexHullShapeSettings(points,6,.006f).Create();
+        if (panel.IsValid()) cabin.AddShape(JPH::Vec3::sZero(),JPH::Quat::sIdentity(),panel.Get());
+    }
+    auto shape = cabin.Create();
+    if (shape.IsValid()) return shape.Get();
+    std::vector<V3> original = *m.hull;
+    original.insert(original.end(),panels.begin(),panels.end());
+    smoke::Mover fallback = m;
+    fallback.hull = &original;
+    return TwoSidedMesh(fallback);
+}
+
 void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
     JPH::BodyInterface &bi = Bodies();
     for (const smoke::Mover &m : movers) {
@@ -776,13 +803,13 @@ void ApplyCabins(float dt, const std::vector<smoke::Mover> &movers) {
         auto it = g_cabins.find(m.key);
         if (it != g_cabins.end() && it->second.version != version) {
             // Keep the seat constraint attached to the same cabin body as a door opens.
-            if (auto shape = TwoSidedMesh(m)) {
+            if (auto shape = CabinShape(m)) {
                 bi.SetShape(it->second.body, shape, false, JPH::EActivation::Activate);
                 it->second.version = version;
             }
         }
         if (it == g_cabins.end()) {
-            JPH::RefConst<JPH::Shape> shape = TwoSidedMesh(m);
+            JPH::RefConst<JPH::Shape> shape = CabinShape(m);
             if (!shape) continue;
             JPH::BodyCreationSettings s(shape, J(pos), rot, JPH::EMotionType::Kinematic, kCabin);
             s.mUserData = reinterpret_cast<uintptr_t>(m.key);
@@ -1334,6 +1361,9 @@ bool RailwaySample(const void *car, const void *occupant, V3 at, RailwayStep *st
     auto &bodies = Bodies();
     const auto contacts = g_railwayContacts.find(reinterpret_cast<uintptr_t>(occupant));
     *step = contacts == g_railwayContacts.end() ? RailwayStep{} : contacts->second;
+    const auto shape = bodies.GetShape(id);
+    if (shape->GetSubType() == JPH::EShapeSubType::StaticCompound)
+        step->solidPanels = static_cast<const JPH::StaticCompoundShape *>(shape.GetPtr())->GetNumSubShapes()-1;
     if (step->outsideContacts && step->outsideLayer == kStatic) {
         const auto body = JPH::BodyID(step->outsideBody);
         const auto piece = std::find_if(g_statics.begin(), g_statics.end(),

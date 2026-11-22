@@ -72,6 +72,51 @@ static bool SwingTest(bool hinge, float scale, float dt) {
     return first > 2.f && (scale == 0 ? late > 3.f : late < .5f);
 }
 
+static bool RailPanelTest(bool solid) {
+    using namespace JPH;
+    std::vector<V3> surfaces{{-1,0,-6},{1,0,0},{1,0,-6}};
+    const std::vector<V3> wall{
+        {-1,0,-5},{.25f,2,-5},{.25f,0,-5},
+        {-1,0,-5},{-1,2,-5},{.25f,2,-5},
+    };
+    smoke::Mover cabin;
+    cabin.kind = smoke::Mover::HULL;
+    cabin.key = &cabin;
+    cabin.c = {0,10,0};
+    cabin.ax[0] = {1,0,0};
+    cabin.ax[1] = {0,1,0};
+    cabin.ax[2] = {0,0,1};
+    cabin.hull = &surfaces;
+    cabin.hullIsTriangles = cabin.cabinOnly = true;
+    if (solid) cabin.cabinPanels = &wall;
+    else surfaces.insert(surfaces.end(),wall.begin(),wall.end());
+    auto &bodies = jolt_world::Bodies();
+    BodyCreationSettings limb(new SphereShape(.12f), RVec3(-.55f,11,-5.035f),
+        Quat::sIdentity(), EMotionType::Dynamic, jolt_world::kOccupant);
+    limb.mGravityFactor = 0;
+    limb.mMotionQuality = EMotionQuality::LinearCast;
+    limb.mAllowSleeping = false;
+    limb.mUserData = reinterpret_cast<uintptr_t>(&limb);
+    const auto caught = bodies.CreateAndAddBody(limb, EActivation::Activate);
+    limb.mPosition = RVec3(.65f,11,-4.75f);
+    limb.mLinearVelocity = Vec3(0,0,-4);
+    const auto free = bodies.CreateAndAddBody(limb, EActivation::Activate);
+    for (int i=0;i<40;++i) {
+        jolt_world::RequestCabin(&cabin,&limb,true);
+        jolt_world::Step(1.f/120.f,{cabin},nullptr);
+    }
+    const float recovered = bodies.GetPosition(caught).GetZ();
+    const float exited = bodies.GetPosition(free).GetZ();
+    for (auto id : {caught,free}) {
+        bodies.RemoveBody(id);
+        bodies.DestroyBody(id);
+    }
+    jolt_world::Step(1.f/120.f,{},nullptr);
+    std::printf("Rail %s settled at %.3f m; opening crossed to %.3f m\n",
+                solid ? "solid panel" : "two-sided mesh",recovered,exited);
+    return (solid ? recovered > -4.93f : recovered < -5.f) && exited < -5.5f;
+}
+
 int main() {
     static MmlMeshPiece input[2]{};
     const float pos[] = {0,0,0, 0,0,1, 1,0,0};
@@ -103,6 +148,10 @@ int main() {
     }
     std::string error;
     if (!jolt_world::Start(nullptr, {}, &error)) { std::puts(error.c_str()); return 1; }
+    if (!RailPanelTest(false) || !RailPanelTest(true)) {
+        std::puts("FAIL: rail panel must return an overlapping limb inward and keep the gap open");
+        return 1;
+    }
     smoke::Mover car;
     car.kind = smoke::Mover::BOX; car.key = &car; car.mass = 1200;
     car.h = {1,.5f,2}; car.c = {0,10,0};

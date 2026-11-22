@@ -45,6 +45,7 @@ struct Mover {
     // HULL of a vehicle with no body of its own mass (a tram): its exact shape, `hull`'s triangles from both sides
     bool hullAsMesh = false;
     bool cabinOnly = false; // private railway collision, in this carriage frame
+    const std::vector<V3> *cabinPanels = nullptr; // rail end-wall triangles with solid backing
 };
 
 } // namespace smoke

@@ -101,6 +101,7 @@ JPH::BodyID CabinBody(const void *car);   // invalid while there is none
 struct RailwayStep {
     V3 cabinPosition{}, cabinVelocity{}, cabinAngular{}, pointVelocity{};
     unsigned contacts{}, endContacts{}, outsideContacts{}, barriersRejected{};
+    unsigned solidPanels{};
     unsigned outsideBody{}, outsideLayer{};
     const void *outsideVisual{};
     float endApproach{}, endPointZ{}, outsideDepth{};

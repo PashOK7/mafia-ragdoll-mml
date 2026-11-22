@@ -983,3 +983,11 @@ Jolt ignores upright material-33 native slabs for rail occupants attached to the
 The bounded `ragdoll.railtrace` command returns recent steps for the active mission, optionally filtered by model address. Each sample includes native speed and target, cabin velocity, relative body pose and motion, axial cabin contacts, the strongest outside contact source, and rejected barrier contacts.
 
 `tests/check_rail_station.py` confirmed the duplicate stayed out of the static world, the two native barrier rays still hit, and the ragdoll remained aboard through the entrance and exit on both builds. The largest axial contact over those four passages was 0.086 m/s. The standalone world-step fixture also passed. The verified DLL was hot-reloaded into the owner's paused freeride with Tommy still aboard. SHA-256 `bb8e5955fc74102b6c2633bfdd23afae8939a8af3728005864d8f4f29d65d01f`. Test logs, the owner capture and backups are in `../MafiaModLoader/build/rail-passenger-transition/`.
+
+## 2026-11-22 — Solid elevated-train end panels (0.1.45)
+
+The owner's next capture showed a body partly through the moving end wall. Its pelvis was at carriage Z −5.258 m against a wall contact at −5.158 m. The retained samples showed no outside contact and very little relative motion. They show the stuck state, while the initial crossing preceded the retained interval.
+
+The trailing `metro` carriage now cooks transverse faces at both ends of its fixed shell as convex panels backed away from the interior. The panels follow the original faces, including their cutouts. Door and window visuals, the cabin floor, and benches retain their existing mesh collision. The solid interior face can return a body inward after it crosses the thin rendered surface. In the standalone A/B test, the old two-sided surface settled the overlapping part 10.0 cm outside the panel. The solid panel returned it 12.5 cm inside. Both variants let the control part cross the neighbouring opening.
+
+On both game builds, `metro5` used 146 solid panel sub-shapes and passed the station entry and exit tests. The final DLL hash is `c8f0cbcac0b16e38b5efdbb8dc0d458d599fc921285651fae9794735c1725b64`. The capture, backup and checks are in `../MafiaModLoader/build/rail-panel-0145/`.

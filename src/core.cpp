@@ -1021,7 +1021,7 @@ std::string RailTrace(const std::string &args) {
                    "\"relative_velocity\":[%.4f,%.4f,%.4f],\"cabin_velocity\":[%.4f,%.4f,%.4f],"
                    "\"cabin_angular\":[%.4f,%.4f,%.4f],\"contacts\":%u,\"end_contacts\":%u,"
                    "\"end_approach\":%.4f,\"end_point_z\":%.4f,\"outside_contacts\":%u,\"outside_depth\":%.4f,"
-                   "\"outside_layer\":%u,\"outside_visual\":\"0x%08X\",\"barriers_rejected\":%u,"
+                   "\"outside_layer\":%u,\"outside_visual\":\"0x%08X\",\"barriers_rejected\":%u,\"solid_panels\":%u,"
                    "\"shot_tick\":%u,\"shot_local_dv\":%.4f}",
                    s.tick,s.dt,s.age,(unsigned)s.model,s.serial,(unsigned)s.carrier,s.carriage,s.phase,s.speed,s.target,
                    s.mesh,s.poseError,s.drawnError,s.origin.x,s.origin.y,s.origin.z,
@@ -1030,7 +1030,7 @@ std::string RailTrace(const std::string &args) {
                    s.cabinVelocity.x,s.cabinVelocity.y,s.cabinVelocity.z,s.cabinAngular.x,s.cabinAngular.y,s.cabinAngular.z,
                    s.contacts.contacts,s.contacts.endContacts,s.contacts.endApproach,s.contacts.endPointZ,
                    s.contacts.outsideContacts,s.contacts.outsideDepth,s.contacts.outsideLayer,
-                   (unsigned)(uintptr_t)s.contacts.outsideVisual,s.contacts.barriersRejected,s.shotTick,s.shotDv);
+                   (unsigned)(uintptr_t)s.contacts.outsideVisual,s.contacts.barriersRejected,s.contacts.solidPanels,s.shotTick,s.shotDv);
     }
     return out + ']';
 }
@@ -1067,10 +1067,12 @@ struct RailPart {
     V3 origin{};
     M3 axes{};
     bool visible = false;
+    bool metroShell = false;
 };
 struct RailMesh {
     std::vector<RailPart> parts;
     std::vector<V3> triangles;
+    std::vector<V3> panels;
     unsigned version = 0;
     ULONGLONG refresh = 0;
 };
@@ -1122,6 +1124,7 @@ bool ReadRailParts(void *frame, RailMesh &mesh) {
         if (!H->model_mesh(M, handle, i, 0, &geometry) || !geometry.pos || !geometry.index) continue;
         RailPart part;
         part.name = node.name;
+        part.metroShell = part.name == "metro" && node.parent < 0;
         for (int t = 0; t < geometry.triangles; ++t) {
             const uint16_t *face = geometry.index + 3*t;
             if (std::max({face[0], face[1], face[2]}) >= geometry.vertices) continue;
@@ -1133,6 +1136,34 @@ bool ReadRailParts(void *frame, RailMesh &mesh) {
         if (!part.triangles.empty()) mesh.parts.push_back(std::move(part));
     }
     return !mesh.parts.empty();
+}
+
+void RefitRailMesh(RailMesh &mesh) {
+    mesh.triangles.clear();
+    mesh.panels.clear();
+    for (const auto &part : mesh.parts) {
+        if (!part.visible) continue;
+        float low = 0.f, high = 0.f;
+        if (part.metroShell) for (V3 p : part.triangles) {
+            const float z = (part.origin + part.axes.Apply(p)).z;
+            low = std::min(low, z);
+            high = std::max(high, z);
+        }
+        for (std::size_t i=0; i<part.triangles.size(); i+=3) {
+            const V3 a = part.origin + part.axes.Apply(part.triangles[i]);
+            const V3 b = part.origin + part.axes.Apply(part.triangles[i+1]);
+            const V3 c = part.origin + part.axes.Apply(part.triangles[i+2]);
+            const float z = (a.z+b.z+c.z)/3.f;
+            const V3 normal = Cross(b-a,c-a);
+            // Use the fixed shell's transverse panels. Windows and doors
+            // retain the openings and moving parts of the original mesh.
+            const bool panel = part.metroShell && (z < low*.78f || z > high*.78f) &&
+                               std::abs(normal.z) > .86f*Len(normal);
+            auto &out = panel ? mesh.panels : mesh.triangles;
+            out.insert(out.end(),{a,b,c});
+        }
+    }
+    ++mesh.version;
 }
 
 bool RailMover(const Occupant &o, smoke::Mover &m) {
@@ -1167,17 +1198,13 @@ bool RailMover(const Occupant &o, smoke::Mover &m) {
                 }
                 part.visible = visible;
             }
-            if (changed) {
-                mesh.triangles.clear();
-                for (const auto &part : mesh.parts) if (part.visible)
-                    for (V3 p : part.triangles) mesh.triangles.push_back(part.origin + part.axes.Apply(p));
-                ++mesh.version;
-            }
+            if (changed) RefitRailMesh(mesh);
             mesh.refresh = now + 80;
         }
         if (mesh.triangles.empty()) return false;
         m.kind = smoke::Mover::HULL;
         m.hull = &mesh.triangles;
+        m.cabinPanels = &mesh.panels;
         m.hullIsTriangles = true;
         m.shapeVersion = mesh.version;
     }
