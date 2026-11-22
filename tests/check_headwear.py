@@ -166,6 +166,25 @@ def check(game):
     def hats():
         return {p['prop']: p for p in game.call('props.list')['props'] if p['model'].startswith('rdhat_')}
 
+    def verify_shadow_policy(prop):
+        def u32(address):
+            data = game.call('mem.read', addr=hex(address), size=4)['hex']
+            return struct.unpack('<I', bytes.fromhex(data))[0]
+
+        root = int(prop, 16)
+        flags = []
+        pending = [root]
+        while pending:
+            frame = pending.pop()
+            if u32(frame + 0x110) == 1:
+                flags.append(u32(frame + 0x1D8))
+            child = u32(frame + 0x124)
+            while child:
+                pending.append(child)
+                child = u32(child + 0x12C)
+        assert flags and all((f & 0x600) == 0 for f in flags), (prop, flags)
+        assert any(f & 0x2000 for f in flags), (prop, flags)
+
     def mesh_world(prop):
         pos=hats()[prop]['pos']
         frame=game.call('frame',addr=prop)
@@ -335,6 +354,7 @@ def check(game):
         prop = new.pop()
         assert after[prop]['model'].lower() == 'rdhat_' + model.lower() + '_lined.i3d'
         assert after[prop]['parent'] == 'world'
+        verify_shadow_policy(prop)
         if model == 'TommyHAT':
             check_handover([line for line in game.tool('log_tail',lines=100).splitlines() if line not in prior_log])
         game.sleep(850)

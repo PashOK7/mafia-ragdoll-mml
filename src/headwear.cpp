@@ -596,6 +596,7 @@ bool Release(Ragdoll &body,void *frame,const MountedHat &mount,V3 position,Q rot
     const std::string &name=*mount.name;
     void *prop=H->prop_create(M,(name+"_lined").c_str(),nullptr,&position.x,&rotation.w,mount.scale);
     if (!prop) return false;
+    game::DisableFrameShadowReceivers(prop);
     JPH::BodyCreationSettings settings(mount.shape,J(jolt_world::ToJolt(position)),q,
                                        JPH::EMotionType::Dynamic,jolt_world::kDynamic);
     settings.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;
