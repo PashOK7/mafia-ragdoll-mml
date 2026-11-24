@@ -1029,3 +1029,89 @@ The completion event transfers the existing body and seat to the newly registere
 Both labs preserved the same body serial, seat and visible charred model. The drawn neck matched the physical joint. SHA-256 `46b6486d4ede97f51e4d621ca45d6d6722c87c00fae932358df448b21365aa47` is active in the owner's paused process 16620. Captures, logs and backups are in `../MafiaModLoader/build/traffic-explosion-0148/`.
 
 The Bolt-Thrower and Masseur Taxi native-seat cases passed on both builds. The charred traffic props were removed on mod unload in both labs. The standalone pedestrian-motion check passed.
+
+## 2026-11-22 — The frozen silhouette comes from the explosion decal
+
+The follow-up capture retained the same charred driver. The translucent figure was a separate native blast scorch with the character's animated geometry baked into it. MafiaModLoader fixes the shared projector at creation and keeps the scorch on nearby scenery. The repaired owner capture shows the street stain and visible driver. Both labs preserved the 0.1.48 driver rig with the fixed host. See [the projector investigation](../../MafiaModLoader/knowledge/notes/car-explosion-live-occupants-20261122.md#frozen-silhouette-in-the-blast-scorch).
+
+## 2026-11-22 — Native shadow reception on loose hats (0.1.49)
+
+The common detach path uses Mafia's dropped-item receiver policy on the new prop. Native shadow projection skips every visual in the released hat. Lighting and texture projection remain active. The wearer keeps the native mounted skin, while the car still casts its ground shadow.
+
+The headwear suite checks the receiver and texture-projector flags after normal releases of five models. Both builds passed the full suite and the mounted-cap fade and mission reload fixture. The separate Phantom comparison verified the retained ground shadow. Mafia10Fixes loaded the tested DLL in its running process as generation 2. See [the investigation](../../MafiaModLoader/knowledge/notes/headwear-dark-20261121.md).
+
+## 2026-11-22 — Softer car contacts with loose bodies (0.1.50)
+
+The shared car contact solver uses one-quarter of the car proxy's inverse mass and 15% of its inverse inertia against loose dynamic bodies. It caps friction at 0.45 for those contacts. A body keeps its own solver mass, and the car still gets a finite reaction and wheel support. Body-to-road contacts and cabin contacts keep their existing material and response.
+
+The generic grounded-segment fixture at 8 m/s reduced the peak upward kick from 0.416 to 0.111 m/s and the peak turn from 1.107 to 0.179 rad/s. The body's displacement went from 0.569 to 0.589 m. The native car-impact suite passed eight checks per build, including an ordinary truck contact at 6 m/s. The owner's high-speed Thunderbird drive was left for their manual check. The verified DLL is active in Mafia10Fixes as generation 3, with the owner's mod settings preserved.
+
+## 2026-11-22 — Physical seat occupancy in convertibles (0.1.51)
+
+The pelvis constraint yields to an upward launch or a body crossing its range. The physical cabin still collides with the limbs. When the complete body clears the cabin bounds, the engine releases the native seat and links the actor back to a world sector. The existing Jolt body retains its pose and velocity.
+
+An incoming free body can meet the detailed cabin through a roof opening. The opening and cushion come from the current car mesh near a native empty seat. A slow body sustained on the cushion for 0.15 s becomes the native seat owner with its current pose and without a pelvis constraint. The standard explosion uses that seat to rebind the body to the charred model and wreck cabin. The standard Action uses the same seat to start a physical pull.
+
+The Lassiter V16 Roadster fixture covers the two seat transitions followed by an explosion or carjack in each build. Existing explosion cases for the Bolt-Thrower and Masseur Taxi passed in both builds. The fixture uses controlled Jolt impulses to isolate the consequences of an exit and a landing. A body landing in the footwell has no native seat. Roster-only traffic occupants and pedestrian models still follow their existing ownership paths.
+
+The tested DLL, SHA-256 `491597130AD6B83764D5C6B334DA47340E373BE6879B361501E99A1C0D29AF92`, is installed in the closed Mafia10Fixes copy for the next launch.
+
+## 2026-11-22 — Clear the doorway before entering a car (0.1.52)
+
+When Tommy requests an empty seat, the port projects nearby free corpses' torso capsules into that seat's doorway and checks the route above the footwell. The native pull briefly receives the blocking actor as its target. It clears the native seat as it starts the existing victim track. The same Jolt body follows Tommy's existing physical grip and falls to the street.
+
+The port resumes native entry after that grip releases, the pull track finishes and the doorway is clear. It checks that the car and seat are still available. The pending request is discarded on actor destruction, car explosion or world reset. Bodies lying clear of the entry route allow ordinary entry immediately.
+
+Both labs passed the police Tudor scenario with a free body in the driver doorway and the comparison with a body beside the car. The test checks one Action, the pull animation, a physical grip, the original body serial and native driver-seat ownership after the pull.
+
+The convertible regressions also passed in each build. The verified DLL is active in Mafia10Fixes as generation 2. The existing pause and the officer's drawn pose were preserved during installation.
+
+## 2026-11-22 — Separate human and canine bullet impulse (0.1.53)
+
+The human settings return to their values before `82f79d1`: 1 N s per damage point, 120 N s per shot and 8 m/s of local velocity. Saved user overrides still apply. A dog entering physics on a lethal shot and an existing dog rig now use the same 0.477 N s per damage point and a 54 N s per-step budget independent of the human settings. The local joint allowance stays at 4 m/s. The extra impulse mainly moves the entire rig.
+
+Both builds measured 54 N s at the dog handoff, 47.7 N s after a 100-damage repeat shot and a capped 54 N s on the close-range pellet volley. The full Motel Clark fixtures passed, including living recovery, native effects, blast, car impact and save restore. The city human sample measured median early pelvis movement of 0.569 m/s in 1.0 and 0.585 m/s in 1.2 after repeat shots, down from 1.575 and 1.717 m/s. The same build is active in the owner's paused prison as generation 3. See `../MafiaModLoader/build/shot-balance-0153/`.
+
+## 2026-11-22 — Human animation-to-physics handover (0.1.54)
+
+The existing hit filter captures the skeleton before the game's hit reaction. The displayed geometry seeds the pose. The animation tracker checks the playing clip, state, native clock and skeletal binding for compatible motion samples. A nonlethal hit closes the sample interval across the reaction. Only native actor root motion, the native falling speed and the carrier's point velocity supply bulk movement. Local limb motion from an accepted interval has zero net linear momentum and is sampled independently of the displayed pose.
+
+The stationary door replay covered the native Wright Coupe Gangster exit changing directly into a hit reaction, followed by a fatal hit in both builds. The inherited pelvis speed was 1.67 m/s. The running fixture kept roughly 5.0 m/s, the controlled airborne seed kept 4.16 m/s down and the moving car supplied 7 m/s. The standalone motion fixture injects a displaced start pose and verifies that its displacement contributes no velocity. See `../MafiaModLoader/build/animation-handover-0154/`.
+
+The convertible seat and occupied-car explosion regressions passed in both labs. Mafia10Fixes loaded the verified DLL in its paused Freeride as generation 4.
+
+## 2026-11-22 — Native movement channels and cross-seat pulls (0.1.55)
+
+Consecutive hits during native passenger exit exposed an animated displacement in the actor position, including 5.75 m/s of false upward bulk speed. A human now takes bulk velocity from the native movement vector and fall speed in the states that run movement, or from the car or rail carrier. The hit filter samples these before the damage reaction. Compatible skeleton samples still supply relative limb velocities with zero net linear momentum.
+
+A dead body can block a doorway even while the other seat owns it. The game receives that same actor as the selected door's pull target. After the physical grip releases, continuation checks the requested doorway, native seat availability and the existence of the original actor and car. The hand solver uses actual palm reach and turns each wrist to the grasp point. The trace records palm and wrist positions separately.
+
+The Wright Coupe Gangster replay passed through both doors on 1.0 and 1.2, with the victim's original bone pose and either an empty native roster or ownership by the opposite seat. A single Action continued to entry after the same body crossed the doorway. Three of eight traces exceeded the existing grasp-point speed threshold around cabin contacts. A synthetic closed door through the far foot can still hold the leg and prevent entry. The consecutive-hit car-exit, fall, running, moving-car, convertible and explosion checks passed in both labs. The verified DLL is active in Mafia10Fixes as generation 7. See `../MafiaModLoader/build/root-motion-0155/`.
+
+## 2026-11-22 — Live reports of occupied seat entry (open)
+
+The owner reported entry into a passenger seat blocked by a body and a separate entry into a Falconer Gangster with a body in the driver seat. On 0.1.55, a live Wright Coupe Gangster passenger pull found the body and brought both palms to the chest, but the reach window closed before the physical grip latched. A separate completed native extraction left the victim's clip ID at 312 after the clock reached the end. `BeingPulledFromCar` checks that ID alone, and `BodyInEntry` can consequently omit a body which still occupies the entry path. The final entry branch from the reports and the native vehicle event corresponding to the Falconer case are still unresolved.
+
+Evidence is in `../MafiaModLoader/build/seat-entry-followup-0155/`; the loader journal records the distinct vehicle events and remaining pull jerk and trapped-foot cases. The owner requested diagnosis and documentation only. The installed version and source code are untouched in this follow-up.
+
+The owner resumed development and supplied the paused Falconer case. Tommy already owned seat 0 at 1554 ms of the native driver's entry animation. The 0.1.55 obstruction query selected body 11934 in that frame. The victim had no active or stale extraction animation. The evidence captures native reservation before the completed vehicle entry event, with a physical body still crossing the sill. See `falconer-paused.json` in the evidence folder.
+
+Candidate 0.1.56 separates physical doorway obstruction from eligibility for seat transfer and checks every body capsule. A blocked pull cannot fall through to normal entry. Completed victim tracks no longer act as active pulls, and stable palm contact can establish the grip at the first outward frame. These changes target verified holes in the earlier logic. The action-time cause of the Falconer reservation still needs a matching replay.
+
+Native in-cabin side changes also check the physical path to the destination. Both builds verified the stock automatic slide towards the driver's seat after a passenger-door Action. With the captured Falconer body occupying the driver side and an empty native slot 0, Tommy kept his passenger seat.
+
+Door meshes now refresh when the current hinge transforms differ from the cached physics sample. The Falconer door travelled about 0.56 m and the largest sampled discrepancy between its visual and physical bounds centres was 0.021 m. At the initial native-to-physics handover, bodies born inside a hull reuse the existing articulated leg fit to resolve overlapping footwell surfaces. On the Falconer replay this reduced a measured 0.027 m penetration to zero before the first physics step.
+
+The normal-speed Wright passenger replay attaches both hands and pulls the trunk outside. A lower limb can stay caught on the cabin after release, leaving both seats free of native owners and entry blocked by the remaining body. Full extraction and body contact against a closing door still need coverage. The user's paused session keeps the installed 0.1.55.
+
+## 2026-11-22 — Passenger entry menu follows physical driver occupancy (0.1.57)
+
+At the front passenger door, the native drive choice is available while the driver seat is clear. A dead native driver or a physical corpse in the driver path suppresses that choice before the game creates its Action list. The passenger choice and unrelated interactions keep their native order. The native menu takes the passenger action directly when it is the only entry.
+
+## 2026-11-22 — Extract before using an obstructed passenger seat (0.1.58)
+
+The obstruction query covers the upper body over the seat cushion through to the cabin centre. When a corpse still blocks the requested entry and the native hands start to retreat, the existing grip continues outwards within the current arm reach. The same contacts and collision constraints drive this stage. Native entry resumes after the door clears, keeping the player's original choice of a passenger seat or the native slide towards the wheel.
+
+## 2026-11-23 — Recheck the native entry while the seat is reserved (0.1.59)
+
+The obstruction query runs on the resolved car at the native entry branch. A body that enters the path while Tommy is climbing in invalidates the reservation before the native finish. The engine's on-foot finalizer restores Tommy's interaction state, and the original action resumes from his approach point. The Falconer replay verifies both a body present at Action and a body arriving during the entry animation on 1.0 and 1.2.

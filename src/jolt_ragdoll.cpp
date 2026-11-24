@@ -137,9 +137,12 @@ struct Entry {
     float age = 0;
     const void *car = nullptr;              // seated in this car's cabin
     JPH::Ref<JPH::Constraint> seat;         // the pelvis held to the seat
+    bool looseSeat = false;
+    JPH::Vec3 seatHome = JPH::Vec3::sZero();
     JPH::Ref<JPH::ConstraintSettings> seatAnchor; // local anchors retained across a carrier replacement
     const void *passCar = nullptr;          // born inside this car's hull (killed in its open door): passes through it
     float passClear = 0;                    // s since no part is inside that hull any more
+    bool fitInitialFootwell = false;
     JPH::Ref<JPH::PointConstraint> grip;   // point on the driver's trunk reached by Tommy's hands
     JPH::BodyID handAnchor;
     bool reached = false;
@@ -152,6 +155,7 @@ struct Entry {
     float duck = 0;
     float reachStart = 0, deepestReach = 0, gripStart = 0, lastDepth = 0;
     float farthestPull = 0;
+    bool followThrough = false;
 
     // Held still until the static world around it is there (after a core reload, in a part of the city just
     // reached): its parts asleep, the velocities they had kept for when it goes.
@@ -348,6 +352,7 @@ void ReadBack(Ragdoll *r, Entry &e, float dt) {
 bool g_inOrder;
 
 void ReleaseGrip(Entry &e, const Ragdoll *r, bool endAction = true) {
+    e.followThrough = false;
     if (endAction) jolt_world::SetHolder(r, nullptr);
 
     if (e.grip && jolt_world::Running()) jolt_world::System()->RemoveConstraint(e.grip);
@@ -364,6 +369,7 @@ void ReleaseGrip(Entry &e, const Ragdoll *r, bool endAction = true) {
 void Unseat(Entry &e) {
     if (e.seat) { jolt_world::System()->RemoveConstraint(e.seat); e.seat = nullptr; }
     e.seatAnchor = nullptr;
+    e.looseSeat = false;
     if (e.car && e.ragdoll) {   // free now: an ordinary body again
         JPH::BodyInterface &bi = jolt_world::Bodies();
         for (int b = 0; b < BODIES; b++) bi.SetObjectLayer(e.ragdoll->GetBodyID(b), jolt_world::kDynamic);
@@ -449,6 +455,7 @@ static void FitSeatedLeg(const Ragdoll *r, Entry &e, const JPH::TransformedShape
     const float initialDepth = penetration(best, FLT_MAX);
     float bestCost = initialDepth;
     const float slop = jolt_world::System()->GetPhysicsSettings().mPenetrationSlop;
+    if (initialDepth <= slop && shift == JPH::Vec3::sZero()) return;
     // A shoe can start inside the footwell's sloping front wall. Try the
     // nearest reachable placements towards the seat and above the floor;
     // test the full shapes of the thigh, shin and shoe at each placement.
@@ -480,6 +487,22 @@ static void FitSeatedLeg(const Ragdoll *r, Entry &e, const JPH::TransformedShape
     if (bestCost < initialDepth)
         RLOG("seated %s footwell: cabin penetration %.3f -> %.3f m", foot == LFOOT ? "left" : "right",
              initialDepth, penetration(best, FLT_MAX));
+}
+
+static void FitInitialFootwell(const Ragdoll *r, Entry &e) {
+    e.fitInitialFootwell = false;
+    const auto cabin = jolt_world::CabinBody(e.passCar);
+    if (cabin.IsInvalid()) return;
+    const auto &bi = jolt_world::Bodies();
+    const auto shape = bi.GetTransformedShape(cabin);
+    const auto up = bi.GetRotation(cabin) * JPH::Vec3::sAxisY();
+    for (int thigh : {RTHIGH, LTHIGH}) {
+        const int shin = thigh + 1, foot = thigh + 2;
+        const auto delta = bi.GetPosition(e.ragdoll->GetBodyID(foot)) -
+                           bi.GetPosition(e.ragdoll->GetBodyID(thigh));
+        const auto along = (delta - up * delta.Dot(up)).NormalizedOr(up.GetNormalizedPerpendicular());
+        FitSeatedLeg(r, e, shape, thigh, shin, foot, JPH::Vec3::sZero(), along, up);
+    }
 }
 
 // The native seated pose can straddle the two faces of an upholstered backrest.
@@ -538,7 +561,7 @@ static void FitSeatBack(const Ragdoll *r, Entry &e, JPH::BodyID cabinID) {
 // nothing to hold it but friction and the seat's shape; the cabin's triangles do the rest).
 void Seat(const Ragdoll *r, Entry &e) {
     JPH::BodyID cabin = jolt_world::CabinBody(e.car);
-    if (cabin.IsInvalid() || e.seat) return;
+    if (cabin.IsInvalid() || e.seat || e.looseSeat) return;
     JPH::BodyInterface &bi = jolt_world::Bodies();
     JPH::BodyID pelvis = e.ragdoll->GetBodyID(PELVIS);
     JPH::SixDOFConstraintSettings s;
@@ -572,7 +595,27 @@ void Seat(const Ragdoll *r, Entry &e) {
     if (!c) return;
     jolt_world::System()->AddConstraint(c);
     e.seat = c;
+    e.seatHome = JPH::Vec3(bi.GetWorldTransform(cabin).InversedRotationTranslation() * bi.GetPosition(pelvis));
     e.seatAnchor = nullptr;
+}
+
+void YieldSeat(const Ragdoll *r, Entry &e) {
+    if (!e.seat || e.grip || r->carExtraction || r->puppet || !r->nativeSeatActor) return;
+    const auto cabin = jolt_world::CabinBody(e.car);
+    if (cabin.IsInvalid()) return;
+    const auto &bi = jolt_world::Bodies();
+    const auto pelvis = e.ragdoll->GetBodyID(PELVIS);
+    const auto pose = bi.GetWorldTransform(cabin);
+    const auto p = bi.GetPosition(pelvis);
+    const auto separation = JPH::Vec3(pose.InversedRotationTranslation() * p) - e.seatHome;
+    const auto velocity = pose.GetQuaternion().Conjugated() *
+        (bi.GetLinearVelocity(pelvis) - bi.GetPointVelocity(cabin, p));
+    // Let the seat yield to a hard upward launch and to a body crossing its
+    // edge. The cabin keeps ordinary solid contact until the whole body exits.
+    if (separation.GetY() <= .32f && std::abs(separation.GetX()) <= .40f && velocity.GetY() <= 2.4f) return;
+    jolt_world::System()->RemoveConstraint(e.seat);
+    e.seat = nullptr;
+    e.looseSeat = true;
 }
 
 } // namespace
@@ -714,7 +757,7 @@ static GraspSite FindGrasp(const Entry &e, const V3 *pose, V3 hands) {
     return best;
 }
 
-void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
+void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt, bool inEntryPath) {
     auto it = g_entries.find(r);
     if (it == g_entries.end() || dt <= 0) return;
     Entry &e = it->second;
@@ -775,7 +818,9 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
         const bool touched = onSurface && e.reachBlend >= 1 && PullReach(pose, points, 1).gap <= .012f;
         const bool established = touched && e.atContact && !switching;
         e.atContact = touched;
-        if (!established || depth - e.deepestReach < .015f || outwardSpeed <= 0) return;
+        // Start at the first returning frame with two stable palm contacts.
+        // Waiting for a further displacement can miss the contact altogether.
+        if (!established || outwardSpeed <= 0.f) return;
         const auto contact = J(jolt_world::ToJolt((points[0] + points[1]) * .5f));
         JPH::PointConstraintSettings settings;
         settings.mSpace = JPH::EConstraintSpace::WorldSpace;
@@ -813,11 +858,15 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     const float hipSpeed = outwardSpeed + Dot(hipVelocity - handVelocity, e.outward);
     V3 contacts[2];
     PullContacts(r, contacts);
-    if (e.farthestPull - e.gripStart > .45f &&
-        ((outwardSpeed <= 0 && hipSpeed <= 0) || e.farthestPull - depth >= .025f ||
-         PullReach(pose, contacts, 1).gap > .016f)) {
-        ReleaseGrip(e, r, false); // ignore contact with Tommy until his native action actually finishes
-        return;
+    const PullReach reach(pose, contacts, 1);
+    const bool release = e.farthestPull - e.gripStart > .45f &&
+        ((outwardSpeed <= 0 && hipSpeed <= 0) || e.farthestPull - depth >= .025f || reach.gap > .016f);
+    if (release || e.followThrough) {
+        if (!inEntryPath || reach.gap > .035f) {
+            ReleaseGrip(e, r, false); // ignore contact with Tommy until his native action actually finishes
+            return;
+        }
+        e.followThrough = true;
     }
     e.lastHands = hands;
     // Once Tommy turns away and the hands swing past his shoulders, blend back
@@ -828,6 +877,9 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     const float lower = turn * turn * (3.f - 2.f * turn);
     V3 target = hands + e.reachOffset;
     target.y -= e.reachOffset.y * lower;
+    // While a limb still blocks the door, keep carrying the same grasp
+    // outward within the arms' reach instead of following the wrists back in.
+    if (e.followThrough) target = e.anchorTarget + e.outward * .25f;
     const V3 midpoint = (contacts[0] + contacts[1]) * .5f;
     // Read the underside of the cabin ahead of the head. A high grip must
     // lower through a low header before the physical head hits its edge.
@@ -854,15 +906,14 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
     e.duck += std::clamp(required - e.duck, -dt * .45f, dt * 1.2f);
     target.y -= e.duck;
     const int arms[] = {Ragdoll::LARM, Ragdoll::RARM};
-    const int elbows[] = {Ragdoll::LELB, Ragdoll::RELB};
-    const int wrists[] = {Ragdoll::LHAND, Ragdoll::RHAND};
     // Each material contact has its own reachable sphere. Limit the physics
     // goal too, otherwise the chest can leave one drawn hand at full extension.
     V3 centre[2];
     float radius[2];
     for (int i = 0; i < 2; ++i) {
-        centre[i] = pose[arms[i]] - (contacts[i] - midpoint);
-        radius[i] = .94f * (Len(pose[elbows[i]] - pose[arms[i]]) + Len(pose[wrists[i]] - pose[elbows[i]]));
+        const V3 shoulder = e.followThrough ? reach.shoulder[i] : pose[arms[i]];
+        centre[i] = shoulder + reach.palmOffset[i] - (contacts[i] - midpoint);
+        radius[i] = .94f * reach.reach[i];
     }
     auto withinReach = [&](V3 point) {
         for (int pass = 0; pass < 3; ++pass) {
@@ -940,6 +991,42 @@ void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt) {
 const void *SeatedCar(const Ragdoll *r) {
     auto it = g_entries.find(r);
     return it == g_entries.end() ? nullptr : it->second.car;
+}
+
+bool ClearOfCabin(const Ragdoll *r) {
+    const auto it = g_entries.find(r);
+    return it != g_entries.end() && it->second.car && it->second.looseSeat && OutsideCabin(it->second);
+}
+
+bool HasLooseSeat(const Ragdoll *r) {
+    const auto it = g_entries.find(r);
+    return it != g_entries.end() && it->second.looseSeat;
+}
+
+void ApproachCabin(Ragdoll *r, const void *car) {
+    const auto it = g_entries.find(r);
+    if (it == g_entries.end() || it->second.car) return;
+    auto &e = it->second;
+    if (e.passCar != car) {
+        EndPass(e);
+        e.passCar = car;
+        for (int b = 0; b < BODIES; ++b) jolt_world::SetPassThrough(e.ragdoll->GetBodyID(b), car);
+    }
+    e.passClear = 0;
+    jolt_world::RequestCabin(car);
+}
+
+bool OccupyLooseSeat(Ragdoll *r, const void *car) {
+    const auto it = g_entries.find(r);
+    if (it == g_entries.end() || it->second.car) return false;
+    auto &e = it->second;
+    EndPass(e);
+    e.car = car;
+    e.looseSeat = true;
+    auto &bi = jolt_world::Bodies();
+    for (int b = 0; b < BODIES; ++b) bi.SetObjectLayer(e.ragdoll->GetBodyID(b), jolt_world::kOccupant);
+    jolt_world::RequestCabin(car, r);
+    return true;
 }
 
 bool TransferSeat(Ragdoll *r, void *car) {
@@ -1177,6 +1264,7 @@ bool Add(Ragdoll *r, std::string *err, const void *seatedIn, const void *struckB
         // occupant: disabling the striking hull lets the whole car pass through its victim.
         if (hull && hull != struckBy) {
             e.passCar = hull;
+            e.fitInitialFootwell = r->nativeSeatActor && !r->puppet;
             for (int b = 0; b < BODIES; b++) jolt_world::SetPassThrough(rag->GetBodyID(b), hull);
             jolt_world::RequestCabin(hull);
             RLOG("ragdoll %p starts inside car %p's hull (its open door): it meets the car's cabin, not the hull, until it is out",
@@ -1220,7 +1308,7 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
     // The seated: their cars' cabins kept, their seats made once the cabin is there.
     for (auto &[body, entry] : g_entries) {
         if (!entry.car) continue;
-        if (!entry.holding && !entry.seat && OutsideCabin(entry)) {
+        if (body->railOccupant && !entry.holding && !entry.seat && OutsideCabin(entry)) {
             RLOG("ragdoll %p cleared cabin %p and entered the world", body->actor, entry.car);
             Unseat(entry);
             continue;
@@ -1281,8 +1369,14 @@ void Step(const std::vector<Ragdoll *> &all, float dt, const std::vector<smoke::
         jolt_world::AddFocus(c - V3{12, 8, 12}, c + V3{12, 8, 12});
     }
     jolt_world::Step(dt, movers, player, [] {
-        for (auto &[body, entry] : g_entries)
-            if (entry.car && !body->railOccupant) Seat(body, entry);
+        for (auto &[body, entry] : g_entries) {
+            // Fit a pose that the native animation left inside a solid panel
+            // at the handover, before physics starts pulling against it.
+            if (entry.fitInitialFootwell) FitInitialFootwell(body, entry);
+            if (!entry.car || body->railOccupant) continue;
+            Seat(body, entry);
+            YieldSeat(body, entry);
+        }
     });
     for (Ragdoll *r : all) {
         auto it = g_entries.find(r);

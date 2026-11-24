@@ -1,4 +1,4 @@
-"""Verify that both wrists reach the chosen body surface before the driver is pulled."""
+"""Verify that both hands reach the chosen body surface before the driver is pulled."""
 import argparse
 import json
 import math
@@ -14,10 +14,10 @@ def check(path):
     result = analyze(trace)
     assert result['end'] == 'completed' and result.get('grip_s', 0) > .6, 'incomplete pull'
     grip = result['grasp']
-    assert grip['drawn_ticks'] >= .9 * result['held_ticks'], 'missing drawn wrists'
+    assert grip['drawn_ticks'] >= .9 * result['held_ticks'], 'missing drawn hands'
     assert grip['before_grasp_m'] is not None and grip['before_grasp_m'] < .035, 'late reach'
     assert grip['first_grasp_m'] < .035, 'body moved before the hands arrived'
-    assert grip['p95_m'] < .035 and grip['max_m'] < .055, 'wrist lost contact with the body'
+    assert grip['p95_m'] < .035 and grip['max_m'] < .055, 'hand lost contact with the body'
     rows = trace['samples']
     held = [i for i, row in enumerate(rows) if row['coat'] is not None]
     if 'grip_part' in rows[held[0]]:
@@ -36,7 +36,7 @@ def check(path):
     row = rows[first]
     assert row['ik_weight'] < .1, 'arms snapped to full reach'
     assert max(math.dist(w, row[k]) for w, k in zip(row['drawn_wrists'], ('left', 'right'))) < .05, 'jump on first IK frame'
-    print(f"PASS {path.name}: largest wrist separation {grip['max_m']:.3f} m")
+    print(f"PASS {path.name}: largest hand separation {grip['max_m']:.3f} m")
 
 
 if __name__ == '__main__':

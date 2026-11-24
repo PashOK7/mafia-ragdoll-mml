@@ -27,10 +27,14 @@ void Init(LogFn log);
 // seat, the door and the wheel and is thrown about as the car moves.
 bool Add(Ragdoll *r, std::string *err, const void *seatedIn = nullptr, const void *struckBy = nullptr);
 // Move a seated corpse with the player's grip during the native extraction track.
-void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt);
+void PullFromSeat(Ragdoll *r, const void *holder, const V3 *pose, float dt, bool inEntryPath);
 float PullContacts(const Ragdoll *r, V3 (&contacts)[2], const char **part = nullptr);
 void FinishPull(Ragdoll *r);
 const void *SeatedCar(const Ragdoll *r);
+bool ClearOfCabin(const Ragdoll *r);
+bool HasLooseSeat(const Ragdoll *r);
+void ApproachCabin(Ragdoll *r, const void *car);
+bool OccupyLooseSeat(Ragdoll *r, const void *car);
 // Preserve a seated body's cabin-relative pose, motion and seat anchor when the engine replaces its carrier.
 bool TransferSeat(Ragdoll *r, void *car);
 void ForgetCarrier(const void *car);

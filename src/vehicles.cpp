@@ -29,6 +29,7 @@ struct PiecePose {
     int vertices{}, triangles{};
     V3 origin{}, axes[3]{};
     bool wheel{};
+    bool door{};
     uint32_t nativeWheel{};
     size_t first{}, count{};
     int part = -1;
@@ -74,6 +75,30 @@ bool IsWheelFrame(void *frame) {
            s[3] >= '0' && s[3] <= '9';
 }
 
+bool IsDoorFrame(void *frame) {
+    const char *name = game::at<char *>(frame, game::kFrameName);
+    if (!name) return false;
+    const char *dot = strrchr(name, '.');
+    const char *part = dot ? dot + 1 : name;
+    return _strnicmp(part, "door", 4) == 0 && part[4] >= '0' && part[4] <= '9';
+}
+
+bool DoorPoseChanged(const CarBody &body, V3 origin, const V3 *axes) {
+    auto local = [&](V3 v) { return V3{Dot(v, axes[0]), Dot(v, axes[1]), Dot(v, axes[2])}; };
+    bool changed = false;
+    auto read = [&] {
+        for (const auto &piece : body.poses) {
+            if (!piece.door) continue;
+            const float *w = game::WorldMatrix(piece.visual);
+            changed = !w || Len(local(V3{w[12], w[13], w[14]} - origin) - piece.origin) > .005f;
+            for (int j = 0; w && j < 3 && !changed; ++j)
+                changed = Len(local({w[j * 4], w[j * 4 + 1], w[j * 4 + 2]}) - piece.axes[j]) > .005f;
+            if (changed) break;
+        }
+    };
+    return !Guarded(read) || changed;
+}
+
 uint32_t NativeWheel(void *car, void *visual) {
     if (game::at<int>(car, game::kActorType) != kCar) return 0;
     game::Car native(car);
@@ -107,10 +132,12 @@ const CarBody *Body(void *car) {
     if (!Guarded(r) || !root) return nullptr;
     CarBody &cached = g_bodies[car];
     const auto now = GetTickCount64();
-    if (cached.root == root && now < cached.refreshAt)
-        return cached.parts.empty() ? nullptr : &cached;
     V3 t, ax[3];
     if (!Pose(car, &t, ax)) return nullptr;
+    // Check the hinges on every sample. The ordinary mesh refresh interval is
+    // longer than several physics steps, enough for a door to pass a limb.
+    if (cached.root == root && now < cached.refreshAt && !DoorPoseChanged(cached, t, ax))
+        return cached.parts.empty() ? nullptr : &cached;
     const bool extended = MML_HAS(H, actor_meshes_ex) && H->actor_meshes_ex;
     auto meshes = [&] {
         return extended ? H->actor_meshes_ex(M, car, MML_ACTOR_MESH_HIDDEN_ROOT, g_pieces.data(), (int)g_pieces.size())
@@ -130,6 +157,7 @@ const CarBody *Body(void *car) {
         p.visual = mp.visual; p.mesh = mp.pos;
         p.vertices = mp.vertices; p.triangles = mp.triangles;
         p.wheel = IsWheelFrame(p.visual);
+        p.door = IsDoorFrame(p.visual);
         if (p.wheel) p.nativeWheel = NativeWheel(car, p.visual);
         const float *w = mp.world;
         p.origin = local(V3{w[12], w[13], w[14]} - t);
@@ -308,6 +336,47 @@ bool ModelTriangles(void *car, const std::vector<V3> **tris) {
     if (!b) return false;
     *tris = &b->all;
     return true;
+}
+
+namespace {
+float SurfaceBelow(const std::vector<V3> &triangles, V3 point, float minY, float maxY) {
+    float result = minY;
+    for (size_t i = 0; i + 2 < triangles.size(); i += 3) {
+        const V3 &a = triangles[i];
+        const V3 e = triangles[i + 1] - a, f = triangles[i + 2] - a, d = point - a;
+        const float det = e.x * f.z - e.z * f.x;
+        if (std::abs(det) < 1e-6f) continue;
+        const float u = (d.x * f.z - d.z * f.x) / det;
+        const float v = (e.x * d.z - e.z * d.x) / det;
+        if (u < 0 || v < 0 || u + v > 1) continue;
+        const float y = a.y + e.y * u + f.y * v;
+        if (y <= maxY) result = std::max(result, y);
+    }
+    return result;
+}
+}
+
+int OpenSeat(void *car, const V3 &localPelvis, float *support) {
+    int n = 0, result = -1;
+    const auto *slots = game::CarSeats(car, &n);
+    float closest = .30f * .30f;
+    for (int i = 0; i < n; ++i) {
+        if (!slots[i].usable || slots[i].owner) continue;
+        const V3 d = localPelvis - slots[i].origin;
+        const float distance = d.x * d.x + d.z * d.z;
+        if (distance >= closest || d.y < .25f || d.y > 2.4f) continue;
+        closest = distance;
+        result = i;
+    }
+    if (result < 0) return -1;
+    const std::vector<V3> *mesh;
+    if (!ModelTriangles(car, &mesh)) return -1;
+    const V3 base = slots[result].origin;
+    const float floor = SurfaceBelow(*mesh, localPelvis, base.y + .25f, base.y + .97f);
+    if (floor <= base.y + .25f ||
+        SurfaceBelow(*mesh, localPelvis, floor + .62f, floor + 2.f) > floor + .62f) return -1;
+    *support = floor;
+    return result;
 }
 
 bool HullParts(void *car, const std::vector<std::vector<V3>> **parts, unsigned *version) {

@@ -21,6 +21,9 @@ void Forget(void *car);       // the car is destroyed
 bool Pose(void *car, V3 *origin, V3 axes[3]);
 // Its model's triangles (three points each, in the axes Pose gives) and its parts (the points of one hull each).
 bool ModelTriangles(void *car, const std::vector<V3> **tris);
+// Find the closest native seat under a pelvis, with an unobstructed approach from above.
+// The support height is returned in the car's local coordinates.
+int OpenSeat(void *car, const V3 &localPelvis, float *support);
 std::string TriangleVisual(void *car, unsigned version, unsigned triangle);
 bool HullParts(void *car, const std::vector<std::vector<V3>> **parts, unsigned *version);
 

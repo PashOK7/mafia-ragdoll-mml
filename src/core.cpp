@@ -68,7 +68,7 @@ struct Config {
     bool carFeel = true;          // cars feel the bodies they push
     float trackRadius = 60.0f;    // m: people this close to the player have their pose remembered
     bool bullets = true;          // bullets strike the bodies on the ground
-    HitStrength shot{2.f, 240.f, 16.f};
+    HitStrength shot{1.f, 120.f, 8.f};
     float whole = 0.6f;           // the share of a blow that moves the whole body
     float radius = 0.3f;          // m: the parts this close to a blow share the rest
     float remember = 0.3f;        // s: bullets in someone alive given to his body if he dies within this
@@ -82,6 +82,11 @@ unsigned g_tick;
 DWORD g_playerRisingUntil;   // the player gets up (human_get_up) until then, or 0
 float g_lastDt = 1.0f / 60.0f;
 
+constexpr int kHumanPlaying = 0x70; // C_human::PersonAnim, also read by MML human_anim_state
+struct HumanTrack {
+    int clip = 0, state = 0, time = 0, duration = 0;
+};
+
 // The last two poses of every person near the player: a ragdoll starts from the pose before the game reacted, with
 // the motion the animation had.
 struct PoseHistory {
@@ -93,8 +98,21 @@ struct PoseHistory {
     V3 pedestrianPos{}, pedestrianVelocity{};
     int pedestrianAnimation = -1;
     void *pedestrianModel = nullptr;
+    HumanTrack humanTrack;
+    bool reactionBetweenSamples = false;
 };
 std::unordered_map<void *, PoseHistory> g_poses;
+struct HumanMotion {
+    V3 velocity{};
+    const char *source = "animation";
+};
+struct HumanBeforeHit {
+    Ragdoll::PoseSnap pose;
+    HumanTrack track;
+    HumanMotion motion;
+    unsigned tick = 0;
+};
+std::unordered_map<void *, HumanBeforeHit> g_beforeHumanHit;
 struct RenderedPose { Ragdoll::PoseSnap pose{}; void *model = nullptr; unsigned tick = 0; uint64_t ms = 0; };
 std::unordered_map<void *, RenderedPose> g_lastDrawn;
 
@@ -313,7 +331,7 @@ struct PullSample {
     V3 head, drawnHead, drawnNose;
     Ragdoll::Quat neck;
     bool hands, carPose, drawn;
-    V3 contact[2]{}, drawnWrist[2]{};
+    V3 contact[2]{}, drawnWrist[2]{}, drawnPalm[2]{}, localPalm[2]{};
     float ikWeight = 0;
     ArmPoints nativeArms{}, drawnArms{};
     bool armsRecorded = false;
@@ -356,7 +374,8 @@ void EndPullTrace(const char *reason) {
         if (s.ikWeight > 0)
             out += Fmt(",\"ik_weight\":%.5f,\"grip_part\":\"%s\"", s.ikWeight, s.gripPart) +
                 ",\"grip_contacts\":[" + TracePoint(s.contact[0]) + "," + TracePoint(s.contact[1]) + "]" +
-                ",\"drawn_wrists\":[" + TracePoint(s.drawnWrist[0]) + "," + TracePoint(s.drawnWrist[1]) + "]";
+                ",\"drawn_wrists\":[" + TracePoint(s.drawnWrist[0]) + "," + TracePoint(s.drawnWrist[1]) + "]" +
+                ",\"drawn_palms\":[" + TracePoint(s.drawnPalm[0]) + "," + TracePoint(s.drawnPalm[1]) + "]";
         if (s.releaseWeight > 0) out += Fmt(",\"release_weight\":%.5f",s.releaseWeight);
         out += ",\"car\":" + (s.carPose ? TracePoint(s.origin) : "null") + ",\"side\":" + (s.carPose ? TracePoint(s.side) : "null") + "}";
     }
@@ -584,17 +603,6 @@ bool SafeSnapshot(void *key, Ragdoll::PoseSnap *snap) {
     return Guarded(f) && ok;
 }
 
-// The remembered pose to measure the motion against: the newest one that differs from the pose now.
-const V3 *PreviousPose(const PoseHistory &h, const V3 *now, float *dt) {
-    if (Len(now[Ragdoll::PELVIS] - h.pts[0][Ragdoll::PELVIS]) + Len(now[Ragdoll::HEAD] - h.pts[0][Ragdoll::HEAD]) > 1e-5f) {
-        *dt = g_lastDt;
-        return h.pts[0];
-    }
-    if (h.count < 2) return nullptr;
-    *dt = h.dt[0];
-    return h.pts[1];
-}
-
 // The car a person sits in: the vehicle he uses (C_human +0x98, a car) when his model hangs under its model.
 void *SeatCarOf(void *actor) {
     void *car = nullptr;
@@ -608,6 +616,29 @@ void *SeatCarOf(void *actor) {
     };
     Guarded(f);
     return car;
+}
+
+HumanTrack ReadHumanTrack(void *human) {
+    const auto &exe = game::Exe();
+    HumanTrack result{game::at<int>(human, kHumanPlaying), game::at<int>(human, exe.humanState)};
+    using AnimTime = void(__fastcall *)(void *, void *, int *, int *);
+    reinterpret_cast<AnimTime>(exe.animTime)(&game::at<uint8_t>(human, exe.humanAnimMachine), nullptr,
+                                             &result.time, &result.duration);
+    return result;
+}
+
+bool ContinuousTrack(const HumanTrack &previous, const HumanTrack &current, float dt) {
+    if (previous.clip != current.clip || previous.state != current.state || previous.duration != current.duration)
+        return false;
+    if (current.duration <= 0) return true;
+    return current.time >= previous.time && current.time - previous.time <= std::max(32.f, dt * 3000.f);
+}
+
+V3 CarPointVelocity(void *car, V3 point) {
+    const game::Car vehicle(car);
+    const V3 centre = vehicle.v<V3>(game::Exe().vehCentre);
+    const V3 velocity = vehicle.Velocity() - Cross(vehicle.AngularVelocity(), point - centre);
+    return FinitePoint(velocity) ? velocity : V3{};
 }
 
 std::unordered_map<const void *, smoke::CabinInterior> g_wreckInteriors;
@@ -699,6 +730,23 @@ struct Cabin {
         return Floor(feet + V3{0, .5f, 0}, 1.5f, height);
     }
 };
+
+HumanMotion ReadHumanMotion(void *human, int state, V3 point) {
+    if (void *car = SeatCarOf(human)) return {CarPointVelocity(car, point), "car"};
+    V3 v = game::FromParentDir(ModelOf(human), game::HumanMovementVelocity(human, state));
+    if (void *tram = TramOf(human)) {
+        Cabin cabin{};
+        if (cabin.Open(tram, game::at<int>(human, kHumanTramCar))) {
+            const V3 forward = M3::FromWorld(game::WorldMatrix(cabin.frame)).r[2];
+            const float speed = game::at<float>(tram, 0xD4); // C_railway::GetActorSpeed
+            if (std::isfinite(speed)) v += forward * speed;
+        }
+        return {FinitePoint(v) ? v : V3{}, "railway"};
+    }
+    const char *source = state == game::kHumanStateAir || state == game::kHumanStateRunJump ? "airborne" :
+        state == game::kHumanStateStand || state == game::kHumanStateMove ? "locomotion" : "animation";
+    return {FinitePoint(v) ? v : V3{}, source};
+}
 
 void EnterTramUnder(void *h, const V3 &pelvis) {
     if (!game::Exe().humanPlatform || IsPed(h) || TramOf(h)) return;
@@ -967,11 +1015,12 @@ bool SafeCarReactions() {
 // intern_ThrowMeFromCar reparents the victim to the world, clears the vehicle and plays
 // one of four dead-occupant tracks (1.2: 588B40, 1.0: 4A90B0). The player's paired
 // pull lasts longer than the victim's clip, so keep the grip until Tommy lets go.
-constexpr int kHumanPlaying = 0x70; // C_human::PersonAnim, also read by MML human_anim_state
 bool BeingPulledFromCar(void *human) {
     if (game::at<void *>(human, game::kHumanVehicle)) return false;
     const int clip = game::at<int>(human, kHumanPlaying);
-    return clip >= 312 && clip <= 315;
+    if (clip < 312 || clip > 315) return false;
+    const HumanTrack track = ReadHumanTrack(human);
+    return track.state == 4 && track.time < track.duration;
 }
 
 struct RemoveOccupantProp {
@@ -1285,12 +1334,12 @@ void StartOccupant(Occupant o,const smoke::Mover *railMover=nullptr) {
         const float speed=game::at<float>(o.carrier,0xd4);
         if (std::fabs(speed)<45.f) {
             const V3 velocity=railMover->ax[2]*speed;
-            o.body->SetMotionFrom(nullptr,0,&velocity);
+            o.body->SetMotionFrom(velocity);
         }
     } else {
         const auto track=g_carTracks.find(o.carrier);
         if (track!=g_carTracks.end() && g_tick-track->second.tick<=2)
-            o.body->SetMotionFrom(nullptr,0,&track->second.vel);
+            o.body->SetMotionFrom(track->second.vel);
     }
     if (!jolt_ragdoll::Add(o.body.get(), &err, o.rail ? o.frame : o.carrier)) {
         LOG("occupant %p model %p physics: %s", o.carrier, o.model, err.c_str());
@@ -1439,8 +1488,7 @@ void PhysicsBulletStretch(MmlMidContext *ctx, void *) {
             headwear::BulletImpulse(hatBody,axis,hatPoint,damage);
             point=hatPoint;
         } else if (hitDog) {
-            dogs::HitBody(dogHit,axis,Momentum(damage,g_cfg.shot),damage,
-                          game::at<void *>(shot,game::kShotShooter));
+            dogs::HitBody(dogHit,axis,damage,game::at<void *>(shot,game::kShotShooter));
             point=dogHit.point;
         } else if (target) {
             const float dv = Kick(target->body.get(), axis, point, damage, part, g_cfg.shot);
@@ -1572,6 +1620,7 @@ bool TakeClonedDriver(void *human) {
             it->model, model, it->carrier, human, body->serial, body->age);
         g_occupants.erase(it);
         body->actor = human;
+        body->nativeSeatActor = human != game::Player();
         body->keyVtable = game::at<uint32_t>(human, 0);
         WatchRagdoll(body.get());
         body->Apply();
@@ -1582,7 +1631,8 @@ bool TakeClonedDriver(void *human) {
 }
 
 // ---- making a ragdoll
-Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy = nullptr) {
+Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy = nullptr,
+               const HumanBeforeHit *beforeHit = nullptr) {
     if (Ragdoll *r = Find(actor)) return r;
     // Traffic can promote the same model to a human when Tommy opens the door.
     // Keep its Jolt bodies, their velocities and their existing seat constraint.
@@ -1595,6 +1645,7 @@ Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy 
             auto body = std::move(occupant->body);
             g_occupants.erase(occupant);
             body->actor = actor;
+            body->nativeSeatActor = actor != game::Player();
             body->keyVtable = game::at<uint32_t>(actor, 0);
             g_ragdolls.push_back(std::move(body));
             return g_ragdolls.back().get();
@@ -1602,6 +1653,15 @@ Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy 
     }
     // The host must stop its previous handover before a new body captures/poses the skeleton.
     if (MML_HAS(H, human_get_up_cancel) && H->human_get_up_cancel) H->human_get_up_cancel(M, actor);
+    const bool ped = IsPed(actor);
+    HumanMotion humanMotion{};
+    if (!ped) {
+        auto captureMotion = [&] {
+            humanMotion = beforeHit ? beforeHit->motion :
+                ReadHumanMotion(actor, game::at<int>(actor, game::Exe().humanState), game::ActorWorldPos(actor));
+        };
+        Guarded(captureMotion);
+    }
     void *leftTram = LeaveTram(actor);
     auto r = std::make_unique<Ragdoll>();
     r->puppet = puppet;
@@ -1609,9 +1669,9 @@ Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy 
     r->impactVehicle = const_cast<void *>(struckBy);
     float dt = 0;
     const V3 *prev = nullptr;
+    const V3 *motionEnd = nullptr;
     const Ragdoll::PoseSnap *startPose = nullptr;
-    bool ped = IsPed(actor);
-    V3 pedestrianVelocity{};
+    V3 rootVelocity = humanMotion.velocity;
     CarHandover *handover = ped ? PendingHandover(actor) : nullptr;
     Ragdoll::PoseSnap currentPose{};
     bool preHitPose = false;
@@ -1627,12 +1687,24 @@ Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy 
                                 (!ped || hist->second.pedestrianModel == model) &&
                                 currentPose.SameBinding(hist->second.snap);
         const bool recent = continuous && g_tick - hist->second.seen <= 1;
-        if (recent) {
+        if (ped && recent) {
             startPose = &hist->second.snap;
             if (hist->second.count > 1) { prev = hist->second.pts[1]; dt = hist->second.dt[0]; }
-            if (ped) pedestrianVelocity = hist->second.pedestrianVelocity;
-        } else if (!ped && continuous) {
-            prev = PreviousPose(hist->second, currentPose.pts, &dt);
+            rootVelocity = hist->second.pedestrianVelocity;
+        }
+        if (!ped) {
+            const HumanTrack track = beforeHit ? beforeHit->track : ReadHumanTrack(actor);
+            const bool captured = beforeHit && currentPose.SameBinding(beforeHit->pose);
+            if (captured) startPose = &beforeHit->pose;
+            else if (!beforeHit && recent) startPose = &hist->second.snap;
+            // A hit may change both the playing clip and the pose. Use the newest
+            // pre-hit geometry, and take limb speeds only from a continuous interval.
+            if (recent && (!beforeHit || captured) && !hist->second.reactionBetweenSamples &&
+                hist->second.count > 1 && ContinuousTrack(hist->second.humanTrack, track, g_lastDt)) {
+                prev = hist->second.pts[1];
+                motionEnd = hist->second.pts[0];
+                dt = hist->second.dt[0];
+            }
         }
         if (handover && handover->captured && handover->model == model) {
             // Capture before native collision reaction, after this tick's dodge animation advanced.
@@ -1644,7 +1716,7 @@ Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy 
             } else {
                 prev = nullptr;
                 dt = 0;
-                pedestrianVelocity = {};
+                rootVelocity = {};
             }
         }
         inited = r->Init(actor, model, currentPose, err, startPose);
@@ -1656,17 +1728,21 @@ Ragdoll *Start(void *actor, bool puppet, std::string *err, const void *struckBy 
         return nullptr;
     }
     r->pedestrian = ped;
-    r->SetMotionFrom(prev, dt, ped ? &pedestrianVelocity : nullptr);
+    r->nativeSeatActor = !ped && actor != game::Player();
+    r->SetMotionFrom(rootVelocity, prev, dt, motionEnd);
     r->keyVtable = game::at<uint32_t>(actor, 0);
     V3 pv = r->BodyVel(Ragdoll::B_PELVIS);
-    LOG("ragdoll started on %s %p (puppet=%d, pose from %s, motion from %s, dt %.3f; pelvis %.2f %.2f %.2f m/s)", ped ? "pedestrian" : "person",
-        actor, puppet, preHitPose ? "before car hit" : startPose ? "last tick" : "now",
-        prev ? "history" : "rest", dt, pv.x, pv.y, pv.z);
+    const char *poseSource = !startPose ? "now" : preHitPose ? "before car hit" :
+        beforeHit && startPose == &beforeHit->pose ? "before hit" : "last tick";
+    LOG("ragdoll started on %s %p (puppet=%d, pose from %s, motion from %s, dt %.3f; pelvis %.2f %.2f %.2f m/s; root %.2f %.2f %.2f m/s, %s)", ped ? "pedestrian" : "person",
+        actor, puppet, poseSource,
+        prev ? "history" : "root only", dt, pv.x, pv.y, pv.z, rootVelocity.x, rootVelocity.y, rootVelocity.z,
+        ped ? "pedestrian movement" : humanMotion.source);
     if (ped && prev && dt > 1e-4f) {
         const V3 visual = (startPose->pts[Ragdoll::PELVIS] - prev[Ragdoll::PELVIS]) * (1.0f / dt);
-        if (Len(visual - pedestrianVelocity) > 8.0f)
+        if (Len(visual - rootVelocity) > 8.0f)
             LOG("pedestrian %p motion seed (animation %d): native %.2f %.2f %.2f, visual pelvis %.2f %.2f %.2f m/s",
-                actor, hist->second.pedestrianAnimation, pedestrianVelocity.x, pedestrianVelocity.y, pedestrianVelocity.z,
+                actor, hist->second.pedestrianAnimation, rootVelocity.x, rootVelocity.y, rootVelocity.z,
                 visual.x, visual.y, visual.z);
     }
     g_ragdolls.push_back(std::move(r));
@@ -1757,6 +1833,435 @@ void JoltMovers(std::vector<smoke::Mover> &out) {
         }
     }
 }
+struct SeatCandidate {
+    void *car = nullptr;
+    int index = -1;
+};
+
+bool IsTrafficCar(void *car) {
+    return RosterContains(game::Exe().trafficElements, [&](void *record) {
+        return record && game::at<uint8_t>(record, 0) && game::at<void *>(record, 12) == car;
+    });
+}
+
+SeatCandidate FindOpenSeat(const Ragdoll &body, const std::vector<smoke::Mover> &movers, bool settled) {
+    SeatCandidate result;
+    const V3 pelvis = body.BodyPos(Ragdoll::B_PELVIS);
+    float best = std::numeric_limits<float>::max();
+    for (const auto &m : movers) {
+        if (m.mass <= 0 || m.ax[1].y < .6f || Len(pelvis - m.c) > 4.f) continue;
+        void *car = const_cast<void *>(m.key);
+        if (game::at<uint8_t>(car, kCarIsWreck)) continue;
+        const V3 delta = pelvis - m.c;
+        const V3 local{Dot(delta, m.ax[0]), Dot(delta, m.ax[1]), Dot(delta, m.ax[2])};
+        const V3 speed = CarVelocity(car);
+        const V3 relative = body.BodyVel(Ragdoll::B_PELVIS) - speed;
+        if (settled && (Len(relative) > .45f || Len(body.BodyVel(Ragdoll::B_CHEST) - speed) > .65f)) continue;
+        if (!settled && Dot(relative, m.ax[1]) > .25f) continue;
+        float support;
+        const int seat = vehicles::OpenSeat(car, local, &support);
+        if (seat < 0 || IsTrafficCar(car)) continue;
+        const float height = local.y - support;
+        if (height < -.08f || height > (settled ? .30f : 1.65f)) continue;
+        if (settled && !jolt_ragdoll::CabinBlocksShot(car, pelvis, pelvis - m.ax[1] * (height + .08f), false))
+            continue;
+        int count;
+        const auto *slots = game::CarSeats(car, &count);
+        const V3 offset = local - slots[seat].origin;
+        const float d = offset.x * offset.x + offset.z * offset.z;
+        if (d < best) { result = {car, seat}; best = d; }
+    }
+    return result;
+}
+
+bool CanChangeNativeSeat(const Ragdoll &body) {
+    return body.nativeSeatActor && !body.puppet && !body.carExtraction &&
+           IsDead(body.actor) && !BeingPulledFromCar(body.actor);
+}
+
+bool CanAcquireNativeSeat(const Ragdoll &body) {
+    return CanChangeNativeSeat(body) && !game::at<void *>(body.actor, game::kHumanVehicle) &&
+           !jolt_ragdoll::SeatedCar(&body) && jolt_ragdoll::Has(&body) &&
+           !jolt_ragdoll::WaitingForGround(&body);
+}
+
+bool VacateNativeSeat(Ragdoll &body) {
+    game::ForceExitCar(body.actor);
+    if (game::at<void *>(body.actor, game::kHumanVehicle)) return false;
+    jolt_ragdoll::TransferSeat(&body, nullptr);
+    body.Apply();
+    game::at<V3>(body.actor, game::kActorPos) = game::ToParentPoint(body.Model(), body.rootPos);
+    return true;
+}
+
+bool AttachToNativeSeat(Ragdoll &body, const SeatCandidate &seat) {
+    // Keep the dead actor's existing pose. Intern_UseCar would play a living
+    // driving animation, start the engine, and change the drivetrain limits.
+    void *parent = H->actor_frame(M, seat.car);
+    if (!parent || !game::SetCarSeatOwner(seat.car, body.actor, seat.index,
+                                         game::at<float>(body.actor, game::kHumanWeight))) return false;
+    using LinkFn = int(__stdcall *)(void *, void *, uint32_t);
+    auto *frame = body.Model();
+    auto *oldParent = game::at<void *>(frame, game::kFrameParent);
+    const auto *vt = *static_cast<void ***>(frame);
+    const auto link = reinterpret_cast<LinkFn>(vt[0x2C / 4]);
+    link(frame, parent, 1);
+    if (game::at<void *>(frame, game::kFrameParent) != parent || !jolt_ragdoll::OccupyLooseSeat(&body, seat.car)) {
+        link(frame, oldParent, 1);
+        game::SetCarSeatOwner(seat.car, nullptr, seat.index, 0.f);
+        return false;
+    }
+    game::at<void *>(body.actor, game::kHumanVehicle) = seat.car;
+    game::at<void *>(body.actor, game::kHumanLastVehicle) = seat.car;
+    game::at<int>(body.actor, game::kHumanSeat) = seat.index;
+    body.landingCar = nullptr;
+    body.landingSeat = -1;
+    body.landingTime = 0.f;
+    body.Apply();
+    game::at<V3>(body.actor, game::kActorPos) = game::ToParentPoint(frame, body.rootPos);
+    return true;
+}
+
+void ReconcileNativeSeat(Ragdoll &body, const std::vector<smoke::Mover> &movers, float dt) {
+    if (!CanChangeNativeSeat(body)) return;
+    if (void *car = SeatCarOf(body.actor)) {
+        if (jolt_ragdoll::SeatedCar(&body) == car && jolt_ragdoll::ClearOfCabin(&body) && VacateNativeSeat(body))
+            LOG("ragdoll %u cleared the cabin of %p and vacated its native seat", body.serial, car);
+        return;
+    }
+    if (!CanAcquireNativeSeat(body)) return;
+    const auto seat = FindOpenSeat(body, movers, true);
+    if (!seat.car || body.landingCar != seat.car || body.landingSeat != seat.index) {
+        body.landingCar = seat.car;
+        body.landingSeat = seat.index;
+        body.landingTime = 0.f;
+        return;
+    }
+    body.landingTime += dt;
+    if (body.landingTime < .15f || !AttachToNativeSeat(body, seat)) return;
+    LOG("ragdoll %u occupied native seat %d of %p after landing", body.serial, seat.index, seat.car);
+}
+
+bool SegmentInBox(const V3 &a, const V3 &b, const V3 &lo, const V3 &hi) {
+    const float from[] = {a.x, a.y, a.z}, delta[] = {b.x - a.x, b.y - a.y, b.z - a.z};
+    const float lower[] = {lo.x, lo.y, lo.z}, upper[] = {hi.x, hi.y, hi.z};
+    float first = 0.f, last = 1.f;
+    for (int i = 0; i < 3; ++i) {
+        if (std::abs(delta[i]) < 1e-5f) {
+            if (from[i] < lower[i] || from[i] > upper[i]) return false;
+            continue;
+        }
+        const float in = (lower[i] - from[i]) / delta[i], out = (upper[i] - from[i]) / delta[i];
+        first = std::max(first, std::min(in, out));
+        last = std::min(last, std::max(in, out));
+    }
+    return first <= last;
+}
+
+int OwnedSeat(const Ragdoll &body, void *car) {
+    if (jolt_ragdoll::SeatedCar(&body) != car || SeatCarOf(body.actor) != car) return -1;
+    int count;
+    const auto *slots = game::CarSeats(car, &count);
+    const int seat = game::at<int>(body.actor, game::kHumanSeat);
+    return seat >= 0 && seat < count && slots[seat].owner == body.actor ? seat : -1;
+}
+
+bool MoveSeatForPull(Ragdoll &body, void *car, int from, int to) {
+    const float weight = game::at<float>(body.actor, game::kHumanWeight);
+    if (!game::SetCarSeatOwner(car, nullptr, from, 0.f)) return false;
+    if (!game::SetCarSeatOwner(car, body.actor, to, weight)) {
+        game::SetCarSeatOwner(car, body.actor, from, weight);
+        return false;
+    }
+    game::at<int>(body.actor, game::kHumanSeat) = to;
+    return true;
+}
+
+Ragdoll *BodyInEntry(void *car, const game::CarSeatSlot &seat, bool acrossCabin = false) {
+    V3 origin, axes[3];
+    if (!vehicles::Pose(car, &origin, axes)) return nullptr;
+    const float side = seat.origin.x < 0 ? -1.f : 1.f;
+    const float flank = std::abs(seat.origin.x);
+    // A side change crosses the centre of the cabin. Entry from the street
+    // approaches the cushion over the sill, above ground-level obstructions.
+    const V3 lo{acrossCabin ? 0.f : std::max(0.f, flank - .18f), seat.origin.y + .52f, seat.origin.z - .43f};
+    const V3 hi{flank + (acrossCabin ? .24f : .49f), seat.origin.y + 1.40f, seat.origin.z + .52f};
+    const V3 cushionLo{0.f, seat.origin.y + .28f, lo.z};
+    const V3 cushionHi{flank + .24f, hi.y, hi.z};
+    auto local = [&](V3 point) {
+        point = point - origin;
+        return V3{side * Dot(point, axes[0]), Dot(point, axes[1]), Dot(point, axes[2])};
+    };
+    Ragdoll *result = nullptr;
+    float nearest = 4.f;
+    for (const auto &body : g_ragdolls) {
+        const V3 pelvis = local(body->BodyPos(Ragdoll::B_PELVIS));
+        const float distance = Len(pelvis - V3{flank, seat.origin.y + .72f, seat.origin.z});
+        if (distance >= nearest) continue;
+        // A body can occupy the path while changing native seats, playing a
+        // pull track or waiting for ground. Those states only affect grabbing it.
+        if (!body->nativeSeatActor || body->puppet || !IsDead(body->actor) ||
+            !jolt_ragdoll::Has(body.get())) continue;
+        for (int part = 0; part < Ragdoll::BCOUNT; ++part) {
+            V3 a, b;
+            float radius;
+            body->BodyCapsule(part, &a, &b, &radius);
+            const V3 margin{radius, radius, radius};
+            V3 upper = hi;
+            if (part == Ragdoll::B_RFARM || part == Ragdoll::B_LFARM ||
+                part == Ragdoll::B_RSHIN || part == Ragdoll::B_LSHIN ||
+                part == Ragdoll::B_RFOOT || part == Ragdoll::B_LFOOT) {
+                // Extremities beside the sill can clear the route while the
+                // rest of their rig is already on the street.
+                upper.x = flank + .24f;
+            }
+            a = local(a);
+            b = local(b);
+            const bool upperBody = part <= Ragdoll::B_HEAD || part == Ragdoll::B_RUARM || part == Ragdoll::B_LUARM;
+            if (!SegmentInBox(a, b, lo - margin, upper + margin) &&
+                !(upperBody && SegmentInBox(a, b, cushionLo - margin, cushionHi + margin))) continue;
+            nearest = distance;
+            result = body.get();
+            break;
+        }
+    }
+    return result;
+}
+
+void PassengerDriveChoice(MmlMidContext *ctx, void *) {
+    if (!g_cfg.enabled) return;
+    auto check = [&] {
+        auto *record = reinterpret_cast<void *>(ctx->ecx);
+        constexpr int kEnterAndChangeSides = 2015;
+        if (game::at<uint16_t>(record, 0x28) != 1 ||
+            game::at<int>(record, 0x2C) != kEnterAndChangeSides) return;
+        void *car = game::at<void *>(record, 0x1C);
+        if (!car || game::at<int>(car, game::kActorType) != 4) return;
+        const bool v10 = game::g_exe == &game::kExe10;
+        using SeatOfUseRecord = int(__thiscall *)(void *, void *);
+        const auto seatOf = reinterpret_cast<SeatOfUseRecord>(v10 ? 0x463740 : 0x41C790);
+        if (seatOf(car, record) != 1) return;
+        int count;
+        const auto *slots = game::CarSeats(car, &count);
+        if (count < 2) return;
+        const auto &driver = slots[0];
+        const bool deadOwner = driver.owner && IsDead(driver.owner);
+        if (deadOwner || BodyInEntry(car, driver, true)) {
+            // Continue the search before it appends either this choice or its distance.
+            ctx->eip = v10 ? 0x61C095 : 0x55E2C5;
+        }
+    };
+    Guarded(check);
+}
+
+using UseActorFn = void(__fastcall *)(void *, void *, void *, int, int, int);
+using FinishCarFn = void(__fastcall *)(void *, void *, bool);
+FinishCarFn originalFinishCar;
+using ClimbInCarFn = char(__fastcall *)(void *, void *);
+ClimbInCarFn originalClimbInCar;
+
+char __fastcall ClimbInCar(void *human, void *edx) {
+    bool blocked = false;
+    auto check = [&] {
+        if (!g_cfg.enabled || human != game::Player()) return;
+        void *car = game::at<void *>(human, game::kHumanVehicle);
+        const int seat = game::at<int>(human, game::kHumanSeat);
+        if (!car || seat < 0 || game::at<int>(car, game::kActorType) != 4) return;
+        const int destination = seat ^ 1;
+        int count;
+        const auto *slots = game::CarSeats(car, &count);
+        if (destination >= count || !slots[destination].usable || slots[destination].owner) return;
+        if (const Ragdoll *body = BodyInEntry(car, slots[destination], true)) {
+            blocked = true;
+            LOG("ragdoll %u blocks the in-cabin move from seat %d to %d of %p", body->serial, seat, destination, car);
+        }
+    };
+    Guarded(check);
+    return blocked ? 0 : originalClimbInCar(human, edx);
+}
+
+struct DoorPull {
+    void *player = nullptr, *car = nullptr, *victim = nullptr;
+    unsigned serial = 0;
+    int seat = -1, alternate = 0;
+    bool grasped = false, released = false;
+    float afterPull = 0.f;
+    bool finishing = false;
+} g_doorPull;
+
+struct CarEntry {
+    void *player = nullptr, *car = nullptr;
+    int seat = -1, alternate = 0;
+    V3 approach, facing;
+};
+CarEntry g_carEntry, g_interruptedEntry;
+constexpr int kEnteringCar = 0x9C; // C_human's native transition target, also used for exit
+
+void EnterCar(const CarEntry &entry) {
+    const auto use = reinterpret_cast<UseActorFn>(game::g_exe == &game::kExe10 ? 0x4A26D0 : 0x582180);
+    use(entry.player, nullptr, entry.car, 1, entry.seat, entry.alternate);
+}
+
+bool CanEnterCar(void *player, void *car, int seat) {
+    using CanEnterFn = bool(__thiscall *)(void *, void *, int, bool);
+    const auto canEnter = reinterpret_cast<CanEnterFn>(game::g_exe == &game::kExe10 ? 0x4A0E10 : 0x5808C0);
+    return canEnter(player, car, seat, true);
+}
+
+bool ClearCarEntry(void *player, void *car, int seat, int alternate) {
+    if (!g_cfg.enabled || player != game::Player() || !car || game::at<int>(car, game::kActorType) != 4 ||
+        game::at<void *>(player, game::kHumanVehicle) || game::at<uint8_t>(car, kCarIsWreck)) return false;
+    int count;
+    const auto *slots = game::CarSeats(car, &count);
+    if (seat < 0 || seat >= count || !slots[seat].usable) return false;
+    const auto &slot = slots[seat];
+    Ragdoll *body = slot.owner ? Find(slot.owner) : BodyInEntry(car, slot);
+    if (slot.owner && (!body || !IsDead(body->actor))) return false;
+    if (!body) return false;
+    if (IsTrafficCar(car)) {
+        LOG("ragdoll %u blocks seat %d of unresolved traffic car %p", body->serial, seat, car);
+        return true;
+    }
+    const int oldSeat = OwnedSeat(*body, car);
+    if (!CanChangeNativeSeat(*body) || (oldSeat < 0 && !CanAcquireNativeSeat(*body)) ||
+        !CanEnterCar(player, car, seat)) {
+        LOG("ragdoll %u still blocks seat %d of %p: native pull unavailable", body->serial, seat, car);
+        return true;
+    }
+    // The native pull selects its target by the requested door's seat. A body
+    // can block this door while owning the adjacent seat. Keep the same rig
+    // and cabin, and give the pull its target through the selected door.
+    const bool attached = oldSeat == seat || (oldSeat >= 0 ? MoveSeatForPull(*body, car, oldSeat, seat)
+                                                          : AttachToNativeSeat(*body, {car, seat}));
+    if (!attached) {
+        LOG("ragdoll %u still blocks seat %d of %p: could not attach for pull", body->serial, seat, car);
+        return true;
+    }
+    using PullFn = char(__thiscall *)(void *, void *, int);
+    const auto pull = reinterpret_cast<PullFn>(game::g_exe == &game::kExe10 ? 0x4A82E0 : 0x587D70);
+    const unsigned serial = body->serial;
+    void *actor = body->actor;
+    const bool started = pull(player, car, seat) != 0;
+    if (Ragdoll *current = Find(actor); current && current->serial == serial) {
+        if (started && BeingPulledFromCar(actor)) {
+            g_doorPull = {player, car, actor, serial, seat, alternate};
+            LOG("ragdoll %u obstructs seat %d of %p: player started a native pull", serial, seat, car);
+        } else if (SeatCarOf(actor) == car) {
+            if (oldSeat < 0) VacateNativeSeat(*current);
+            else if (oldSeat != seat) MoveSeatForPull(*current, car, seat, oldSeat);
+        }
+    }
+    return true;
+}
+
+void ResolveCarEntry(MmlMidContext *ctx, void *) {
+    if (!g_cfg.enabled || !ctx->eax) return;
+    auto *player = reinterpret_cast<void *>(ctx->ebp);
+    if (player != game::Player()) return;
+    auto *car = reinterpret_cast<void *>(ctx->eax);
+    const int seat = static_cast<int>(ctx->edi);
+    const int alternate = game::at<int>(reinterpret_cast<void *>(ctx->esp), 0x118);
+    if (game::at<void *>(player, kEnteringCar)) {
+        ctx->eip = game::g_exe == &game::kExe10 ? 0x4A3A9F : 0x58354F;
+        return;
+    }
+    g_carEntry = {};
+    bool consumed = false;
+    auto check = [&] {
+        consumed = ClearCarEntry(player, car, seat, alternate);
+        if (!consumed) g_carEntry = {player, car, seat, alternate, game::ActorWorldPos(player),
+                                    game::at<V3>(player, game::kActorFacing)};
+    };
+    if (!Guarded(check)) {
+        consumed = true;
+        LOG("car entry check faulted for seat %d of %p", seat, car);
+    }
+    if (consumed) ctx->eip = game::g_exe == &game::kExe10 ? 0x4A3A9F : 0x58354F;
+}
+
+bool InterruptObstructedEntry(void *human) {
+    const CarEntry entry = g_carEntry;
+    if (!g_cfg.enabled || !entry.car || entry.player != human || human != game::Player()) return false;
+    void *car = game::at<void *>(human, kEnteringCar);
+    const int seat = game::at<int>(human, game::kHumanSeat);
+    if (entry.car != car || entry.seat != seat || game::at<void *>(human, game::kHumanVehicle)) return false;
+    int count;
+    const auto *slots = game::CarSeats(car, &count);
+    if (seat < 0 || seat >= count || slots[seat].owner != human) return false;
+    const Ragdoll *blocker = BodyInEntry(car, slots[seat]);
+    if (!blocker) return false;
+    g_carEntry = {};
+    // The native exit finalizer restores on-foot inventory and collisions.
+    // The entry reserved the slot and locked the vehicle before that point.
+    const unsigned serial = blocker->serial;
+    game::SetCarSeatOwner(car, nullptr, seat, 0.f);
+    const bool v10 = game::g_exe == &game::kExe10;
+    using LockFn = void(__thiscall *)(void *, bool);
+    reinterpret_cast<LockFn>(v10 ? 0x519650 : 0x4CD600)(&game::at<uint8_t>(car, game::Exe().vehicle), false);
+    originalFinishCar(human, nullptr, false);
+    using StopAnimFn = void(__thiscall *)(void *);
+    reinterpret_cast<StopAnimFn>(v10 ? 0x49D840 : 0x57D2E0)(human);
+    game::at<int>(human, game::kHumanSeat) = -1;
+    const MmlVec3 approach{entry.approach.x, entry.approach.y, entry.approach.z};
+    const MmlVec3 facing{entry.facing.x, entry.facing.y, entry.facing.z};
+    if (H->actor_teleport(M, human, &approach, &facing)) g_interruptedEntry = entry;
+    LOG("ragdoll %u entered the path before seat %d of %p completed; returning to the door",
+        serial, seat, car);
+    return true;
+}
+
+void __fastcall FinishCar(void *human, void *edx, bool enter) {
+    if (enter && InterruptObstructedEntry(human)) return;
+    if (g_carEntry.player == human) g_carEntry = {};
+    originalFinishCar(human, edx, enter);
+}
+
+void ContinueCarEntry(float dt) {
+    if (g_interruptedEntry.car) {
+        const CarEntry retry = g_interruptedEntry;
+        g_interruptedEntry = {};
+        if (retry.player == game::Player() && !IsDead(retry.player)) EnterCar(retry);
+    }
+    if (g_carEntry.player && InterruptObstructedEntry(g_carEntry.player)) return;
+    auto &pending = g_doorPull;
+    if (!pending.car) return;
+    const auto *body = Find(pending.victim);
+    if (pending.player != game::Player() || IsDead(pending.player) ||
+        game::at<void *>(pending.player, game::kHumanVehicle) || !body || body->serial != pending.serial) {
+        pending = {};
+        return;
+    }
+    const int clip = game::at<int>(pending.player, kHumanPlaying);
+    if (clip == 306 || clip == 307) {
+        if (jolt_ragdoll::GripDistance(body) >= 0.f) pending.grasped = true;
+        else if (pending.grasped) pending.released = true;
+        if (pending.grasped) {
+            const auto track = ReadHumanTrack(pending.player);
+            pending.finishing = track.duration > 0 && track.time + std::max(100.f, 2000.f * dt) >= track.duration;
+        }
+        return;
+    }
+    if (pending.finishing && !body->carExtraction) pending.released = true;
+    pending.afterPull += dt;
+    if (!pending.released || pending.afterPull > .6f ||
+        Len(game::ActorWorldPos(pending.player) - game::ActorWorldPos(pending.car)) > 3.f) {
+        pending = {};
+        return;
+    }
+    int count;
+    const auto *slots = game::CarSeats(pending.car, &count);
+    if (pending.seat >= count || !slots[pending.seat].usable || slots[pending.seat].owner) {
+        pending = {};
+        return;
+    }
+    if (body->carExtraction || BodyInEntry(pending.car, slots[pending.seat]) ||
+        !CanEnterCar(pending.player, pending.car, pending.seat)) return;
+    const DoorPull entry = pending;
+    pending = {};
+    EnterCar({entry.player, entry.car, entry.seat, entry.alternate});
+    LOG("ragdoll %u cleared the doorway of %p: continuing entry at seat %d", entry.serial, entry.car, entry.seat);
+}
+
 void JoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
     void *pl = game::Player();
     if (!jolt_world::Running()) {
@@ -1777,8 +2282,15 @@ void JoltStep(const std::vector<Ragdoll *> &jolt, float dt) {
         const auto interior = g_wreckInteriors.find(mover.key);
         if (interior != g_wreckInteriors.end()) mover.wreckInterior = &interior->second;
     }
+    for (const auto &body : g_ragdolls) {
+        if (!CanChangeNativeSeat(*body) || jolt_ragdoll::SeatedCar(body.get()) ||
+            game::at<void *>(body->actor, game::kHumanVehicle)) continue;
+        const auto seat = FindOpenSeat(*body, movers, false);
+        if (seat.car) jolt_ragdoll::ApproachCabin(body.get(), seat.car);
+    }
     headwear::ApplyAirDrag(dt);
     jolt_ragdoll::Step(jolt, dt, movers, pl ? &pp : nullptr);
+    for (const auto &body : g_ragdolls) ReconcileNativeSeat(*body, movers, dt);
     SampleRailway(dt);
     dogs::FinishStep();
 }
@@ -1858,6 +2370,7 @@ bool AtRest(Ragdoll *r, float overwritten) {
 // push)
 std::unordered_set<void *> g_failed;   // bodies a ragdoll could not start on (until they live again)
 void TrackPoses(float dt) {
+    std::erase_if(g_beforeHumanHit, [](const auto &entry) { return entry.second.tick != g_tick; });
     void *pl = game::Player();
     if (!pl) return;
     V3 pp = game::ActorWorldPos(pl);
@@ -1901,6 +2414,13 @@ void TrackPoses(float dt) {
             ph.pedestrianAnimation = animation;
             ph.pedestrianModel = model;
             if (!valid) ph.count = 0;
+        } else {
+            const HumanTrack track = ReadHumanTrack(h);
+            const bool adjacent = ph.count && g_tick - ph.seen == 1 && dt > 1e-4f;
+            const bool continuous = adjacent && !ph.reactionBetweenSamples && ContinuousTrack(ph.humanTrack, track, dt);
+            if (!continuous) ph.count = 0;
+            ph.humanTrack = track;
+            ph.reactionBetweenSamples = false;
         }
         memcpy(ph.pts[1], ph.pts[0], sizeof ph.pts[0]);
         memcpy(ph.pts[0], snap.pts, sizeof snap.pts);
@@ -2092,8 +2612,16 @@ void TickBody(float dt) {
                     g_pull.hands = true;
                 }
                 const V3 hands = (pose[Ragdoll::RHAND] + pose[Ragdoll::LHAND]) * .5f;
-                if (FinitePoint(hands) && FinitePoint(pose[Ragdoll::PELVIS]))
-                    jolt_ragdoll::PullFromSeat(rd, player, pose, dt);
+                if (FinitePoint(hands) && FinitePoint(pose[Ragdoll::PELVIS])) {
+                    bool blocked = false;
+                    if (g_doorPull.serial == rd->serial && g_doorPull.player == player) {
+                        int count;
+                        const auto *slots = game::CarSeats(g_doorPull.car, &count);
+                        blocked = g_doorPull.seat >= 0 && g_doorPull.seat < count &&
+                                  BodyInEntry(g_doorPull.car, slots[g_doorPull.seat]) == rd;
+                    }
+                    jolt_ragdoll::PullFromSeat(rd, player, pose, dt, blocked);
+                }
             }
         }
         if (AliveAgain(rd)) {
@@ -2123,6 +2651,8 @@ void TickBody(float dt) {
     if (joltOk) {
         headwear::Sync();
         SamplePull(dt);
+        auto entry = [&] { ContinueCarEntry(dt); };
+        if (!Guarded(entry)) g_doorPull = {};
         TracePedestrians(TrajectoryStage::Physics);
         for (auto &entry : g_handovers) {
             if (entry.started && entry.body && entry.body->age <= 3.5f) {
@@ -2405,9 +2935,20 @@ char __fastcall hkPedCarHit(void *self, void *edx, uint32_t a1, uint32_t a2, uin
 
 // ---- a bullet in a corpse: the mod's (the game's Hit would run a living person's hit logic on him; a dead
 // pedestrian's element would be woken and cry out)
-int HitFilter(void *person, int, MmlHumanHit *hit, void *) {
+int HitFilter(void *person, int pedestrian, MmlHumanHit *hit, void *) {
     if (H->mission_state() == MML_MISSION_LOADING) return MML_HIT_GAME;
     Ragdoll *rd = Find(person);
+    if (g_cfg.enabled && hit->was_alive && !pedestrian && !rd) {
+        auto capture = [&] {
+            HumanBeforeHit sample{};
+            if (!SafeSnapshot(person, &sample.pose)) return;
+            sample.track = ReadHumanTrack(person);
+            sample.motion = ReadHumanMotion(person, sample.track.state, sample.pose.pts[Ragdoll::PELVIS]);
+            sample.tick = g_tick;
+            g_beforeHumanHit.insert_or_assign(person, sample);
+        };
+        Guarded(capture);
+    }
     if (!rd || !g_cfg.enabled || hit->was_alive || hit->type == 2 || hit->type == 3) return MML_HIT_GAME;   // (a blast: OnExplosion)
     if (hit->shape || hit->type == 0) {
         if (!g_cfg.bullets) return MML_HIT_TAKEN; // preserve native corpse state without an impulse
@@ -2471,9 +3012,10 @@ void Tick(float dt) {
 // local rotations after world drawing so the corrected wrists never feed back.
 struct PullArmPose {
     void *model{};
-    void *frame[7]{};
-    Q local[7]{};
-    Q applied[7]{};
+    static constexpr int bones[] = {15, 16, 11, 12, 6, 14, 10, 17, 13};
+    void *frame[std::size(bones)]{};
+    Q local[std::size(bones)]{};
+    Q applied[std::size(bones)]{};
 } g_pullArms;
 struct {
     unsigned serial{};
@@ -2487,7 +3029,7 @@ void RestorePullArms() {
     if (!saved.model || g_freed.count(saved.model)) return;
     void *player = game::Player();
     if (!player || ModelOf(player) != saved.model) return;
-    for (int i = 0; i < 7; ++i) {
+    for (size_t i = 0; i < std::size(saved.bones); ++i) {
         if (!saved.frame[i] || g_freed.count(saved.frame[i])) continue;
         const Q current = game::at<Q>(saved.frame[i], game::kFrameRot);
         // A skipped world-draw callback can leave a newer native animation here.
@@ -2529,13 +3071,12 @@ void PosePullArms(const Ragdoll *driver) {
     g_pullArms.model = ModelOf(game::Player());
     if (released) {
         // Fade only the correction from the last held frame. Native animation
-        // continues in all seven joints, including after the carjack clip ends.
+        // continues in each joint, including after the carjack clip ends.
         if (row) { row->phase = "release"; row->releaseWeight = weight; }
         const auto &last = g_lastAttached.pose;
-        const int bones[] = {15,16,11,12,6,14,10};
         if (g_lastAttached.serial != driver->serial || last.model != g_pullArms.model) return;
-        for (int i = 0; i < 7; ++i) {
-            void *frame = pose.frames[bones[i]];
+        for (size_t i = 0; i < std::size(last.bones); ++i) {
+            void *frame = pose.frames[last.bones[i]];
             if (!frame || last.frame[i] != frame) continue;
             float base[16], held[16], now[16];
             QuatMatrix(last.local[i],base);
@@ -2599,6 +3140,16 @@ void PosePullArms(const Ragdoll *driver) {
         const M3 foreWorld = pose.rot[arm+1] * oldFore.T() * newFore;
         SetPullRotation(2*i, pose.frames[arm], upperWorld * pose.rot[arm-1].T());
         SetPullRotation(2*i+1, pose.frames[arm+1], foreWorld * upperWorld.T());
+        // The palm has its own contact offset, so articulate the wrist as the
+        // fingers close on the surface. Preserve its animated twist.
+        const M3 wristWorld = pose.rot[arm+2] * oldFore.T() * newFore;
+        const V3 from = Norm(end - solved);
+        const V3 to = Norm(contact[i] - end, from);
+        const V3 axisOfTurn = Cross(from, to);
+        const float bendAngle = std::atan2(Len(axisOfTurn), Dot(from, to));
+        const M3 wristTurn = PullReach::Turn(Norm(axisOfTurn, newFore.r[1]), weight * std::min(bendAngle, 1.1f));
+        SetPullRotation(7+i, pose.frames[arm+2], wristWorld * wristTurn * foreWorld.T());
+        if (row) row->localPalm[i] = wristWorld.T().Apply(from * Len(plan.palmOffset[i]));
     }
     // A smoothstep's peak slope is 1.5. Allocate recovery time from the
     // actual displacement at contact, at ordinary arm-reaching speed.
@@ -2685,6 +3236,8 @@ void Rendered() {
                         row.ikWeight = jolt_ragdoll::PullContacts(g_pull.body, row.contact, &row.gripPart);
                     row.drawnWrist[0] = pose.pts[Ragdoll::LHAND];
                     row.drawnWrist[1] = pose.pts[Ragdoll::RHAND];
+                    for (int i = 0; i < 2; ++i)
+                        row.drawnPalm[i] = row.drawnWrist[i] + pose.rot[i ? 13 : 17].Apply(row.localPalm[i]);
                 }
                 row.drawn = true;
             }
@@ -2717,6 +3270,7 @@ void Rendered() {
 
 void OnHit(const MmlEvent &ev) {
     if (g_transportShot) g_transportShot->hitPerson = true;
+    auto captured = g_beforeHumanHit.extract(ev.actor);
     if (!ev.hit || ev.hit->taken || !ev.actor) return;
     void *human = ev.actor;
     const MmlHumanHit &h = *ev.hit;
@@ -2775,11 +3329,16 @@ void OnHit(const MmlEvent &ev) {
         bool knocked = alive && ((hardCarHit && g_cfg.carKnockdown) || body || playerBlast) &&
                        (IsPed(human) || !SeatCarOf(human));
         if (!died && !knocked) {
+            if (wasAlive && alive && dmg > 0) {
+                auto history = g_poses.find(human);
+                if (history != g_poses.end()) history->second.reactionBetweenSamples = true;
+            }
             if (!blast && !car && (!bullet || g_cfg.bullets)) Remember(human, dir, hasPos ? &pos : nullptr, dmg, strength);
             return;
         }
         std::string err;
-        rd = Start(human, knocked, &err, car ? attacker : nullptr);
+        const bool preHit = !captured.empty() && captured.mapped().tick == g_tick;
+        rd = Start(human, knocked, &err, car ? attacker : nullptr, preHit ? &captured.mapped() : nullptr);
         if (!rd) return;
         rd->knockdown = knocked;
         LOG("hit %p type %d damage %.1f alive %d->%d%s: a ragdoll", human, type, dmg, wasAlive, alive,
@@ -2874,6 +3433,9 @@ bool CharTrafficOccupant(Occupant &o, void *wreck) {
 
 void OnCarExploded(void *car) {
     if (!car || !g_cfg.enabled) return;
+    if (g_doorPull.car == car) g_doorPull = {};
+    if (g_carEntry.car == car) g_carEntry = {};
+    if (g_interruptedEntry.car == car) g_interruptedEntry = {};
     std::vector<Ragdoll *> rebound;
     for (auto &body : g_ragdolls) {
         if (body->pedestrian || jolt_ragdoll::SeatedCar(body.get()) != car) continue;
@@ -2884,7 +3446,15 @@ void OnCarExploded(void *car) {
             Ragdoll::PoseSnap live;
             if (!SafeSnapshot(body->actor, &live)) return;
             if (wreck == car && std::equal(std::begin(live.frames), std::end(live.frames), body->Frames())) return;
-            if (!jolt_ragdoll::TransferSeat(body.get(), wreck) || !body->RebindModel(ModelOf(body->actor), live)) return;
+            const bool loose = jolt_ragdoll::HasLooseSeat(body.get());
+            if (!jolt_ragdoll::TransferSeat(body.get(), wreck) || !body->RebindModel(ModelOf(body->actor), live, loose))
+                return;
+            if (loose) {
+                M3 rotation[19];
+                V3 origins[19];
+                body->PhysicalPose(rotation, origins);
+                Ragdoll::PointsFromPose(rotation, origins, live.pts);
+            }
             RememberWreckInterior(wreck, body->Model(), live.pts);
             body->carExtraction = false;
             rebound.push_back(body.get());
@@ -2907,6 +3477,9 @@ void OnCarExploded(void *car) {
 }
 
 void OnActorDestroyed(void *actor) {
+    if (actor == g_doorPull.car || actor == g_doorPull.player || actor == g_doorPull.victim) g_doorPull = {};
+    if (actor == g_carEntry.car || actor == g_carEntry.player) g_carEntry = {};
+    if (actor == g_interruptedEntry.car || actor == g_interruptedEntry.player) g_interruptedEntry = {};
     dogs::Forget(actor);
     jolt_ragdoll::ForgetCarrier(actor);
     std::erase_if(g_occupants, [actor](auto &o) {
@@ -2922,6 +3495,7 @@ void OnActorDestroyed(void *actor) {
     g_kept.erase(std::remove_if(g_kept.begin(), g_kept.end(), [&](const Kept &k) { return k.actor == actor; }), g_kept.end());
     std::erase_if(g_railPassengers, [actor](const auto &p) { return p.first == actor || p.second.tram == actor; });
     g_poses.erase(actor);
+    g_beforeHumanHit.erase(actor);
     g_lastDrawn.erase(actor);
     g_isHuman.erase(actor);
     g_failed.erase(actor);
@@ -2964,6 +3538,9 @@ bool WaterAt(float x, float y, float z, float *surfaceY, V3 *normal, V3 *flow) {
 }
 
 void OnWorldReset(const char *reason) {
+    g_doorPull = {};
+    g_carEntry = {};
+    g_interruptedEntry = {};
     headwear::Reset();
     dogs::Clear();
     g_lastAttached = {};
@@ -2988,6 +3565,7 @@ void OnWorldReset(const char *reason) {
     knock::Clear();
     g_railPassengers.clear();
     g_poses.clear();
+    g_beforeHumanHit.clear();
     g_lastDrawn.clear();
     g_isHuman.clear();
     g_failed.clear();
@@ -3078,6 +3656,20 @@ void Start() {
     const bool carHit = H->hook(M, v10 ? 0x46A670 : 0x423600, reinterpret_cast<void *>(&CarHit), reinterpret_cast<void **>(&originalCarHit));
     const bool railHit = H->hook(M, v10 ? 0x4E1D90 : 0x490B40, reinterpret_cast<void *>(&RailwayHit), reinterpret_cast<void **>(&originalRailHit));
     LOG("occupant death pose capture: traffic %d, railway %d; shot impulses: traffic %d, railway %d", traffic, rail, carHit, railHit);
+    const uintptr_t resolvedCar = v10 ? 0x4A2815 : 0x5822C5;
+    constexpr uint8_t resolvedCarCode[] = {0x8B, 0xF0, 0x85, 0xF6};
+    if (memcmp(reinterpret_cast<const void *>(resolvedCar), resolvedCarCode, sizeof resolvedCarCode) != 0 ||
+        !H->hook_mid(M, resolvedCar, ResolveCarEntry, nullptr))
+        LOG("car entry obstruction check unavailable");
+    if (!H->hook(M, v10 ? 0x491B50 : 0x5716D0, reinterpret_cast<void *>(&FinishCar), reinterpret_cast<void **>(&originalFinishCar)))
+        LOG("car entry completion check unavailable");
+    if (!H->hook(M, v10 ? 0x4A2400 : 0x581EB0, reinterpret_cast<void *>(&ClimbInCar), reinterpret_cast<void **>(&originalClimbInCar)))
+        LOG("car seat change obstruction check unavailable");
+    const uintptr_t choice = v10 ? 0x61C06F : 0x55E29F;
+    constexpr uint8_t appendChoice[] = {0x83, 0xC1, 0x28, 0x51, 0x8B, 0x4D, 0x08};
+    if (memcmp(reinterpret_cast<const void *>(choice), appendChoice, sizeof appendChoice) != 0 ||
+        !H->hook_mid(M, choice, PassengerDriveChoice, nullptr))
+        LOG("passenger door choice filter unavailable");
     const auto bulletRay=game::Exe().bulletRay;
     if (!H->hook_mid(M,bulletRay,PhysicsBulletStretch,nullptr))
         LOG("physics bullet stretch unavailable");

@@ -47,6 +47,10 @@ public:
     bool puppet = false;       // started by command on a living human (no death)
     bool knockdown = false;    // a living human knocked over by a car: handed back to the game once it lies still
     bool railOccupant = false; // limbs and pelvis rest freely on the carriage geometry
+    bool nativeSeatActor = false; // C_human, with a native car seat which can be released
+    void *landingCar = nullptr;
+    int landingSeat = -1;
+    float landingTime = 0.f;
     bool vehicleImpact = false; // car impacts use collision forces, with no animation-driven muscle target
     void *impactVehicle = nullptr; // keep the striking vehicle discoverable until it leaves the body's area
     bool sleeping = false;     // at rest (Jolt's sleep)
@@ -96,7 +100,8 @@ public:
     unsigned animSerial = 0;
     // Set when bullets or blasts edit the parts' velocities: the physics takes them over.
     bool velocityEdited = false;
-    void SetMotionFrom(const V3 *prevWorld, float dt, const V3 *rootVelocity = nullptr);
+    void SetMotionFrom(const V3 &rootVelocity, const V3 *prevWorld = nullptr, float dt = 0.f,
+                       const V3 *motionEnd = nullptr);
     void Setup(const V3 *pts, const V3 &fwd, const M3 *rot20 = nullptr);   // parts and full skeletal orientation
     // A blast at `centre`: each part thrown away from it (and up by `lift` of its speed), `speed` m/s at the centre
     // falling off to 0 at `radius` as (1 - d/radius)^1.5; the nearer side more, so the body turns. False: out of reach.

@@ -28,7 +28,8 @@ namespace dogs {
 namespace {
 constexpr int kDog = 0x15, kHealth = 0xd0, kState = 0xb4, kDead = 0x0f;
 constexpr float kRecoveryTime=.58f;
-constexpr float kDogShotGain=6.f, kDogImpulsePerDamage=.053f;
+constexpr float kLiveHitImpulsePerDamage=.053f;
+constexpr float kBulletImpulsePerDamage=.477f, kBulletImpulsePerStep=54.f;
 // The stock pes skin has one physical trunk root and four independent leg chains.
 enum Bone { Pelvis, Back, Chest, Neck, Throat, Head, Jaw,
             FrontLeftShoulder, FrontLeftElbow, FrontLeftWrist, FrontLeftToe,
@@ -421,20 +422,22 @@ void Push(Dog &d,int part,V3 point,V3 impulse) {
     physics.AddImpulse(d.body->GetBodyID(1),Vec(impulse*.20f));
 }
 
-void PushSimulatedDog(Dog &dog,int part,V3 point,V3 direction,float baseImpulse) {
+void PushSimulatedDog(Dog &dog,int part,V3 point,V3 direction,float damage) {
     // Reserve most of the kick for translation and bound a whole pellet
     // volley and each joint separately.
-    constexpr float volleyLimit=36.f, localSpeedLimit=4.f;
+    constexpr float localSpeedLimit=4.f;
     constexpr float totalMass=[] {
         float mass=0.f;
         for (const auto &segment:parts) mass+=segment.mass;
         return mass;
     }();
-    const float impulse=std::min(baseImpulse*kDogShotGain,volleyLimit-dog.shotBudgetUsed);
+    direction=Norm(direction);
+    const float impulse=std::min(damage*kBulletImpulsePerDamage,kBulletImpulsePerStep-dog.shotBudgetUsed);
     if (!(impulse>0.f)) return;
     dog.shotBudgetUsed+=impulse;
     dog.lastShotImpulse=dog.shotBudgetUsed;
-    const float local=std::min(impulse*.30f,parts[part].mass*localSpeedLimit-dog.localShotUsed[part]);
+    const float remainingLocal=std::max(0.f,parts[part].mass*localSpeedLimit-dog.localShotUsed[part]);
+    const float local=std::min(impulse*.30f,remainingLocal);
     dog.localShotUsed[part]+=local;
 
     auto &physics=jolt_world::Bodies();
@@ -514,11 +517,10 @@ bool Add(Dog &d,bool dead) {
         int closest=0;
         for (int i=1;i<PartCount;++i)
             if (Len(points[parts[i].frame].pos-d.shot.pos)<Len(points[parts[closest].frame].pos-d.shot.pos)) closest=i;
-        const float strength=std::clamp(kDogImpulsePerDamage*d.shot.damage,.5f,5.8f);
         if (dead && Dot(d.shot.dir,d.shot.dir)>.01f)
-            PushSimulatedDog(d,closest,d.shot.pos,d.shot.dir,strength);
+            PushSimulatedDog(d,closest,d.shot.pos,d.shot.dir,d.shot.damage);
         else
-            Push(d,closest,d.shot.pos,d.shot.dir*strength);
+            Push(d,closest,d.shot.pos,d.shot.dir*std::clamp(kLiveHitImpulsePerDamage*d.shot.damage,.5f,5.8f));
         d.shot={};
     }
     return true;
@@ -918,9 +920,9 @@ bool TraceShot(V3 from,V3 axis,float limit,ShotHit &hit) {
     }
     return hit.actor!=nullptr;
 }
-void HitBody(const ShotHit &hit,V3 direction,float strength,float damage,void *shooter) {
+void HitBody(const ShotHit &hit,V3 direction,float damage,void *shooter) {
     auto &dog=tracked.at(hit.actor);
-    PushSimulatedDog(dog,hit.part,hit.point,direction,strength*(kDogImpulsePerDamage*.5f));
+    PushSimulatedDog(dog,hit.part,hit.point,direction,damage);
     if (!Dead(hit.actor) && nativeHit) {
         V3 point=hit.point;
         dog.quiet=0.f;

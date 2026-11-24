@@ -5,9 +5,20 @@
 // The same spine, clavicles and arm lengths determine what the hands can reach
 // in the physics tick and where they are placed in the render pose.
 struct PullReach {
-    V3 pivot, goal[2], clav[2], shoulder[2];
+    V3 pivot, goal[2], palmOffset[2], clav[2], shoulder[2];
     float reach[2], gap = 0;
     M3 lean, swing[2];
+
+    static float PalmDepth(V3 wrist, V3 tip) { return .8f * Len(tip - wrist); }
+
+    static M3 Turn(V3 axis, float radians) {
+        const float half = .5f * radians;
+        // LS3D applies row vectors: a positive quaternion spins X towards -Y about Z.
+        const V3 v = Norm(axis) * -std::sin(half);
+        float m[16];
+        QuatMatrix({std::cos(half), v.x, v.y, v.z}, m);
+        return M3::Raw(m);
+    }
 
     static M3 Swing(V3 pivot, V3 shoulder, V3 goal, float reach, float limit) {
         const V3 delta = goal - shoulder;
@@ -18,12 +29,7 @@ struct PullReach {
         const V3 normal = Cross(from, to);
         const float cone = std::acos(std::clamp((radius*radius + distance*distance - reach*reach) /
                                                 (2*radius*distance), -1.f, 1.f));
-        const float half = .5f * std::clamp(std::atan2(Len(normal), Dot(from, to)) - cone, 0.f, limit);
-        // LS3D applies row vectors: a positive quaternion spins X towards -Y about Z.
-        const V3 v = Norm(normal) * -std::sin(half);
-        float m[16];
-        QuatMatrix({std::cos(half), v.x, v.y, v.z}, m);
-        return M3::Raw(m);
+        return Turn(normal, std::clamp(std::atan2(Len(normal), Dot(from, to)) - cone, 0.f, limit));
     }
 
     PullReach(const V3 *pose, const V3 (&contact)[2], float weight) {
@@ -31,9 +37,13 @@ struct PullReach {
         const V3 upper[] = {pose[R::LARM], pose[R::RARM]};
         const V3 elbow[] = {pose[R::LELB], pose[R::RELB]};
         const V3 wrist[] = {pose[R::LHAND], pose[R::RHAND]};
+        const V3 fingers[] = {pose[R::LTIP], pose[R::RTIP]};
         float excess[2];
         for (int i = 0; i < 2; ++i) {
-            goal[i] = wrist[i] + (contact[i] - wrist[i]) * weight;
+            // The hand bears on the body ahead of the wrist joint.
+            palmOffset[i] = Norm(contact[i] - upper[i]) * PalmDepth(wrist[i], fingers[i]);
+            const V3 hold = contact[i] - palmOffset[i];
+            goal[i] = wrist[i] + (hold - wrist[i]) * weight;
             reach[i] = Len(wrist[i]-elbow[i]) + Len(elbow[i]-upper[i]) - .004f;
             excess[i] = Len(goal[i]-upper[i]) - reach[i];
         }

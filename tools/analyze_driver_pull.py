@@ -152,19 +152,20 @@ def analyze(trace):
     edge = trace['outer_tyre_x_m']
     if all('cabin_contacts' in row for row in settled):
         result['opposing_cabin_contacts_while_lagging'] = cabin_resistance(settled, edge)
-    def wrist_gap(row):
+    def hand_gap(row):
         points = row.get('grip_contacts', row.get('chest_contacts'))
-        return max(math.dist(w, c) for w, c in zip(row['drawn_wrists'], points))
+        hands = row.get('drawn_palms', row['drawn_wrists'])
+        return max(math.dist(hand, contact) for hand, contact in zip(hands, points))
     drawn = [s for s in held if 'drawn_wrists' in s]
     if drawn:
         before = [s for s in rows if s['t'] < start and 'drawn_wrists' in s]
         result['grasp'] = {
             'part': drawn[0].get('grip_part', 'chest'),
             'drawn_ticks': len(drawn),
-            'before_grasp_m': wrist_gap(before[-1]) if before else None,
-            'first_grasp_m': wrist_gap(drawn[0]),
-            'p95_m': percentile95([wrist_gap(s) for s in drawn]),
-            'max_m': max(wrist_gap(s) for s in drawn),
+            'before_grasp_m': hand_gap(before[-1]) if before else None,
+            'first_grasp_m': hand_gap(drawn[0]),
+            'p95_m': percentile95([hand_gap(s) for s in drawn]),
+            'max_m': max(hand_gap(s) for s in drawn),
         }
         if result['grasp']['part'] == 'chest':
             result['chest_grip'] = result['grasp']

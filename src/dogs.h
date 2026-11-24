@@ -16,7 +16,7 @@ void Bullet(const MmlBulletHit &hit);
 unsigned Blast(V3 centre,float radius,float speed,float lift);
 std::size_t AppendShotExclusions(void **objects,std::size_t count,std::size_t capacity);
 bool TraceShot(V3 from,V3 axis,float limit,ShotHit &hit);
-void HitBody(const ShotHit &hit,V3 direction,float strength,float damage,void *shooter);
+void HitBody(const ShotHit &hit,V3 direction,float damage,void *shooter);
 void DrawPose();
 void RestorePose();
 void Forget(void *actor);

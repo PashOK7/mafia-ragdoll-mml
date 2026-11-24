@@ -101,7 +101,7 @@ def check(game):
                 result = tracked()
             assert result['corpse_hits'] == 1 and result['last_hit_part'], result
             assert not result['sleeping'] and result['max_speed'] > .05, result
-            assert abs(result['last_shot_impulse']-31.8) < .01, result
+            assert abs(result['last_shot_impulse']-47.7) < .01, result
             assert result['blood_effects'] == int(gore > 0), result
             time.sleep(.25)
             assert ground_impacts() == 1 and tracked()['corpse_hits'] == 1, tracked()
@@ -148,7 +148,7 @@ def check(game):
         events=game.call('events.since', seq=seq, types='SHOT')['events']
         assert any(ev['data']['shots']==8 for ev in events), events
         assert 4 <= result['corpse_hits'] - corpse['corpse_hits'] <= 8, result
-        assert not result['sleeping'] and 25 <= result['last_shot_impulse'] <= 36, result
+        assert not result['sleeping'] and 37.5 <= result['last_shot_impulse'] <= 54, result
         print(game.build, 'native close-range pellet queue reached the corpse:', result)
 
     name = f'ragdoll_pes_{os.getpid()}'
@@ -201,7 +201,7 @@ def check(game):
             time.sleep(.08)
         result = wait_for_active()
         assert read(int(actor, 16) + 0xD0, 'f') < 0
-        assert 34.7 < result['last_shot_impulse'] <= 36, result
+        assert abs(result['last_shot_impulse']-54) < .01, result
         hits = game.call('events.since', seq=seq, types='BULLET_HIT')['events']
         assert any(hit['data'].get('struck') == actor for hit in hits), hits
         print(game.build, 'shot', result)

@@ -305,35 +305,31 @@ static const int kBodyPoints[Ragdoll::BCOUNT][2] = {
     {Ragdoll::LELB, Ragdoll::LTIP}, {Ragdoll::RHIP, Ragdoll::RKNEE}, {Ragdoll::RKNEE, Ragdoll::RANKLE}, {Ragdoll::RANKLE, Ragdoll::RTOE},
     {Ragdoll::LHIP, Ragdoll::LKNEE}, {Ragdoll::LKNEE, Ragdoll::LANKLE}, {Ragdoll::LANKLE, Ragdoll::LTOE}};
 
-// Gives every body the motion the animation had: linear velocity from the move of its capsule centre and
-// angular velocity from the turn of its axis, between an earlier pose and the start pose.
-void Ragdoll::SetMotionFrom(const V3 *prevWorld, float dt, const V3 *rootVelocity) {
+// Carry native translation and add relative limb motion from a valid animation interval.
+// The geometry at the hit can be newer than the last complete interval.
+void Ragdoll::SetMotionFrom(const V3 &rootVelocity, const V3 *prevWorld, float dt, const V3 *motionEnd) {
     if (!prevWorld || dt <= 1e-4f) {
-        if (rootVelocity) for (Body &b : body) b.v = *rootVelocity;
+        for (Body &b : body) b.v = rootVelocity;
         return;
     }
     V3 momentum{};
     float mass = 0;
+    const V3 *end = motionEnd ? motionEnd : initPos;
     for (int b = 0; b < BCOUNT; b++) {
         int i = kBodyPoints[b][0], j = kBodyPoints[b][1];
-        V3 c0 = (prevWorld[i] + prevWorld[j]) * 0.5f, c1 = (initPos[i] + initPos[j]) * 0.5f;
+        V3 c0 = (prevWorld[i] + prevWorld[j]) * 0.5f, c1 = (end[i] + end[j]) * 0.5f;
         V3 v = (c1 - c0) * (1.0f / dt);
-        V3 a0 = Norm(prevWorld[j] - prevWorld[i]), a1 = Norm(initPos[j] - initPos[i]);
+        V3 a0 = Norm(prevWorld[j] - prevWorld[i]), a1 = Norm(end[j] - end[i]);
         V3 axis = Cross(a0, a1);
         float s = Len(axis), c = Dot(a0, a1);
         V3 w = s > 1e-6f ? axis * (std::atan2(s, c) / s / dt) : V3{0, 0, 0};
-        // A pose snap (animation cut, teleport) must not fling the body.
-        float vl = Len(v), wl = Len(w);
-        if (!rootVelocity && vl > 12.0f) v = v * (12.0f / vl);
+        const float wl = Len(w);
         if (wl > 20.0f) w = w * (20.0f / wl);
         body[b].v = v;
         body[b].w = w;
-        if (rootVelocity) {
-            momentum += v * SegmentMass[b];
-            mass += SegmentMass[b];
-        }
+        momentum += v * SegmentMass[b];
+        mass += SegmentMass[b];
     }
-    if (!rootVelocity) return;
     // Animation can swing the limbs without giving the whole body a push. Only native locomotion supplies
     // centre-of-mass velocity. Scale relative speeds together to keep their net momentum at zero.
     const V3 mean = momentum * (1.0f / mass);
@@ -342,7 +338,7 @@ void Ragdoll::SetMotionFrom(const V3 *prevWorld, float dt, const V3 *rootVelocit
         b.v -= mean;
         fastest = std::max(fastest, Len(b.v));
     }
-    for (Body &b : body) b.v = *rootVelocity + b.v * (12.0f / fastest);
+    for (Body &b : body) b.v = rootVelocity + b.v * (12.0f / fastest);
 }
 
 V3 Ragdoll::ClosestToLine(const V3 &a, const V3 &b) const {
