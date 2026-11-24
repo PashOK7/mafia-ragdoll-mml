@@ -1115,3 +1115,7 @@ The obstruction query covers the upper body over the seat cushion through to the
 ## 2026-11-23 — Recheck the native entry while the seat is reserved (0.1.59)
 
 The obstruction query runs on the resolved car at the native entry branch. A body that enters the path while Tommy is climbing in invalidates the reservation before the native finish. The engine's on-foot finalizer restores Tommy's interaction state, and the original action resumes from his approach point. The Falconer replay verifies both a body present at Action and a body arriving during the entry animation on 1.0 and 1.2.
+
+## 2026-11-24 — Player archive validation (0.1.59)
+
+Both labs passed 16 extraction assertions each after installing the combined archive into an empty mod layout and again after upgrading only the ragdoll in the public v0.1.10 bundle. The older host also passed the Falconer late-arrival replay in both builds. The four standalone fixtures passed. The two archives contain the same ragdoll DLL used for the seat regressions. The [release notes](RELEASE-0.1.59.md) identify the tested upgrade and the SDK patch for source builds.

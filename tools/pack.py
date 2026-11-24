@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/x86/out/mml/mods/ragdoll'
 # Pin the baseline at packaging time. The installed mod negotiates services through the SDK.
-TESTED_BASE = '4b64ec657da0d98352c3f1c40785a3bb1baf858cf743dc750729b82bfc144a94'
+TESTED_BASE = 'fc9549b830f17399511ffd0e7039b0008fd6bd3b929e01e824250b270426046d'
 # MML 0.1's public packaging tool lists the same tested host at the game root.
 TESTED_ROOT_LAYOUT = 'd70fff2e2392d9551e1a6e555d937155aec3668c83a262e9374c16e4167b56d5'
 
